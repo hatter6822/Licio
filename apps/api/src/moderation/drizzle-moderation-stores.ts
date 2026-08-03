@@ -188,6 +188,9 @@ function mapAudit(row: typeof moderationAudit.$inferSelect): ModerationAuditReco
     reportIds: row.reportIds,
     coApproverUserId: row.coApproverUserId,
     notes: row.notes,
+    // PROJECTED, because the MAC covers it: a verifier that never reads the
+    // key cannot notice one being cleared.
+    idempotencyKey: row.idempotencyKey,
     createdAt: iso(row.createdAt),
   };
 }
@@ -1471,20 +1474,24 @@ export class DrizzleModerationNoticeStore implements ModerationNoticeStore {
 
   async listByUser(
     userId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly noticeId: string } | null,
     limit: number,
   ): Promise<ModerationNoticeRecord[]> {
     const c: SQL[] = [eq(moderationNotices.userId, userId)];
-    if (afterCreatedAt !== null) {
+    if (after !== null) {
+      // A ROW COMPARISON, not a timestamp: several inserts in one transaction
+      // share a `now()`, and `created_at < cursor` then skips every row tied
+      // with the last one on the page — silently, and in an export that calls
+      // itself complete.
       c.push(
-        sql`${moderationNotices.createdAt} < ${new Date(afterCreatedAt).toISOString()}::timestamptz`,
+        sql`(${moderationNotices.createdAt}, ${moderationNotices.noticeId}) < (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.noticeId}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(moderationNotices)
       .where(and(...c))
-      .orderBy(desc(moderationNotices.createdAt))
+      .orderBy(desc(moderationNotices.createdAt), desc(moderationNotices.noticeId))
       .limit(Math.max(0, limit));
     return rows.map(mapNotice);
   }

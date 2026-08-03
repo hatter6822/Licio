@@ -155,16 +155,31 @@ export function noticeToView(record: ModerationNoticeRecord): ModerationNoticeVi
   };
 }
 
-/** Build the inbox response (newest first, keyset by createdAt). */
+/**
+ * Build the inbox response (newest first, keyset by `(createdAt, noticeId)`).
+ *
+ * The wire cursor carries BOTH halves — `<iso>|<uuid>` — because a timestamp
+ * alone skips every row tied with the last one on the page, and several notices
+ * written in one transaction share a `now()`. A cursor that cannot be read is
+ * treated as no cursor: this is an authenticated inbox read, and the page it
+ * would otherwise 500 on is the first one anyway.
+ */
 export async function listNotices(
   services: ModerationServices,
   userId: string,
-  afterCreatedAt: string | null,
+  cursor: string | null,
   limit: number,
 ): Promise<ModerationNoticeListResponse> {
-  const records = await services.notices.listByUser(userId, afterCreatedAt, limit + 1);
+  const at = cursor === null ? -1 : cursor.indexOf('|');
+  const after =
+    cursor !== null && at > 0
+      ? { createdAt: cursor.slice(0, at), noticeId: cursor.slice(at + 1) }
+      : null;
+  const records = await services.notices.listByUser(userId, after, limit + 1);
   const page = records.slice(0, limit);
-  const nextCursor = records.length > limit ? (page.at(-1)?.createdAt ?? null) : null;
+  const last = page.at(-1);
+  const nextCursor =
+    records.length > limit && last !== undefined ? `${last.createdAt}|${last.noticeId}` : null;
   return {
     notices: page.map(noticeToView),
     next_cursor: nextCursor,

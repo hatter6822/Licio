@@ -58,6 +58,18 @@ export function computeAuditEntryHash(
     ref(entry.actorUserId),
     ref(entry.subjectUserId),
     ref(entry.coApproverUserId),
+    // The AT-MOST-ONCE key, and only when the row carries one.
+    //
+    // It is what the one-evidence-per-case guarantee rests on, so under this
+    // chain's own threat model — a superuser or a doctored restore — leaving it
+    // out means the key can be nulled and a second evidence row appended while
+    // `verifyAuditChain` still reports the trail valid.
+    //
+    // APPENDED CONDITIONALLY so the change is backwards compatible: a row
+    // without a key hashes exactly the bytes it always did, so every existing
+    // entry still verifies. A keyed row whose key is later cleared no longer
+    // recomputes to its stored hash, which is the detection this adds.
+    ...(entry.idempotencyKey == null ? [] : [`idem:${entry.idempotencyKey}`]),
   ].join('\n');
   return `0x${createHmac('sha256', key).update(preimage, 'utf8').digest('hex')}`;
 }

@@ -428,7 +428,19 @@ describe('InMemoryModerationNoticeStore', () => {
     expect(await store.unreadCount(A)).toBe(2);
     const all = await store.listByUser(A, null, 10);
     expect(all.length).toBe(2);
-    expect((await store.listByUser(A, all[0]?.createdAt ?? null, 10)).length).toBe(1);
+    // The cursor is `(createdAt, noticeId)`: a timestamp alone skips every row
+    // tied with the last one on the page, which is how an export that calls
+    // itself complete drops notices.
+    const first = all[0];
+    expect(
+      (
+        await store.listByUser(
+          A,
+          first ? { createdAt: first.createdAt, noticeId: first.noticeId } : null,
+          10,
+        )
+      ).length,
+    ).toBe(1);
     expect(await store.markRead(n1.noticeId, B, new Date(START).toISOString())).toBe(false); // not owner
     expect(await store.markRead(n1.noticeId, A, new Date(START).toISOString())).toBe(true);
     expect(await store.markRead(n1.noticeId, A, new Date(START).toISOString())).toBe(true); // idempotent

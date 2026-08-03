@@ -7,6 +7,7 @@
 import { AUDIT_NOTES_MAX, auditRecordViewSchema } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { writeAudit } from '../moderation/audit.js';
+import { computeAuditEntryHash } from '../moderation/audit-chain.js';
 import type { StewardActor } from '../moderation/authz.js';
 import type {
   ContentSnapshot,
@@ -437,6 +438,37 @@ describe('buildCaseReview (snapshot + thread + side-by-side)', () => {
     expect(review?.reported_contribution_id).toBe('rc-1');
     expect(review?.available_actions).toContain('remove');
     expect(await buildCaseReview(services, SAFETY, 'missing')).toBeNull();
+  });
+
+  it('MACs the at-most-once key, so clearing it breaks the chain', async () => {
+    // The key is what the one-evidence-per-case guarantee rests on, and this
+    // chain's threat model is a superuser or a doctored restore — so a key that
+    // is not in the preimage can be nulled, a second evidence row appended, and
+    // `verifyAuditChain` still reports the trail valid.
+    const caseId = await insertCase({ caseId: 'eeeeeeee-0000-4000-9000-0000000000ac' });
+    const written = await writeAudit(services, {
+      actorUserId: null,
+      actorRole: null,
+      action: 'private_room_listing_reported',
+      targetType: 'private_room_stub',
+      targetId: '00000000-0000-4000-8000-0000000000ac',
+      caseId,
+      reversible: false,
+      notes: 'evidence',
+      idempotencyKey: `listing-evidence:${caseId}`,
+    });
+    expect(written).not.toBeNull();
+
+    const [row] = await services.audit.list({ caseId, limit: 1 });
+    if (!row) throw new Error('no audit row');
+    const key = services.auditChain.key;
+    const refOf = services.auditChain.refOf;
+    // As stored, it verifies…
+    expect(computeAuditEntryHash(row, key, refOf)).toBe(row.integrityHash);
+    // …and with the key cleared, it does not.
+    expect(computeAuditEntryHash({ ...row, idempotencyKey: null }, key, refOf)).not.toBe(
+      row.integrityHash,
+    );
   });
 
   it('appends an AT-MOST-ONCE row once, however many writers try', async () => {

@@ -120,13 +120,18 @@ export function installDataRightsHooks(identity: IdentityServices, deps: DataRig
   // only), and the paging is what makes the export complete.
   identity.exportModerationNotices = async (userId) => {
     const out: unknown[] = [];
-    let after: string | null = null;
+    // `(createdAt, noticeId)`, not a timestamp: Postgres stamps several inserts
+    // in one transaction with the same `now()`, and a timestamp-only cursor then
+    // skips every row tied with the last one on the page — in the one place a
+    // skipped row is a compliance failure rather than a display bug.
+    let after: { createdAt: string; noticeId: string } | null = null;
     for (;;) {
       const page = await moderation.notices.listByUser(userId, after, NOTICE_PAGE);
       for (const notice of page) out.push(noticeToView(notice));
       if (page.length < NOTICE_PAGE) break;
-      after = page[page.length - 1]?.createdAt ?? null;
-      if (after === null) break;
+      const last = page[page.length - 1];
+      if (last === undefined) break;
+      after = { createdAt: last.createdAt, noticeId: last.noticeId };
     }
     return out;
   };

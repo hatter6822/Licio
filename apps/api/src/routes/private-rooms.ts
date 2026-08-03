@@ -51,6 +51,16 @@ import {
  */
 const MAX_BODY_BYTES = 32 * 1024;
 
+/** The supplied `case_id` no longer names an OPEN case about this room — so the
+ *  staff remedy must not commit. Thrown inside the unit so the demotion rolls
+ *  back with it. */
+class StaleDelistCaseError extends Error {
+  constructor() {
+    super('the supplied case is not open for this room');
+    this.name = 'StaleDelistCaseError';
+  }
+}
+
 /** Sentinel for an over-cap body (distinct from a malformed/empty `undefined`). */
 const TOO_LARGE = Symbol('too_large');
 
@@ -533,51 +543,68 @@ export function createPrivateRoomsRoutes() {
       // settings is unchanged.
       if (staff && (!owner || caseId !== undefined)) {
         const mod = getModerationServices();
-        const demoted = await mod.transactor.run(async (tx) => {
-          if (!(await tx.delistListedRoom(params.data.roomServerId))) return false;
-          // RESOLVE the case in the same unit, when the delist came from one.
-          //
-          // Without it the remedy ran and the case stayed `new`: back in the
-          // queue, with a case-scoped history that does not mention the
-          // enforcement. The case transition, the demotion and the audit row are
-          // one fact about one action, so they commit together.
-          // Only a case ABOUT THIS ROOM — and the VALIDATED id is the only one
-          // used afterwards. Declining to resolve a mismatched case while still
-          // stamping the audit row with its id would print an enforcement
-          // against another room into that case's history, permanently, while
-          // the intended case stayed open.
-          // …and only while it is still OPEN. `resolveIfOpen` carries the whole
-          // precondition — this case, about THIS room, not yet resolved — into
-          // one conditional write, so a case another reviewer closed a moment
-          // ago is neither reopened-and-reclosed nor stripped of the
-          // `resolvedActionId` link to the enforcement that actually closed it.
-          // Its history keeps the remedy that resolved it rather than gaining a
-          // later, unrelated one presented as the resolution — which is also
-          // why a non-match takes the audit's `case_id` with it.
-          let matchedCase: string | undefined;
-          if (caseId !== undefined) {
-            const resolved = await tx.cases.resolveIfOpen(caseId, {
-              targetType: 'room',
+        const demoted = await mod.transactor
+          .run(async (tx) => {
+            if (!(await tx.delistListedRoom(params.data.roomServerId))) return false;
+            // RESOLVE the case in the same unit, when the delist came from one.
+            //
+            // Without it the remedy ran and the case stayed `new`: back in the
+            // queue, with a case-scoped history that does not mention the
+            // enforcement. The case transition, the demotion and the audit row are
+            // one fact about one action, so they commit together.
+            // Only a case ABOUT THIS ROOM — and the VALIDATED id is the only one
+            // used afterwards. Declining to resolve a mismatched case while still
+            // stamping the audit row with its id would print an enforcement
+            // against another room into that case's history, permanently, while
+            // the intended case stayed open.
+            // …and only while it is still OPEN. `resolveIfOpen` carries the whole
+            // precondition — this case, about THIS room, not yet resolved — into
+            // one conditional write, so a case another reviewer closed a moment
+            // ago is neither reopened-and-reclosed nor stripped of the
+            // `resolvedActionId` link to the enforcement that actually closed it.
+            // Its history keeps the remedy that resolved it rather than gaining a
+            // later, unrelated one presented as the resolution — which is also
+            // why a non-match takes the audit's `case_id` with it.
+            let matchedCase: string | undefined;
+            if (caseId !== undefined) {
+              const resolved = await tx.cases.resolveIfOpen(caseId, {
+                targetType: 'room',
+                targetId: params.data.roomServerId,
+              });
+              if (resolved !== null) matchedCase = caseId;
+            }
+            await tx.audit({
+              actorUserId: auth.userId,
+              // The doctrine-steward roles do not cover this: §11.4 gives the
+              // power to platform staff as such, not to a safety/appeals lane.
+              actorRole: null,
+              action: 'private_room_stub_delisted',
+              targetType: 'private_room_stub',
               targetId: params.data.roomServerId,
+              priorState: 'listed',
+              nextState: 'unlisted',
+              reversible: false,
+              ...(matchedCase !== undefined ? { caseId: matchedCase } : {}),
+              notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
             });
-            if (resolved !== null) matchedCase = caseId;
-          }
-          await tx.audit({
-            actorUserId: auth.userId,
-            // The doctrine-steward roles do not cover this: §11.4 gives the
-            // power to platform staff as such, not to a safety/appeals lane.
-            actorRole: null,
-            action: 'private_room_stub_delisted',
-            targetType: 'private_room_stub',
-            targetId: params.data.roomServerId,
-            priorState: 'listed',
-            nextState: 'unlisted',
-            reversible: false,
-            ...(matchedCase !== undefined ? { caseId: matchedCase } : {}),
-            notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
+            return true;
+          })
+          .catch((error: unknown) => {
+            if (error instanceof StaleDelistCaseError) return 'stale_case' as const;
+            throw error;
           });
-          return true;
-        });
+        if (demoted === 'stale_case') {
+          return c.json(
+            {
+              error: {
+                code: 'case_not_open',
+                message:
+                  'That case is no longer open, or is not about this room. Reload the case before delisting.',
+              },
+            },
+            409,
+          );
+        }
         if (demoted) {
           // A CONFIRMATION, not a projection. The record is `unlisted` now, so
           // staff hold no capability for it — §11.4 gives them power over the

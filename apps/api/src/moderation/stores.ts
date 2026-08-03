@@ -565,9 +565,19 @@ export interface ModerationNoticeStore {
   insert(
     record: Omit<ModerationNoticeRecord, 'noticeId' | 'createdAt'>,
   ): Promise<ModerationNoticeRecord>;
+  /**
+   * One page of a user's notices, newest first.
+   *
+   * The cursor is `(createdAt, noticeId)`, not a timestamp alone: Postgres can
+   * stamp several inserts in one transaction with the SAME `now()`, so a
+   * timestamp-only `created_at < cursor` skips every row tied with the last one
+   * on the page. The DSAR export loops this to completion and calls the result
+   * complete, which is where a silently dropped notice stops being a display
+   * bug and becomes a compliance one (§19.3 / GDPR Art. 15).
+   */
   listByUser(
     userId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly noticeId: string } | null,
     limit: number,
   ): Promise<ModerationNoticeRecord[]>;
   markRead(noticeId: string, userId: string, nowIso: string): Promise<boolean>;
@@ -1466,15 +1476,23 @@ export class InMemoryModerationNoticeStore implements ModerationNoticeStore, InM
   }
   async listByUser(
     userId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly noticeId: string } | null,
     limit: number,
   ): Promise<ModerationNoticeRecord[]> {
+    // The SAME total order the SQL twin pages by — `(createdAt, noticeId)`
+    // descending — so a tie at a page boundary is resumed rather than skipped.
     const rows = [...this.#rows.values()]
       .filter((r) => r.userId === userId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return afterCreated(rows, afterCreatedAt)
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
+      .sort(
+        (a, b) => b.createdAt.localeCompare(a.createdAt) || b.noticeId.localeCompare(a.noticeId),
+      )
+      .filter(
+        (r) =>
+          after === null ||
+          r.createdAt < after.createdAt ||
+          (r.createdAt === after.createdAt && r.noticeId < after.noticeId),
+      );
+    return rows.slice(0, limit).map((r) => ({ ...r }));
   }
   async markRead(noticeId: string, userId: string, nowIso: string): Promise<boolean> {
     const r = this.#rows.get(noticeId);

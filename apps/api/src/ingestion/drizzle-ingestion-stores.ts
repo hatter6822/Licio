@@ -512,11 +512,21 @@ export class DrizzleStoryStore implements StoryStore {
   async getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>> {
     const out = new Map<string, ThreadShellRecord>();
     if (storyIds.length === 0) return out;
+    // ONE branch per story, chosen DETERMINISTICALLY.
+    //
+    // A story may retain several thread branches (`(story_id, branch_index)` is
+    // the unique, not `story_id`), and folding unordered rows into one map entry
+    // by overwriting picks whichever Postgres returned last: the Civic Map could
+    // then target an archived branch and suppress a bridge the writable branch
+    // would have accepted, or pick differently across two identical reads.
+    // Branch 0 is the story's original conversation, and it is the same answer
+    // every time.
     const rows = await this.#db
       .select()
       .from(threadsTable)
-      .where(inArray(threadsTable.storyId, [...storyIds]));
-    for (const row of rows) out.set(row.storyId, this.#toThread(row));
+      .where(inArray(threadsTable.storyId, [...storyIds]))
+      .orderBy(asc(threadsTable.storyId), asc(threadsTable.branchIndex));
+    for (const row of rows) if (!out.has(row.storyId)) out.set(row.storyId, this.#toThread(row));
     return out;
   }
 

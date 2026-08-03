@@ -22,6 +22,7 @@ import {
 } from '@licio/shared';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
+import { getModerationServices } from '../moderation/services.js';
 import { PrivateRoomStubService, setPrivateRoomStubService } from '../private-rooms/service.js';
 import {
   forbiddenSignedStubKeys,
@@ -1023,6 +1024,46 @@ describe('registration proves POSSESSION of the room key', () => {
       ok: false,
       reason: 'signature_invalid',
     });
+  });
+});
+
+describe('the staff delist is bound to the case it names', () => {
+  it('rolls the demotion BACK when the supplied case is not open for this room', async () => {
+    // The demotion runs first inside the unit, and §21.3 does not make the mode
+    // patchable back — so a stale console click (another reviewer resolved the
+    // case, or the id names a different room) would otherwise apply the
+    // irreversible remedy and commit an unscoped audit row for it.
+    const store = new InMemoryPrivateRoomStubStore();
+    const svc = new PrivateRoomStubService(store);
+    setPrivateRoomStubService(svc);
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const mod = getModerationServices();
+    // The unit can only undo what it knows about — the same registration the
+    // composition roots make.
+    mod.registerRollback(store);
+    mod.delistListedRoom = async (roomServerId: string) =>
+      (await svc.delistListed(roomServerId)) !== null;
+    mod.isPubliclyListedRoom = async (roomServerId: string) =>
+      await svc.isPubliclyListed(roomServerId);
+
+    const staleCase = randomUUID();
+    const refused = await mod.transactor
+      .run(async (tx) => {
+        await tx.delistListedRoom?.(created.value.room_server_id);
+        const resolved = await tx.cases.resolveIfOpen(staleCase, {
+          targetType: 'room',
+          targetId: created.value.room_server_id,
+        });
+        if (resolved === null) throw new Error('stale case');
+        return true;
+      })
+      .catch(() => false);
+
+    expect(refused).toBe(false);
+    // The record is STILL listed: the unit rolled the demotion back with the
+    // refusal, rather than leaving the remedy applied without its case.
+    expect(await svc.isPubliclyListed(created.value.room_server_id)).toBe(true);
   });
 });
 
