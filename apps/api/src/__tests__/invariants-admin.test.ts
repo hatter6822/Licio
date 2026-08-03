@@ -52,6 +52,29 @@ describe('steward gating', () => {
   });
 });
 
+describe('reeb/landscape — the Civic Map (WS-H.7.4)', () => {
+  it('is steward-gated like every other route on this surface', async () => {
+    const fixture = freshInvariantServices();
+    const anonymous = await app().request('http://local/v1/invariants/admin/reeb/landscape');
+    expect(anonymous.status).toBe(401);
+    const user = await seedUserWithSession(fixture.identity);
+    const nonSteward = await adminRequest(fixture, user.cookie, '/reeb/landscape');
+    expect(nonSteward.status).toBe(403);
+  });
+
+  it('answers 200 with an explicit null when there is nothing to map', async () => {
+    // A quiet window is a REAL state, not a 404: a steward has to be able to
+    // tell "nothing happened this hour" apart from "the endpoint is broken".
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const response = await adminRequest(fixture, steward.cookie, '/reeb/landscape');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { landscape: unknown };
+    expect(body).toHaveProperty('landscape');
+    expect(body.landscape).toBe(null);
+  });
+});
+
 describe('health + outputs + comparison', () => {
   it('reports all twelve invariants with cards, tiers, and shadow status', async () => {
     const fixture = freshInvariantServices();
