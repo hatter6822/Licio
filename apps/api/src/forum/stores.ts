@@ -25,6 +25,7 @@ import type {
   RoomVisibility,
 } from '@licio/shared';
 import { COMMONS_ROOM_ID, COMMONS_SLUG } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 // ---------------------------------------------------------------------------
 // Records (storage shape; ISO timestamps on this side of the boundary).
@@ -1176,10 +1177,24 @@ export class InMemoryContributionStore implements ContributionStore {
   }
 }
 
-export class InMemoryRoomStore implements RoomStore {
+export class InMemoryRoomStore implements RoomStore, InMemoryRollback {
   readonly #rooms = new Map<string, RoomRecord>();
   readonly #stewards: RoomStewardRecord[] = [];
   readonly #subscriptions = new Map<string, RoomSubscriptionRecord>();
+
+  /** The unit of work's undo — a room-lifecycle change commits with the
+   *  identity record of it, so a failed record must leave no room behind. */
+  beginRollback(): () => void {
+    const rooms = mapRollback(this.#rooms);
+    const subscriptions = mapRollback(this.#subscriptions);
+    const stewards = [...this.#stewards];
+    return () => {
+      rooms();
+      subscriptions();
+      this.#stewards.length = 0;
+      this.#stewards.push(...stewards);
+    };
+  }
   readonly #now: Clock;
 
   constructor(now: Clock = Date.now) {

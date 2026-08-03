@@ -118,18 +118,23 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           // isReplayedStep check is needed here, only the high-water-mark write).
           await services.otp.set(usedStepKey(auth.userId), String(result.step), MFA_STEP_MEMORY_MS);
           const recoveryCodes = generateRecoveryCodes();
-          await services.store.setAuth(auth.userId, {
-            mfaEnabled: true,
-            mfaPending: false,
-            mfaEnrolledAt: new Date().toISOString(),
-            recoveryCodeHashes: recoveryCodes.map(hashRecoveryCode),
+          // Enrolling MFA and recording it are one fact: an append failure would
+          // leave a second factor active with nothing in the trail — and this is
+          // the trail a compromised-account investigation reads first.
+          await services.transact(async (tx) => {
+            await tx.store.setAuth(auth.userId, {
+              mfaEnabled: true,
+              mfaPending: false,
+              mfaEnrolledAt: new Date().toISOString(),
+              recoveryCodeHashes: recoveryCodes.map(hashRecoveryCode),
+            });
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'mfa_enroll',
+              context: {},
+            });
           });
           await services.otp.delete(attemptsKey(auth.userId));
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'mfa_enroll',
-            context: {},
-          });
           // The enrolling session is now MFA-verified; rotate on the privilege change.
           await markMfaVerified(services.sessions, auth.tokenHash);
           const token = readSessionToken(c.req.header('cookie'));
@@ -199,10 +204,14 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
             });
           }
 
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'mfa_verify',
-            context: {},
+          // A recovery code was CONSUMED above (a durable write), so its record
+          // commits with it.
+          await services.transact(async (tx) => {
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'mfa_verify',
+              context: {},
+            });
           });
           return c.json(err('invalid_code', 'Invalid code.'), 400);
         },
@@ -221,17 +230,21 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
         if ((await services.store.getAuth(auth.userId))?.mfaEnabled && !auth.mfaVerified) {
           return c.json(err('mfa_reverify_required', 'Verify your current code first.'), 403);
         }
-        await services.store.setAuth(auth.userId, {
-          mfaEnabled: false,
-          mfaPending: false,
-          mfaSecret: null,
-          mfaEnrolledAt: null,
-          recoveryCodeHashes: [],
-        });
-        await services.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'mfa_disable',
-          context: {},
+        // Removing a factor is the change an investigation most wants a record
+        // of, so the two commit together.
+        await services.transact(async (tx) => {
+          await tx.store.setAuth(auth.userId, {
+            mfaEnabled: false,
+            mfaPending: false,
+            mfaSecret: null,
+            mfaEnrolledAt: null,
+            recoveryCodeHashes: [],
+          });
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'mfa_disable',
+            context: {},
+          });
         });
         const token = readSessionToken(c.req.header('cookie'));
         const rotated = token ? await rotateSession(services.sessions, token) : null;
@@ -258,9 +271,15 @@ async function finishMfa(
   tokenHash: string,
   c: Context<AuthEnv>,
 ): Promise<void> {
-  await markMfaVerified(services.sessions, tokenHash);
+  // The session flag lives in Redis and cannot join a Postgres transaction, so
+  // the RECORD gates the change: it is appended first, inside the unit, and the
+  // flag is set inside it too — a failed `markMfaVerified` aborts the record
+  // rather than leaving a verified session nothing accounts for.
+  await services.transact(async (tx) => {
+    await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
+    await markMfaVerified(services.sessions, tokenHash);
+  });
   await services.otp.delete(attemptsKey(userId));
-  await services.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
   const token = readSessionToken(c.req.header('cookie'));
   const rotated = token ? await rotateSession(services.sessions, token) : null;
   if (rotated) {

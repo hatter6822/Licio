@@ -11,6 +11,7 @@
 // the four methods behind every shipped fund-moving gate — replacing
 // `defaultCompliancePort` (WS-N.1.1c/2.2a/2.2b/2.2e).  Every closure default
 // here is FAIL-CLOSED: unknown age, unknown region, flags off, no provider.
+
 import { createHash, randomUUID } from 'node:crypto';
 import {
   type AgeBand,
@@ -20,6 +21,8 @@ import {
   TOPIC_REGISTRY,
 } from '@licio/shared';
 import { InMemoryPwattConfigStore, type PwattConfigStore } from '../events/stores.js';
+import { type AuditStore, InMemoryAuditStore } from '../identity/audit.js';
+import { getIdentityServices } from '../identity/services.js';
 import type { CompliancePort } from '../knomosis/ports.js';
 import { runChainedUnit } from './audit.js';
 import { announceCaseCreated, type CaseDeps, createCaseInTx } from './cases.js';
@@ -201,12 +204,43 @@ export function createInMemoryComplianceServices(
   const policyAudit = new InMemoryPolicyAuditStore();
   const lawfulAccess = new InMemoryLawfulAccessStore();
   const pins = new InMemoryWalletRiskPinStore();
+  const declarations = new InMemoryRegionDeclarationStore();
+  const kyc = new InMemoryKycVerificationStore();
   // The in-memory transactor gives dev/tests the SAME all-or-nothing semantics
   // Postgres gives production (the house rule: the in-memory adapters emulate
   // every DB protection, and a transaction is one).
+  // The WS-D trail is read from the identity container at RUN time, so the
+  // production boot's swap to the Drizzle adapter is honoured — and so a
+  // compliance change and the identity record of it are one unit even in dev.
   const transactor = new InMemoryComplianceTransactor(
-    { cases, caseAudit, policies, policyAudit, sars, lawfulAccess, pins },
-    [cases, caseAudit, policies, policyAudit, sars, lawfulAccess, pins],
+    {
+      cases,
+      caseAudit,
+      policies,
+      policyAudit,
+      sars,
+      lawfulAccess,
+      pins,
+      declarations,
+      kyc,
+      get identityAudit(): AuditStore {
+        return getIdentityServices().audit;
+      },
+    },
+    () => [
+      cases,
+      caseAudit,
+      policies,
+      policyAudit,
+      sars,
+      lawfulAccess,
+      pins,
+      declarations,
+      kyc,
+      ...(getIdentityServices().audit instanceof InMemoryAuditStore
+        ? [getIdentityServices().audit as unknown as InMemoryAuditStore]
+        : []),
+    ],
   );
 
   const services: ComplianceServices = {
@@ -214,8 +248,8 @@ export function createInMemoryComplianceServices(
     policyAudit,
     cases,
     caseAudit,
-    declarations: new InMemoryRegionDeclarationStore(),
-    kyc: new InMemoryKycVerificationStore(),
+    declarations,
+    kyc,
     disclosures: new InMemoryDisclosureStore(),
     acks: new InMemoryDisclosureAckStore(),
     pins,

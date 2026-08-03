@@ -685,25 +685,32 @@ option).  The bridge-request endpoint is what made the cost concrete: an audit
 failure answered 500 with a live request behind it, the map then withheld the
 target, and every retry answered `already_open`.
 
-**29 handlers across 9 route files predate the gate.**  Each is allowlisted in
-`scripts/check-audited-writes.ts` with its reason; they are debt rather than
-design, and they close one DOMAIN SEAM at a time — a per-domain transactor, in
-its own PR, in this order:
+**CLOSED — the 29 handlers that predated the gate are converted, and the gate
+has no allowlist.**  It briefly did, holding all 29 with a per-domain schedule
+written here.  That was the wrong shape twice over: a rule with an exemption
+list reads to the next author as optional, and a schedule is not a guarantee —
+so the exemption went away with the debt rather than outliving it.  The domain
+seams that closed it, each a per-domain unit whose production binding is one
+`db.transaction`:
 
-| Domain | Files | Handlers | What closing it needs |
+| Domain | Files | Handlers | Seam |
 |---|---|---|---|
-| WS-D identity | `auth.ts`, `auth-mfa.ts`, `auth-register.ts`, `auth-credentials.ts`, `privacy.ts` | 17 | An identity transactor binding `store` + `audit`. Highest count and the highest stakes (an MFA/credential change with no record), and the handlers pair SEVERAL store writes — so the unit fixes their mutual atomicity too, which is why binding only the audit first would advertise a guarantee they do not have |
-| WS-N compliance | `compliance.ts` | 4 | A compliance transactor spanning its OWN hash-chained trail and the WS-D audit |
-| WS-F ingestion | `ingestion-admin.ts` | 4 | An ingestion transactor for source/syndication/takedown operator actions |
-| WS-Q rooms | `rooms.ts` | 2 | A room-lifecycle transactor |
-| WS-G forum | `forum.ts` | 1 | Extending the contributions transactor to preference state |
-| WS-H invariants | `invariants-admin.ts` | 1 | `promotionService.apply` accepting a store per call, so the promotion write can bind to the unit's handle (the bridge endpoint in the same file is already inside `invariants.transact`) |
+| WS-D identity | `auth.ts`, `auth-mfa.ts`, `auth-register.ts`, `auth-credentials.ts`, `privacy.ts` | 17 | `IdentityServices.transact` over `IdentityTx { store, audit }`. The highest count and the highest stakes (an MFA/credential change with no record), and the handlers pair SEVERAL store writes — so the unit fixed their mutual atomicity too, which is why binding only the audit would have advertised a guarantee they did not have. Redis-backed side effects (session revoke, `markMfaVerified`) run INSIDE the unit after the append, so a failure aborts the record |
+| WS-N compliance | `compliance.ts` | 5 | `ComplianceTxStores` widened to carry `declarations`, `kyc` and `identityAudit` alongside its own hash-chained trail |
+| WS-F ingestion | `ingestion-admin.ts` | 4 | `IngestionServices.transact` over sources, syndications, takedowns, stories, embeddings + the WS-D audit |
+| WS-Q rooms | `rooms.ts` | 2 | `ForumServices.transact` over `ForumTx { rooms, identityAudit }` |
+| WS-G forum | `forum.ts` | 1 | The same forum unit, extended to preference state |
+| WS-H invariants | `invariants-admin.ts` | 1 | `promotionServiceOver(store)` — the promotion service now takes its store per call, so the write binds to the unit's handle (the bridge endpoint in the same file was already inside `invariants.transact`) |
 
-The seam itself is domain-agnostic and already shipped:
-`apps/api/src/lib/in-memory-unit-of-work.ts` (atomicity + isolation for the
-in-memory twins) plus a per-domain transactor whose production binding is one
-`db.transaction`.  WS-J and WS-H (`InvariantPlatformServices.transact`) are the
-two worked examples.
+The seam itself is domain-agnostic: `apps/api/src/lib/in-memory-unit-of-work.ts`
+(atomicity + isolation for the in-memory twins, re-entrancy via AsyncLocalStorage)
+plus `in-memory-rollback.ts` for the per-store undo, with each production
+transactor a single `db.transaction` in `apps/api/src/index.ts`.  WS-J's
+`ModerationTransactor` remains the worked example the rest were built to match.
+
+What still keeps this closed is `scripts/check-audited-writes.test.ts`'s last
+case, which runs the gate over the LIVE route tree — with no allowlist, a
+regression has nowhere to be written down.
 
 ### Cursor grammar — a malformed cursor must not restart pagination
 

@@ -17,6 +17,7 @@
 // key (PRIV-API-RENDEZVOUS-1).  It stores the client's `signed_stub` +
 // `stub_signature` VERBATIM so members can verify authorship themselves — the
 // server is a courier for them, never a validator of them.
+import { isCanonicalBase64Url } from '@licio/shared';
 import { z } from 'zod';
 import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
@@ -34,13 +35,24 @@ import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js
  *
  * Unpadded base64url of n bytes is exactly `ceil(n * 4 / 3)` characters, so the
  * length is a total constraint rather than a bound.
+ *
+ * And exactly ONE spelling of those characters, which is the part that carries
+ * weight beyond DoS: 32 bytes occupy 43 characters with 2 bits left over, so
+ * four texts decode to the same key. `room_public_key` is a UNIQUE index
+ * compared with `=`, while the possession proof is checked against the DECODED
+ * bytes — so without canonicality one room is four rows, each provable by the
+ * same holder and none of them the room's real registration.
+ * `isCanonicalBase64Url` is the shared arithmetic for it (§21.1).
  */
 function base64UrlBytes(bytes: number, what: string) {
   const chars = Math.ceil((bytes * 4) / 3);
   return z
     .string()
     .length(chars, `expected ${bytes}-byte base64url (${what})`)
-    .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
+    .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)')
+    .refine((value) => isCanonicalBase64Url(value, bytes), {
+      message: `expected the CANONICAL base64url encoding (${what}) — trailing bits must be zero`,
+    });
 }
 
 /** Ed25519 public key, SHA-256 commitment, HMAC-SHA256 blind id — all 32 bytes. */

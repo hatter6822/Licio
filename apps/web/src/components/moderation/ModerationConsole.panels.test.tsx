@@ -330,7 +330,7 @@ const auditList: AuditListResponse = {
       linked_action_id: null,
       report_ids: [],
       co_approver_handle: null,
-      notes: null,
+      notes: 'Removed after the second report; the excerpt is in the case file.',
     },
     {
       audit_id: '00000000-0000-4000-8000-0000000000d2',
@@ -547,6 +547,46 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
         expect.objectContaining({ targetType: 'room' }),
       ),
     );
+  });
+
+  it('renders the captured LISTING EVIDENCE a room case is decided on', async () => {
+    // A private room is a P2P shell: the server stores none of its content, so
+    // the name and description a report was filed about survive in exactly one
+    // place — the `private_room_listing_reported` audit note captured at intake,
+    // before the owner could edit them. The console rendered the action, actor,
+    // time and state transition of every history row and dropped `notes`, so the
+    // reviewer decided whether to delist a public listing while looking at
+    // nothing of what was reported.
+    const note =
+      'Reported listing — name: "Abusive name" · description: "Abusive text" (captured at intake).';
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      target_type: 'room',
+      content_kind: null,
+      case_history: [
+        {
+          audit_id: '00000000-0000-4000-8000-0000000000e1',
+          event_time: NOW,
+          actor_handle: null,
+          actor_role: null,
+          action: 'private_room_listing_reported',
+          reason_code: null,
+          target_type: 'room',
+          target_id: '00000000-0000-4000-8000-0000000000cc',
+          prior_state: null,
+          next_state: null,
+          reversible: false,
+          linked_action_id: null,
+          report_ids: [],
+          co_approver_handle: null,
+          notes: note,
+        },
+      ],
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText(note)).toBeInTheDocument();
   });
 
   it('WS-J.2.6b: an evidence link resolves the server verdict before navigating', async () => {
@@ -969,6 +1009,12 @@ describe('AuditPanel', () => {
     expect(await screen.findByText('remove')).toBeInTheDocument();
     expect(screen.getByText(/MOD_SPAM_001/)).toBeInTheDocument();
     expect(screen.getByText(/system/)).toBeInTheDocument(); // null actor → system
+    // The note is part of the record, not decoration: several actions put the
+    // whole of their evidence there, and a trail showing only the verb is a
+    // list of things that happened rather than an account of them.
+    expect(
+      screen.getByText('Removed after the second report; the excerpt is in the case file.'),
+    ).toBeInTheDocument();
     unmount();
 
     vi.mocked(api.fetchAudit).mockResolvedValue({ items: [], next_cursor: null });

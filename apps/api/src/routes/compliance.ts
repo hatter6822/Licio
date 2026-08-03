@@ -474,34 +474,43 @@ export function createComplianceRoutes() {
               409,
             );
           }
-          const record = await services.declarations.upsert(
-            {
-              userId: auth.userId,
-              declaredRegion: body.declared_region,
-              status: 'pending',
-              verificationLevel: 'unverified',
-              evidenceRef: body.evidence_ref ?? null,
-              verifiedAt: null,
-              verifiedBy: null,
-              createdAt: existing?.createdAt ?? nowIso,
-              updatedAt: nowIso,
-            },
-            // CAS only when a prior row exists — a concurrent verify is the write
-            // to preserve; a first declaration has no premises to lose.
-            existing === null
-              ? undefined
-              : {
-                  declaredRegion: existing.declaredRegion,
-                  status: existing.status,
-                  updatedAt: existing.updatedAt,
-                },
-          );
+          // The declaration and the user's own trail row commit together: a
+          // §19.1 subject reading their security page must not find a region
+          // change that left no trace, and the compliance write must not be
+          // undone by a failure to record it.
+          const record = await services.transactor.run(async (tx) => {
+            const written = await tx.declarations.upsert(
+              {
+                userId: auth.userId,
+                declaredRegion: body.declared_region,
+                status: 'pending',
+                verificationLevel: 'unverified',
+                evidenceRef: body.evidence_ref ?? null,
+                verifiedAt: null,
+                verifiedBy: null,
+                createdAt: existing?.createdAt ?? nowIso,
+                updatedAt: nowIso,
+              },
+              // CAS only when a prior row exists — a concurrent verify is the write
+              // to preserve; a first declaration has no premises to lose.
+              existing === null
+                ? undefined
+                : {
+                    declaredRegion: existing.declaredRegion,
+                    status: existing.status,
+                    updatedAt: existing.updatedAt,
+                  },
+            );
+            if (written !== null) {
+              await tx.identityAudit.append({
+                actorUserId: auth.userId,
+                eventType: 'region_declaration_change',
+                context: { setting: 'declare', new_value: body.declared_region },
+              });
+            }
+            return written;
+          });
           if (record !== null) {
-            await getIdentityServices().audit.append({
-              actorUserId: auth.userId,
-              eventType: 'region_declaration_change',
-              context: { setting: 'declare', new_value: body.declared_region },
-            });
             services.metrics.increment('compliance.declaration.created');
             return c.json({ declaration: declarationToWire(record) }, 201);
           }
@@ -544,27 +553,32 @@ export function createComplianceRoutes() {
             409,
           );
         }
-        const record = await services.declarations.upsert(
-          {
-            ...existing,
-            status: 'revoked',
-            verificationLevel: 'unverified',
-            verifiedAt: null,
-            verifiedBy: null,
-            updatedAt: nowIso,
-          },
-          {
-            declaredRegion: existing.declaredRegion,
-            status: existing.status,
-            updatedAt: existing.updatedAt,
-          },
-        );
+        const record = await services.transactor.run(async (tx) => {
+          const written = await tx.declarations.upsert(
+            {
+              ...existing,
+              status: 'revoked',
+              verificationLevel: 'unverified',
+              verifiedAt: null,
+              verifiedBy: null,
+              updatedAt: nowIso,
+            },
+            {
+              declaredRegion: existing.declaredRegion,
+              status: existing.status,
+              updatedAt: existing.updatedAt,
+            },
+          );
+          if (written !== null) {
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'region_declaration_change',
+              context: { setting: 'revoke' },
+            });
+          }
+          return written;
+        });
         if (record !== null) {
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'region_declaration_change',
-            context: { setting: 'revoke' },
-          });
           return c.json({ revoked: true });
         }
         // CAS miss: the row changed under us — re-read and re-check.
@@ -861,24 +875,6 @@ export function createComplianceRoutes() {
           });
         }
         services.metrics.increment('compliance.policy.written');
-        // Best-effort: a transient identity-audit outage cannot un-apply a
-        // committed, chained policy, and returning 500 would send the operator
-        // into a retry that collides with the existing row for nothing.
-        try {
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'compliance_policy_change',
-            context: {
-              setting: policyInput.country_or_region,
-              new_value: previous === null ? 'create' : 'update',
-            },
-          });
-        } catch (error) {
-          services.alert('compliance.policy.identity_audit_failed', {
-            region: policyInput.country_or_region,
-            message: error instanceof Error ? error.message : 'unknown',
-          });
-        }
         return c.json({ policy: validated.policy }, 201);
       },
     )
@@ -936,26 +932,47 @@ export function createComplianceRoutes() {
           );
         }
         const nowIso = new Date(services.now()).toISOString();
-        const record = await services.declarations.upsert(
-          {
-            ...existing,
-            status: isVerify ? 'verified' : isRevoke ? 'revoked' : 'pending',
-            verificationLevel: isVerify ? 'reviewer_verified' : 'unverified',
-            verifiedAt: isVerify ? nowIso : null,
-            verifiedBy: isVerify ? auth.userId : null,
-            updatedAt: nowIso,
-          },
-          // CAS on the PREMISES this decision was made about.  A member who
-          // revoked or re-declared since it was read keeps their change: a
-          // verified declaration is the real-funds region basis, so
-          // resurrecting a revoked one — or verifying evidence against a region
-          // the member has left — is exactly what must not happen.
-          {
-            declaredRegion: existing.declaredRegion,
-            status: existing.status,
-            updatedAt: existing.updatedAt,
-          },
-        );
+        // The decision and the reviewer's trail row commit together: this
+        // verification is the region ladder's only anti-circumvention control
+        // (§19.1 leaves no detected baseline to cross-check), so a decision
+        // recorded nowhere is the one outcome it must not have.
+        const record = await services.transactor.run(async (tx) => {
+          const written = await tx.declarations.upsert(
+            {
+              ...existing,
+              status: isVerify ? 'verified' : isRevoke ? 'revoked' : 'pending',
+              verificationLevel: isVerify ? 'reviewer_verified' : 'unverified',
+              verifiedAt: isVerify ? nowIso : null,
+              verifiedBy: isVerify ? auth.userId : null,
+              updatedAt: nowIso,
+            },
+            // CAS on the PREMISES this decision was made about.  A member who
+            // revoked or re-declared since it was read keeps their change: a
+            // verified declaration is the real-funds region basis, so
+            // resurrecting a revoked one — or verifying evidence against a region
+            // the member has left — is exactly what must not happen.
+            {
+              declaredRegion: existing.declaredRegion,
+              status: existing.status,
+              updatedAt: existing.updatedAt,
+            },
+          );
+          if (written === null) return null;
+          await tx.identityAudit.append({
+            actorUserId: auth.userId,
+            eventType: 'region_declaration_change',
+            // The subject rides `targetRef`, NOT the context: `redactContext`
+            // keeps a closed allowlist (device/auth_method/setting/
+            // previous_value/new_value/reason) and drops anything else, so a
+            // `target` key here would vanish and the entry would record that a
+            // reviewer verified *something*.  This verification is the only
+            // anti-circumvention control the region ladder has (§19.1 leaves no
+            // detected baseline to cross-check), so its subject must persist.
+            targetRef: services.opaqueRef(userId),
+            context: { setting: body.decision, reason: body.note },
+          });
+          return written;
+        });
         if (record === null) {
           return c.json(
             deny(
@@ -965,19 +982,6 @@ export function createComplianceRoutes() {
             409,
           );
         }
-        await getIdentityServices().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'region_declaration_change',
-          // The subject rides `targetRef`, NOT the context: `redactContext`
-          // keeps a closed allowlist (device/auth_method/setting/
-          // previous_value/new_value/reason) and drops anything else, so a
-          // `target` key here would vanish and the entry would record that a
-          // reviewer verified *something*.  This verification is the only
-          // anti-circumvention control the region ladder has (§19.1 leaves no
-          // detected baseline to cross-check), so its subject must persist.
-          targetRef: services.opaqueRef(userId),
-          context: { setting: body.decision, reason: body.note },
-        });
         return c.json({ declaration: declarationToWire(record) });
       },
     )
@@ -1031,22 +1035,34 @@ export function createComplianceRoutes() {
             : body.decision === 'revoke'
               ? ('revoked' as const)
               : ('pending' as const);
-        const record = await services.kyc.upsert(
-          {
-            userId,
-            status,
-            evidenceRef: body.evidence_ref ?? existing?.evidenceRef ?? null,
-            verifiedAt: status === 'verified' ? nowIso : null,
-            verifiedBy: status === 'verified' ? auth.userId : null,
-            createdAt: existing?.createdAt ?? nowIso,
-            updatedAt: nowIso,
-          },
-          // CAS on the premises the decision was made about (declaration
-          // discipline): a standing that changed under review is not clobbered.
-          existing === null
-            ? undefined
-            : { status: existing.status, updatedAt: existing.updatedAt },
-        );
+        // Same discipline as the declaration decision above, and for the same
+        // reason: this standing is the governance-participation gate.
+        const record = await services.transactor.run(async (tx) => {
+          const written = await tx.kyc.upsert(
+            {
+              userId,
+              status,
+              evidenceRef: body.evidence_ref ?? existing?.evidenceRef ?? null,
+              verifiedAt: status === 'verified' ? nowIso : null,
+              verifiedBy: status === 'verified' ? auth.userId : null,
+              createdAt: existing?.createdAt ?? nowIso,
+              updatedAt: nowIso,
+            },
+            // CAS on the premises the decision was made about (declaration
+            // discipline): a standing that changed under review is not clobbered.
+            existing === null
+              ? undefined
+              : { status: existing.status, updatedAt: existing.updatedAt },
+          );
+          if (written === null) return null;
+          await tx.identityAudit.append({
+            actorUserId: auth.userId,
+            eventType: 'kyc_verification_change',
+            targetRef: services.opaqueRef(userId),
+            context: { setting: body.decision, reason: body.note },
+          });
+          return written;
+        });
         if (record === null) {
           return c.json(
             deny(
@@ -1056,12 +1072,6 @@ export function createComplianceRoutes() {
             409,
           );
         }
-        await getIdentityServices().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'kyc_verification_change',
-          targetRef: services.opaqueRef(userId),
-          context: { setting: body.decision, reason: body.note },
-        });
         return c.json({ kyc: record });
       },
     )

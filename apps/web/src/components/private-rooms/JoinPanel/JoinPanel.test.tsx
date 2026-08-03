@@ -326,6 +326,61 @@ describe('JoinPanel — admit half', () => {
     );
   });
 
+  it('never offers ONE device’s grant for another device’s admission', async () => {
+    // The grant is what the admin sends back to finish a join, and it was
+    // free-floating state that only ever got replaced. After admitting device A
+    // it stayed on screen, labelled "send this back to the new device", while
+    // the admin pasted device B's records — and a rejected B writes no new
+    // grant, so the admin would send A's grant to B and B's join would never
+    // complete, with nothing on screen saying so.
+    const user = userEvent.setup();
+    const admin = await makeSession();
+
+    const prepA = await PrivateRoomSession.prepareJoinRequest({ proposedDisplayName: 'Ann' });
+    const inviteA = await admin.createInvite({ inviteePublicKey: prepA.inviteePublicKey });
+    const fragmentA = inviteA.inviteUrl.slice(
+      inviteA.inviteUrl.indexOf('#invite=') + '#invite='.length,
+    );
+    const { request: requestA } = await prepA.complete(fragmentA);
+
+    render(<JoinPanel session={admin} />);
+    const inviteField = screen.getByLabelText(/^invite record$/i);
+    const requestField = screen.getByLabelText(/^join request$/i);
+    fireEvent.change(inviteField, { target: { value: JSON.stringify(inviteA.invite) } });
+    fireEvent.change(requestField, { target: { value: JSON.stringify(requestA) } });
+    await user.click(screen.getByRole('button', { name: /verify and admit/i }));
+
+    const grantLabel = /send this back to the new device/i;
+    await waitFor(() => expect(screen.getByLabelText(grantLabel)).toBeInTheDocument());
+    const grantForA = (screen.getByLabelText(grantLabel) as HTMLTextAreaElement).value;
+    expect(grantForA.length).toBeGreaterThan(0);
+
+    // Device B, admitted against the WRONG invite so the attempt is rejected.
+    const prepB = await PrivateRoomSession.prepareJoinRequest({ proposedDisplayName: 'Bea' });
+    const inviteB = await admin.createInvite({ inviteePublicKey: prepB.inviteePublicKey });
+    const fragmentB = inviteB.inviteUrl.slice(
+      inviteB.inviteUrl.indexOf('#invite=') + '#invite='.length,
+    );
+    const { request: requestB } = await prepB.complete(fragmentB);
+    const { invite: unrelatedInvite } = await admin.createInvite({
+      inviteePublicKey: prepB.inviteePublicKey,
+    });
+
+    // The moment either field changes, A's grant is gone — it cannot belong to
+    // the pair now being typed.
+    fireEvent.change(inviteField, { target: { value: JSON.stringify(unrelatedInvite) } });
+    expect(screen.queryByLabelText(grantLabel)).not.toBeInTheDocument();
+
+    fireEvent.change(requestField, { target: { value: JSON.stringify(requestB) } });
+    await user.click(screen.getByRole('button', { name: /verify and admit/i }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/does not match|could not prove/i),
+    );
+    // …and the rejection leaves NO grant on screen, rather than A's.
+    expect(screen.queryByLabelText(grantLabel)).not.toBeInTheDocument();
+  });
+
   it('has no accessibility violations', async () => {
     const admin = await makeSession();
     const { container } = render(<JoinPanel session={admin} />);

@@ -7,6 +7,7 @@
 // secondary surveillance store; §19.3/§25.4).  No IP and no location of any
 // granularity is ever recorded (§19.1) — a coarse device descriptor is the most
 // location-like value an entry may carry.
+
 import { randomUUID } from 'node:crypto';
 import {
   type AuditContext,
@@ -15,6 +16,7 @@ import {
   auditEntrySchema,
   type SecurityActivityEntry,
 } from '@licio/shared';
+import type { InMemoryRollback } from '../lib/in-memory-rollback.js';
 
 /** The closed allowlist of context keys that may be persisted. */
 // Privacy amendment (SPEC §19.1): NO `country`/location key. The most
@@ -111,8 +113,17 @@ export interface AuditStore {
  * only through append + read — there is no mutation/removal method, mirroring the
  * write-once semantics enforced at the DB level (no UPDATE/DELETE code path).
  */
-export class InMemoryAuditStore implements AuditStore {
+export class InMemoryAuditStore implements AuditStore, InMemoryRollback {
   readonly #entries: AuditEntry[] = [];
+
+  /** The unit of work's undo. Append-only, so restoring the LENGTH is the whole
+   *  of it: a failed unit must leave no record of a change it rolled back. */
+  beginRollback(): () => void {
+    const saved = this.#entries.length;
+    return () => {
+      this.#entries.length = saved;
+    };
+  }
 
   async append(input: AuditEntryInput, createdAt: Date = new Date()): Promise<AuditEntry> {
     const entry = buildAuditEntry(input, createdAt);

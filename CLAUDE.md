@@ -69,8 +69,8 @@ pnpm audit:advisories               # dependency advisories (npm BULK endpoint; 
 pnpm check:deps                     # dependency budgets      · check:workspace-deps — boundary enforcement
 pnpm check:policy                   # doctrine documents      · check:prod-parity — dev↔prod adapter/env parity
 pnpm check:audited-writes           # a durable change and its audit row commit in ONE unit
-                                    #   (route handlers; pre-existing sites are allowlisted with reasons
-                                    #   and tracked in docs/planning/audit-residuals-2026-07.md)
+                                    #   (route handlers; NO allowlist — every domain has a transactor,
+                                    #   so a new violation has nowhere to be recorded as acceptable)
 pnpm check:csp-parity               # index.html carries NO hand-written CSP, and (after a web build)
                                     #   dist/index.html carries exactly the injected shared policy — the
                                     #   courier WebView's only policy, and the one delivery point the

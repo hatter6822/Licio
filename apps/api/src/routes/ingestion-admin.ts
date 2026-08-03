@@ -142,25 +142,33 @@ export function createIngestionAdminRoutes() {
             return c.json(deny('unknown_source', `Source ${sourceId} does not exist`), 404);
           }
         }
-        const inserted = await ingestion.syndications.insert({
-          syndicationId: randomUUID(),
-          fromSourceId: fromId,
-          toSourceId: toId,
-          relationshipType: request.relationship_type,
-          establishedBy: 'steward',
-          status: 'confirmed', // steward-established edges are confirmed
-          evidenceRef: request.evidence_ref,
-          confidence: 1,
+        // A steward-established lineage edge and the record of who established
+        // it are one fact: this edge shapes MERI grouping, so an unaccountable
+        // one is a ranking input nobody can trace.
+        const inserted = await ingestion.transact(async (tx) => {
+          const written = await tx.syndications.insert({
+            syndicationId: randomUUID(),
+            fromSourceId: fromId,
+            toSourceId: toId,
+            relationshipType: request.relationship_type,
+            establishedBy: 'steward',
+            status: 'confirmed', // steward-established edges are confirmed
+            evidenceRef: request.evidence_ref,
+            confidence: 1,
+          });
+          if (written.ok) {
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'syndication_change',
+              targetRef: written.record.syndicationId,
+              context: { setting: 'create', new_value: request.relationship_type },
+            });
+          }
+          return written;
         });
         if (!inserted.ok) {
           return c.json(deny('duplicate_pair', 'This relationship already exists'), 409);
         }
-        await getIdentityServices().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'syndication_change',
-          targetRef: inserted.record.syndicationId,
-          context: { setting: 'create', new_value: request.relationship_type },
-        });
         return c.json({ syndication: inserted.record }, 201);
       })
       .post(
@@ -170,16 +178,19 @@ export function createIngestionAdminRoutes() {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const ingestion = getIngestionServices();
-          const confirmed = await ingestion.syndications.confirm(
-            c.req.valid('param').syndicationId,
-          );
-          if (!confirmed) return c.json(deny('not_found', 'Relationship not found'), 404);
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'syndication_change',
-            targetRef: confirmed.syndicationId,
-            context: { setting: 'status', previous_value: 'candidate', new_value: 'confirmed' },
+          const confirmed = await ingestion.transact(async (tx) => {
+            const written = await tx.syndications.confirm(c.req.valid('param').syndicationId);
+            if (written !== null) {
+              await tx.identityAudit.append({
+                actorUserId: auth.userId,
+                eventType: 'syndication_change',
+                targetRef: written.syndicationId,
+                context: { setting: 'status', previous_value: 'candidate', new_value: 'confirmed' },
+              });
+            }
+            return written;
           });
+          if (!confirmed) return c.json(deny('not_found', 'Relationship not found'), 404);
           return c.json({ syndication: confirmed });
         },
       )
@@ -197,46 +208,51 @@ export function createIngestionAdminRoutes() {
           const { reason, ...patch } = c.req.valid('json');
           const before = await ingestion.sources.getById(sourceId);
           if (!before) return c.json(deny('not_found', 'Source not found'), 404);
-          const updated = await ingestion.sources.update(sourceId, {
-            ...(patch.name !== undefined ? { name: patch.name } : {}),
-            ...(patch.publisher_lineage !== undefined
-              ? { publisherLineage: patch.publisher_lineage }
-              : {}),
-            ...(patch.typical_topics !== undefined
-              ? { typicalTopics: [...patch.typical_topics] }
-              : {}),
-            ...(patch.display_restrictions !== undefined
-              ? { displayRestrictions: patch.display_restrictions }
-              : {}),
-            ...(patch.community_notes !== undefined
-              ? { communityNotes: [...patch.community_notes] }
-              : {}),
-          });
-          // One immutable audit record per edited field, before → after.
-          const identity = getIdentityServices();
-          for (const field of Object.keys(patch) as Array<keyof typeof patch>) {
-            const beforeValue = JSON.stringify(
-              field === 'name'
-                ? before.name
-                : field === 'publisher_lineage'
-                  ? before.publisherLineage
-                  : field === 'typical_topics'
-                    ? before.typicalTopics
-                    : field === 'display_restrictions'
-                      ? before.displayRestrictions
-                      : before.communityNotes,
-            ).slice(0, 256);
-            await identity.audit.append({
-              actorUserId: auth.userId,
-              eventType: 'source_profile_edit',
-              targetRef: sourceId,
-              context: {
-                setting: `${field}: ${reason}`.slice(0, 128),
-                previous_value: beforeValue,
-                new_value: JSON.stringify(patch[field]).slice(0, 256),
-              },
+          // The edit and its per-field records commit together: this profile
+          // drives source-lineage independence, so a change with no before/after
+          // trail is an unexplainable shift in what MERI treats as independent.
+          const updated = await ingestion.transact(async (tx) => {
+            const written = await tx.sources.update(sourceId, {
+              ...(patch.name !== undefined ? { name: patch.name } : {}),
+              ...(patch.publisher_lineage !== undefined
+                ? { publisherLineage: patch.publisher_lineage }
+                : {}),
+              ...(patch.typical_topics !== undefined
+                ? { typicalTopics: [...patch.typical_topics] }
+                : {}),
+              ...(patch.display_restrictions !== undefined
+                ? { displayRestrictions: patch.display_restrictions }
+                : {}),
+              ...(patch.community_notes !== undefined
+                ? { communityNotes: [...patch.community_notes] }
+                : {}),
             });
-          }
+            // One immutable audit record per edited field, before → after.
+            for (const field of Object.keys(patch) as Array<keyof typeof patch>) {
+              const beforeValue = JSON.stringify(
+                field === 'name'
+                  ? before.name
+                  : field === 'publisher_lineage'
+                    ? before.publisherLineage
+                    : field === 'typical_topics'
+                      ? before.typicalTopics
+                      : field === 'display_restrictions'
+                        ? before.displayRestrictions
+                        : before.communityNotes,
+              ).slice(0, 256);
+              await tx.identityAudit.append({
+                actorUserId: auth.userId,
+                eventType: 'source_profile_edit',
+                targetRef: sourceId,
+                context: {
+                  setting: `${field}: ${reason}`.slice(0, 128),
+                  previous_value: beforeValue,
+                  new_value: JSON.stringify(patch[field]).slice(0, 256),
+                },
+              });
+            }
+            return written;
+          });
           return c.json({ source: updated });
         },
       )
@@ -249,20 +265,25 @@ export function createIngestionAdminRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const ingestion = getIngestionServices();
           const request = c.req.valid('json');
-          const updated = await ingestion.sources.appendCorrection(c.req.valid('param').sourceId, {
-            correction_id: randomUUID(),
-            story_id: request.story_id,
-            summary: request.summary,
-            recorded_by: 'steward',
-            recorded_at: new Date(ingestion.now()).toISOString(),
+          const updated = await ingestion.transact(async (tx) => {
+            const written = await tx.sources.appendCorrection(c.req.valid('param').sourceId, {
+              correction_id: randomUUID(),
+              story_id: request.story_id,
+              summary: request.summary,
+              recorded_by: 'steward',
+              recorded_at: new Date(ingestion.now()).toISOString(),
+            });
+            if (written !== null) {
+              await tx.identityAudit.append({
+                actorUserId: auth.userId,
+                eventType: 'source_profile_edit',
+                targetRef: written.sourceId,
+                context: { setting: `correction_append: ${request.reason}`.slice(0, 128) },
+              });
+            }
+            return written;
           });
           if (!updated) return c.json(deny('not_found', 'Source not found'), 404);
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'source_profile_edit',
-            targetRef: updated.sourceId,
-            context: { setting: `correction_append: ${request.reason}`.slice(0, 128) },
-          });
           return c.json({ source: updated }, 201);
         },
       )
@@ -328,21 +349,24 @@ export function createIngestionAdminRoutes() {
               ingestion.metrics.increment('takedowns.source_stories_hidden', hidden);
             }
           }
-          const updated = await ingestion.takedowns.update(takedownId, {
-            status: action,
-            resolutionNote: resolution_note,
-            actionedBy: auth.userId,
-            actionedAt: action === 'actioned' ? nowIso : null,
-          });
-          await identity.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'takedown_action',
-            targetRef: takedownId,
-            context: {
-              setting: record.targetType,
-              previous_value: record.status,
-              new_value: action,
-            },
+          const updated = await ingestion.transact(async (tx) => {
+            const written = await tx.takedowns.update(takedownId, {
+              status: action,
+              resolutionNote: resolution_note,
+              actionedBy: auth.userId,
+              actionedAt: action === 'actioned' ? nowIso : null,
+            });
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'takedown_action',
+              targetRef: takedownId,
+              context: {
+                setting: record.targetType,
+                previous_value: record.status,
+                new_value: action,
+              },
+            });
+            return written;
           });
           ingestion.metrics.increment(`takedowns.${action}`);
           return c.json({ takedown: updated === null ? null : toTakedownWire(updated) });
@@ -511,11 +535,14 @@ export function createIngestionAdminRoutes() {
           if (model_version === ingestion.config().embeddingActiveVersion) {
             return c.json(deny('active_version', 'Refusing to delete the ACTIVE version'), 422);
           }
-          const removed = await ingestion.embeddings.deleteVersion(model_version, 10_000);
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'ingestion_config_change',
-            context: { setting: 'embedding_cleanup', new_value: model_version },
+          const removed = await ingestion.transact(async (tx) => {
+            const deleted = await tx.embeddings.deleteVersion(model_version, 10_000);
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'ingestion_config_change',
+              context: { setting: 'embedding_cleanup', new_value: model_version },
+            });
+            return deleted;
           });
           return c.json({ removed });
         },

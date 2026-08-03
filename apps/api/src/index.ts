@@ -458,6 +458,14 @@ const makeJobLease = () => (db ? new DrizzleJobLeaseStore(db) : new InMemoryJobL
 if (db) {
   identityServices.store = new DrizzleIdentityStore(db);
   identityServices.audit = new DrizzleAuditStore(db);
+  // …and the UNIT those writes commit through. Swapping the stores without this
+  // leaves the in-memory unit running over the Drizzle adapters: the writes
+  // land, and the atomicity they are inside the unit FOR does not.
+  const identityDb = db;
+  identityServices.transact = (work) =>
+    identityDb.transaction((tx) =>
+      work({ store: new DrizzleIdentityStore(tx), audit: new DrizzleAuditStore(tx) }),
+    );
   // Web Push state (WS-C.2.4a/c): durable subscriptions + preferences, so a
   // restart/deploy never invalidates delivery and every replica can wake any
   // user's endpoints.
@@ -556,6 +564,19 @@ if (env.REDIS_URL !== undefined && sharedRedis) {
 }
 if (db) {
   ingestionServices.stories = new DrizzleStoryStore(db);
+  // The unit those operator actions commit through, identity trail included.
+  const ingestionDb = db;
+  ingestionServices.transact = (work) =>
+    ingestionDb.transaction((tx) =>
+      work({
+        sources: new DrizzleSourceStore(tx),
+        syndications: new DrizzleSyndicationStore(tx),
+        takedowns: new DrizzleTakedownStore(tx),
+        stories: new DrizzleStoryStore(tx),
+        embeddings: new DrizzleEmbeddingStore(tx),
+        identityAudit: new DrizzleAuditStore(tx),
+      }),
+    );
   ingestionServices.sources = new DrizzleSourceStore(db);
   ingestionServices.syndications = new DrizzleSyndicationStore(db);
   ingestionServices.claims = new DrizzleClaimStore(db);
@@ -616,6 +637,13 @@ if (env.REDIS_URL !== undefined && sharedRedis) {
 if (db) {
   forumServices.contributions = new DrizzleContributionStore(db);
   forumServices.rooms = new DrizzleRoomStore(db);
+  // …and the unit those room-lifecycle writes commit through, with the identity
+  // trail on the same handle.
+  const forumDb = db;
+  forumServices.transact = (work) =>
+    forumDb.transaction((tx) =>
+      work({ rooms: new DrizzleRoomStore(tx), identityAudit: new DrizzleAuditStore(tx) }),
+    );
   forumServices.lenses = new DrizzleLensStore(db);
   forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
   // WS-T — the debate arena store over migration 0056.
@@ -688,6 +716,7 @@ if (db) {
         // perishable as writability (WS-Q moves threads, grants are revoked),
         // and both are re-asked inside the unit.
         rooms: new DrizzleRoomStore(tx),
+        promotions: new DrizzlePromotionStore(tx),
       }),
     );
 }

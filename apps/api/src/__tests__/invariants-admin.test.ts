@@ -592,6 +592,73 @@ describe('public WS-H read surfaces', () => {
 });
 
 describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
+  /**
+   * Fill a room with `total` threads and measure all but the `unmeasuredFirst`
+   * the SCAN reaches first — returning how many carry a SCOI row.
+   *
+   * The measurement targets are chosen by READING the scan's own ordering back,
+   * not by seeding order. `listThreadsByRoom` pages `(created_at, thread_id)`
+   * descending, and rows seeded within one millisecond tie-break on a random
+   * UUID — so "the first 25 I created" and "the first 25 the report examines"
+   * are unrelated sets, and a test that conflates them measures a shuffle.
+   */
+  async function seedRoomThreads(
+    fixture: InvariantServicesFixture,
+    roomId: string,
+    total: number,
+    unmeasuredFirst: number,
+  ): Promise<number> {
+    /** The room's threads in the order the report pages them. */
+    const scanOrder = async (): Promise<string[]> => {
+      const order: string[] = [];
+      let cursor: { createdAt: string; threadId: string } | null = null;
+      for (;;) {
+        const page = await fixture.ingestion.stories.listThreadsByRoom(roomId, cursor, 50);
+        if (page.length === 0) break;
+        for (const thread of page) order.push(thread.threadId);
+        const last = page[page.length - 1];
+        if (last === undefined || page.length < 50) break;
+        cursor = { createdAt: last.createdAt, threadId: last.threadId };
+      }
+      return order;
+    };
+
+    // `seedSplitRoom` already left its divergent thread here, so top the room up
+    // to `total` rather than adding that many.
+    const existing = (await scanOrder()).length;
+    for (let i = existing; i < total; i += 1) {
+      const { threadId } = await seedStory(fixture);
+      await fixture.ingestion.stories.updateThread(threadId, { roomId });
+    }
+    const order = await scanOrder();
+    expect(order).toHaveLength(total);
+
+    let measured = 0;
+    for (const threadId of order.slice(unmeasuredFirst)) {
+      const thread = await fixture.ingestion.stories.getThreadById(threadId);
+      if (thread === null) continue;
+      const storyId = thread.storyId;
+      await fixture.events.invariantStore.upsert({
+        invariantType: 'SCOI',
+        targetType: 'story',
+        targetId: storyId,
+        timeWindow: hourWindow(Date.now()),
+        version: 'v0',
+        scoreVector: { scoi: 0.42, context_state: 'divergent' },
+        explanationSummary: 'seeded',
+        confidence: 1,
+        coverage: 1,
+        reasonCodes: [],
+        fallbackUsed: false,
+        versionMetadata: null,
+        shadowMode: true,
+        createdAt: new Date().toISOString(),
+      });
+      measured += 1;
+    }
+    return measured;
+  }
+
   /** A room with two lenses reading the SAME story divergently, plus a
    * multi-lens participant (the bridge candidate), with the acting user as
    * the room's steward. */
@@ -832,6 +899,58 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     const small = await seedSplitRoom(fixture, steward.userId);
     const complete = await adminRequest(fixture, steward.cookie, `/scoi/reports/${small.roomId}`);
     expect(((await complete.json()) as { scan: { complete: boolean } }).scan.complete).toBe(true);
+  });
+
+  it('calls a scan COMPLETE when the entry cap lands on the room’s last thread', async () => {
+    // The two exits raced, and the wrong one won. Filling the 100-entry cap
+    // breaks out of the page loop; reaching a short page ends the room. When
+    // BOTH happen on the same thread — the hundredth finding is the room's final
+    // conversation — the cap's exit ran first and the room was reported as
+    // truncated. A steward reading `complete: false` on a room they have in fact
+    // seen all of goes looking for findings that do not exist, and the flag they
+    // were given to tell "nothing here" from "we stopped early" says the wrong
+    // one of the two.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId } = await seedSplitRoom(fixture, steward.userId);
+
+    // 125 threads — pages of 50 are 50, 50, 25, so the last page is short — with
+    // the 25 the scan reaches FIRST left unmeasured. The hundredth reportable
+    // entry is then the room's final thread, which is the case at issue.
+    const measured = await seedRoomThreads(fixture, roomId, 125, 25);
+    expect(measured).toBe(100);
+
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    expect(report.status).toBe(200);
+    const body = (await report.json()) as {
+      reports: unknown[];
+      scan: { complete: boolean; examined: number };
+    };
+    expect(body.reports).toHaveLength(100);
+    expect(body.scan.complete).toBe(true);
+    // Every thread in the room was walked — and `examined` counts walked, not
+    // paged: a cap that stops mid-page must not claim the rest of that page.
+    expect(body.scan.examined).toBe(125);
+  });
+
+  it('still reports INCOMPLETE when the cap stops it mid-page', async () => {
+    // The other side of the fix: the cap landing anywhere but the final thread
+    // leaves threads genuinely unexamined, and neither flag nor count may
+    // pretend otherwise.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId } = await seedSplitRoom(fixture, steward.userId);
+    await seedRoomThreads(fixture, roomId, 130, 25);
+
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    const body = (await report.json()) as {
+      reports: unknown[];
+      scan: { complete: boolean; examined: number };
+    };
+    expect(body.reports).toHaveLength(100);
+    expect(body.scan.complete).toBe(false);
+    // 125 walked of 130: the cap fell five threads short of the room's end.
+    expect(body.scan.examined).toBe(125);
   });
 
   it('opens ONE attempt under a concurrent pair, and none without its audit row', async () => {

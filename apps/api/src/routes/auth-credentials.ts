@@ -196,11 +196,16 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           if (isLastMethodRemoval(await authMethodInventory(services, auth.userId), 'passkey')) {
             return c.json(err('last_method', 'Set up another way to sign in first.'), 409);
           }
-          await services.store.deleteWebauthn(cred.credentialId);
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'auth_method_remove',
-            context: { auth_method: 'webauthn' },
+          // Removing a sign-in method and recording it are one fact: an append
+          // failure would leave the passkey gone with nothing to say who removed
+          // it, on the one surface where that matters most.
+          await services.transact(async (tx) => {
+            await tx.store.deleteWebauthn(cred.credentialId);
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'auth_method_remove',
+              context: { auth_method: 'webauthn' },
+            });
           });
           await rotateAndSet(services, c);
           return c.json({ ok: true });
@@ -224,11 +229,13 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           if (isLastMethodRemoval(await authMethodInventory(services, auth.userId), 'wallet')) {
             return c.json(err('last_method', 'Set up another way to sign in first.'), 409);
           }
-          await services.store.deleteWalletAuth(cred.credentialId);
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'auth_method_remove',
-            context: { auth_method: 'wallet' },
+          await services.transact(async (tx) => {
+            await tx.store.deleteWalletAuth(cred.credentialId);
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'auth_method_remove',
+              context: { auth_method: 'wallet' },
+            });
           });
           await rotateAndSet(services, c);
           return c.json({ ok: true });
@@ -243,16 +250,22 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
         if (isLastMethodRemoval(await authMethodInventory(services, auth.userId), 'email')) {
           return c.json(err('last_method', 'Set up another way to sign in first.'), 409);
         }
-        await services.store.updateUser(auth.userId, { email: null });
-        await services.store.setAuth(auth.userId, {
-          emailVerified: false,
-          emailVerifiedAt: null,
-          pendingEmail: null,
-        });
-        await services.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'auth_method_remove',
-          context: { auth_method: 'email_otp' },
+        // THREE writes, one fact. Sequentially, a failure between the first two
+        // left an account whose email was cleared while `emailVerified` still
+        // said true — a state no code path can produce deliberately — and a
+        // failure before the third removed a sign-in method with no record of it.
+        await services.transact(async (tx) => {
+          await tx.store.updateUser(auth.userId, { email: null });
+          await tx.store.setAuth(auth.userId, {
+            emailVerified: false,
+            emailVerifiedAt: null,
+            pendingEmail: null,
+          });
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'auth_method_remove',
+            context: { auth_method: 'email_otp' },
+          });
         });
         await rotateAndSet(services, c);
         return c.json({ ok: true });

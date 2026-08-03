@@ -988,6 +988,19 @@ function CaseReviewDialog({
                         {entry.prior_state ?? '—'} → {entry.next_state ?? '—'}
                       </span>
                     ) : null}
+                    {/* THE NOTE IS EVIDENCE, not metadata.  For a reported room
+                        listing the captured name and description — or the
+                        explanation that the listing vanished or was edited
+                        before it could be captured — exist ONLY here: the room
+                        is a P2P shell the server holds no content for, so
+                        without this the reviewer decides whether to delist
+                        while looking at nothing at all.  Blocked as its own
+                        line rather than appended to the metadata run, because
+                        it is prose up to 2000 characters and `break-words`
+                        keeps a long unbroken token from widening the panel. */}
+                    {entry.notes ? (
+                      <p className="mt-1 whitespace-pre-wrap break-words text-ink">{entry.notes}</p>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -1942,6 +1955,15 @@ function AuditPanel(): React.ReactElement {
               · {entry.actor_handle ?? t('console.system', 'system')} ·{' '}
               {entry.event_time.slice(0, 16)}
             </span>
+            {/* The same reason the case history renders it: for several actions
+                the note IS the record — captured listing evidence, an
+                enforcement rationale — and the server sends it to this surface
+                for authorized roles. A trail that shows only the verb of each
+                entry is a list of things that happened, not an account of
+                them. */}
+            {entry.notes ? (
+              <p className="mt-1 whitespace-pre-wrap break-words text-ink">{entry.notes}</p>
+            ) : null}
           </li>
         ))}
         {audit.data && items.length === 0 ? (

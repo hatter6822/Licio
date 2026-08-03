@@ -20,6 +20,7 @@ import {
   type PrivacySettings,
   type UserAccountState,
 } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 import { sha256Hex } from './crypto.js';
 import type { Role } from './rbac.js';
 
@@ -160,13 +161,36 @@ export interface IdentityStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryIdentityStore implements IdentityStore {
+export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
   readonly #users = new Map<string, StoredUser>();
   readonly #auth = new Map<string, StoredUserAuth>();
   readonly #webauthn = new Map<string, StoredWebauthnCredential>();
   readonly #walletAuth = new Map<string, StoredWalletAuthCredential>();
   readonly #exportJobs = new Map<string, StoredExportJob>();
   readonly #deletions = new Map<string, StoredDeletionRequest>();
+
+  /**
+   * The unit of work's undo.
+   *
+   * Every write here REPLACES its row (`{ ...row, ...patch }` then `set`), which
+   * is what makes a shallow snapshot sound — see `mapRollback`. Six maps because
+   * one identity change routinely touches several: disabling email sign-in
+   *  writes `users` and `user_auth`, and a unit that restored only one of them
+   * would answer a different question from the transaction it stands in for.
+   */
+  beginRollback(): () => void {
+    const undo = [
+      mapRollback(this.#users),
+      mapRollback(this.#auth),
+      mapRollback(this.#webauthn),
+      mapRollback(this.#walletAuth),
+      mapRollback(this.#exportJobs),
+      mapRollback(this.#deletions),
+    ];
+    return () => {
+      for (const restore of undo) restore();
+    };
+  }
 
   // --- Users ---------------------------------------------------------------
   async createUser(

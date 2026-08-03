@@ -22,9 +22,16 @@
 //
 // WHAT IT FLAGS.  A route handler that BOTH appends an audit row and performs a
 // durable write, where the append is not lexically inside a unit callback
-// (`…transactor.run(…)` / `…transact(…)`).  An allowlisted site needs a written
-// reason; a stale allowlist entry is itself an error, so an entry cannot outlive
-// the code it excuses.
+// (`…transactor.run(…)` / `…transact(…)`).
+//
+// THERE IS NO ALLOWLIST.  There was one, holding the 29 handlers that predated
+// this gate, and it was the wrong shape twice over: a rule with an exemption
+// list reads to the next author as optional, and the list was a schedule for
+// work nobody had committed to doing.  Every one of those handlers now runs
+// through its domain's unit — WS-D identity, WS-N compliance, WS-F ingestion,
+// WS-G/WS-Q forum and WS-H invariants each gained one, joining WS-J — so the
+// gate has nothing left to excuse, and a new violation has no way to be written
+// down as acceptable.
 //
 // WHAT IT DOES NOT CLAIM.  Lexical containment is the test, so a handler that
 // calls a helper which opens the unit reads as a violation here — the fix is to
@@ -49,190 +56,6 @@ const WRITE_CALLS =
   /\.(insert|insertIfNoneOpen|update|updateUser|upsert|create|createWithThread|remove|delete|purge|credit|rebaseline|setAuth|applyAction|apply|delist|claim|reassign)[A-Za-z]*$/;
 /** Opening a unit of work. */
 const UNIT_CALLS = /(\.transactor\.run|\.transact|\.runInUnit)$/;
-
-/**
- * Sites where the change and its record are deliberately NOT one unit.
- *
- * Every entry carries a reason a reviewer can weigh, and the closure target for
- * the ones that are debt rather than design lives in
- * `docs/planning/audit-residuals-2026-07.md`.
- */
-export const AUDITED_WRITE_ALLOWLIST: Array<{ file: string; handler: string; reason: string }> = [
-  {
-    file: 'auth-credentials.ts',
-    handler: '/credentials/wallet/:credentialId',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-credentials.ts',
-    handler: '/credentials/webauthn/:credentialId',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-credentials.ts',
-    handler: '/email/disable',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-mfa.ts',
-    handler: '(unnamed handler)',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-mfa.ts',
-    handler: '/mfa/totp/confirm',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-mfa.ts',
-    handler: '/mfa/totp/disable',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-mfa.ts',
-    handler: '/mfa/totp/verify',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-register.ts',
-    handler: '/dev/verify',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-register.ts',
-    handler: '/email/verify',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth-register.ts',
-    handler: '/webauthn/signup/verify',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth.ts',
-    handler: '/sessions/:ref',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'auth.ts',
-    handler: '/wallet/verify',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'compliance.ts',
-    handler: '/admin/declarations/:userId/verify',
-    reason:
-      'WS-N compliance keeps its OWN hash-chained trail beside the WS-D audit, so the pairing spans two chains and needs a compliance transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'compliance.ts',
-    handler: '/admin/kyc/:userId',
-    reason:
-      'WS-N compliance keeps its OWN hash-chained trail beside the WS-D audit, so the pairing spans two chains and needs a compliance transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'compliance.ts',
-    handler: '/admin/policies',
-    reason:
-      'WS-N compliance keeps its OWN hash-chained trail beside the WS-D audit, so the pairing spans two chains and needs a compliance transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'compliance.ts',
-    handler: '/region/declaration',
-    reason:
-      'WS-N compliance keeps its OWN hash-chained trail beside the WS-D audit, so the pairing spans two chains and needs a compliance transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'forum.ts',
-    handler: '/feed/preferences',
-    reason:
-      'WS-G forum has a transactor for CONTRIBUTIONS but none for preference state. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'ingestion-admin.ts',
-    handler: '/embeddings/cleanup',
-    reason:
-      'WS-F ingestion has no unit of work yet; these are operator actions on source/syndication/takedown state. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'ingestion-admin.ts',
-    handler: '/sources/:sourceId',
-    reason:
-      'WS-F ingestion has no unit of work yet; these are operator actions on source/syndication/takedown state. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'ingestion-admin.ts',
-    handler: '/syndications',
-    reason:
-      'WS-F ingestion has no unit of work yet; these are operator actions on source/syndication/takedown state. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'ingestion-admin.ts',
-    handler: '/takedowns/:takedownId/action',
-    reason:
-      'WS-F ingestion has no unit of work yet; these are operator actions on source/syndication/takedown state. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'invariants-admin.ts',
-    handler: '/promotions',
-    reason:
-      'the promotion write happens inside promotionService.apply, which owns the regression gate and the observed-evidence reads; binding it to a unit handle needs that service to accept a store per call. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'privacy.ts',
-    handler: '/attention/delete',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'privacy.ts',
-    handler: '/delete-account',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'privacy.ts',
-    handler: '/delete-account/cancel',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'privacy.ts',
-    handler: '/export',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'privacy.ts',
-    handler: '/settings',
-    reason:
-      'WS-D identity has no unit of work yet, and these handlers pair SEVERAL store writes with the audit — binding only the audit would advertise a guarantee the handler still does not have. Closing it means an identity transactor. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'rooms.ts',
-    handler: '/rooms',
-    reason:
-      'WS-Q room lifecycle has no unit of work yet. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-  {
-    file: 'rooms.ts',
-    handler: '/rooms/:roomId/join-requests/:requestId',
-    reason:
-      'WS-Q room lifecycle has no unit of work yet. Tracked in docs/planning/audit-residuals-2026-07.md (one PR per domain seam)',
-  },
-];
 
 interface Finding {
   readonly file: string;
@@ -278,10 +101,7 @@ function handlerLabel(fn: Syntax): string {
   return '(unnamed handler)';
 }
 
-export function runAuditedWriteGate(
-  files: Map<string, string>,
-  allowlist: typeof AUDITED_WRITE_ALLOWLIST = AUDITED_WRITE_ALLOWLIST,
-): string[] {
+export function runAuditedWriteGate(files: Map<string, string>): string[] {
   const findings = withParsedSources(
     [...files].map(([path, content]) => ({ path, content })),
     (parsed) => {
@@ -320,32 +140,14 @@ export function runAuditedWriteGate(
   );
 
   const issues: string[] = [];
-  const matched = new Set<string>();
   for (const finding of findings) {
-    // EXACT, not a prefix: `/delete-account` would otherwise excuse
-    // `/delete-account/cancel`, and an entry that silently covers a handler
-    // nobody weighed is the opposite of what an allowlist is for.
-    const excuse = allowlist.find(
-      (entry) => entry.file === finding.file && entry.handler === finding.detail,
-    );
-    if (excuse) {
-      matched.add(`${excuse.file}::${excuse.handler}`);
-      continue;
-    }
     issues.push(
       `${finding.file}:${finding.line} handler '${finding.detail}' appends an audit row and ` +
         'performs a durable write outside a unit of work — an append failure would leave the ' +
-        'change with no record. Run both through the domain transactor (`services.transact(…)` / ' +
-        '`transactor.run(…)`), or allowlist it in scripts/check-audited-writes.ts with a reason.',
+        'change with no record. Run both through the domain unit: `services.transact(…)` ' +
+        '(WS-D identity, WS-F ingestion, WS-G/Q forum, WS-H invariants) or `transactor.run(…)` ' +
+        '(WS-J moderation, WS-N compliance).',
     );
-  }
-  for (const entry of allowlist) {
-    if (!matched.has(`${entry.file}::${entry.handler}`)) {
-      issues.push(
-        `stale AUDITED_WRITE_ALLOWLIST entry '${entry.file}::${entry.handler}': it no longer ` +
-          'matches any handler — delete it, so the list keeps describing the code.',
-      );
-    }
   }
   return issues;
 }
@@ -374,7 +176,7 @@ function main(): void {
   }
   console.log(
     'Audited-write gate passed: every route handler that appends an audit row commits it in ' +
-      'the same unit as the change it accounts for (allowlisted exceptions carry reasons).',
+      'the same unit as the change it accounts for.',
   );
 }
 

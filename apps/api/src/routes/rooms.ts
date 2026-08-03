@@ -364,26 +364,28 @@ export function createRoomsRoutes() {
               error: String(error),
             });
           }
-          const identity = getIdentityServices();
-          await identity.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'room_steward_change',
-            targetRef: created.room.roomId,
-            context: { setting: 'community_steward', new_value: 'creator_auto_assigned' },
-          });
-          // Immediate ACTIVE self-subscription — creators are members of
-          // their rooms regardless of visibility (a restricted room's
-          // creator must never be a pending applicant in their own room).
-          await forum.rooms.upsertSubscription({
-            roomId: created.room.roomId,
-            userId: auth.userId,
-            status: 'active',
-            // WS-G.2.2 — a new room's creator starts Undecided (they can pick a
-            // posting lens later via the room's lens control).
-            lensId: null,
-            requestId: randomUUID(),
-            requestedAt: new Date(forum.now()).toISOString(),
-            joinedAt: new Date(forum.now()).toISOString(),
+          // The creator's membership and the record of their steward seat are
+          // one fact about one action, so they commit together: apart, a room
+          // could exist whose creator is not a member of it, or whose steward
+          // seat appears in no trail the creator can read.
+          await forum.transact(async (tx) => {
+            await tx.rooms.upsertSubscription({
+              roomId: created.room.roomId,
+              userId: auth.userId,
+              status: 'active',
+              // WS-G.2.2 — a new room's creator starts Undecided (they can pick
+              // a posting lens later via the room's lens control).
+              lensId: null,
+              requestId: randomUUID(),
+              requestedAt: new Date(forum.now()).toISOString(),
+              joinedAt: new Date(forum.now()).toISOString(),
+            });
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'room_steward_change',
+              targetRef: created.room.roomId,
+              context: { setting: 'community_steward', new_value: 'creator_auto_assigned' },
+            });
           });
           forum.metrics.increment('rooms.created');
           return c.json(
@@ -675,7 +677,6 @@ export function createRoomsRoutes() {
           const { roomId, requestId } = c.req.valid('param');
           const { decision } = c.req.valid('json');
           const forum = getForumServices();
-          const identity = getIdentityServices();
           // WS-S §8: no server-side join surface for a p2p stub (see the list route).
           const decideRoomRecord = await forum.rooms.getById(roomId);
           if (decideRoomRecord?.storageMode !== 'server') {
@@ -688,20 +689,25 @@ export function createRoomsRoutes() {
           if (!request || request.roomId !== roomId || request.status !== 'pending') {
             return c.json(notFound, 404);
           }
-          if (decision === 'approve') {
-            await forum.rooms.upsertSubscription({
-              ...request,
-              status: 'active',
-              joinedAt: new Date(forum.now()).toISOString(),
+          // The membership decision and its record commit together: an approval
+          // with no trail is a member nobody admitted, and a rejection with no
+          // trail is a removal nobody made.
+          await forum.transact(async (tx) => {
+            if (decision === 'approve') {
+              await tx.rooms.upsertSubscription({
+                ...request,
+                status: 'active',
+                joinedAt: new Date(forum.now()).toISOString(),
+              });
+            } else {
+              await tx.rooms.deleteSubscription(request.roomId, request.userId);
+            }
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'room_steward_change',
+              targetRef: roomId,
+              context: { setting: 'join_request', new_value: decision },
             });
-          } else {
-            await forum.rooms.deleteSubscription(request.roomId, request.userId);
-          }
-          await identity.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'room_steward_change',
-            targetRef: roomId,
-            context: { setting: 'join_request', new_value: decision },
           });
           forum.metrics.increment(`rooms.join_${decision}`);
           return c.json({ request_id: requestId, decision });

@@ -373,11 +373,30 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
 
   const canAdmit = inviteJson.trim().length > 0 && requestJson.trim().length > 0 && !busy;
 
+  /**
+   * A GRANT BELONGS TO THE REQUEST THAT PRODUCED IT.
+   *
+   * It was free-floating state that only ever got REPLACED, so after admitting
+   * device A the panel kept showing A's grant under "send this back to the new
+   * device" while the admin worked on device B. A rejected or failed B —
+   * `verdict.ok === false`, a parse miss, a throw — writes no new grant, so the
+   * label pointed at B and the value was A's: the admin sends an unusable grant
+   * and B's join never completes, with nothing on screen saying so.
+   *
+   * Cleared when either input CHANGES (the previous grant cannot belong to the
+   * pair being typed) and again when an attempt starts, so no outcome can leave
+   * a grant from a different device on screen.
+   */
+  function beginNewAdmission(): void {
+    setGrantJson(null);
+    setStatus(null);
+  }
+
   async function admit(): Promise<void> {
     if (!canAdmit) return;
     setBusy(true);
     setError(null);
-    setStatus(null);
+    beginNewAdmission();
     try {
       const invite = await PrivateRoomSession.parseInvite(inviteJson.trim());
       if (invite === null) {
@@ -424,13 +443,19 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
       <TextArea
         label={t('privateRoom.admit.inviteLabel', 'Invite record')}
         value={inviteJson}
-        onChange={(e) => setInviteJson(e.target.value)}
+        onChange={(e) => {
+          setInviteJson(e.target.value);
+          beginNewAdmission();
+        }}
         rows={2}
       />
       <TextArea
         label={t('privateRoom.admit.requestLabel', 'Join request')}
         value={requestJson}
-        onChange={(e) => setRequestJson(e.target.value)}
+        onChange={(e) => {
+          setRequestJson(e.target.value);
+          beginNewAdmission();
+        }}
         rows={3}
       />
 

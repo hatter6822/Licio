@@ -6,6 +6,7 @@
 // without threading them through every handler; tests swap in a fresh in-memory
 // bundle per case.
 
+import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { type AuditStore, InMemoryAuditStore } from './audit.js';
 import type { AuthMethodInventory } from './auth-methods.js';
 import { type EphemeralStore, InMemoryEphemeralStore } from './ephemeral-store.js';
@@ -163,9 +164,33 @@ export class RecordingMailer implements Mailer {
   }
 }
 
+/**
+ * The stores one identity UNIT writes through, bound to a single handle.
+ *
+ * A WS-D handler rarely changes one thing: disabling email sign-in writes the
+ * user row AND the auth row and appends the record of it, and those three are
+ * one fact about one action. Sequential writes make every failure a different
+ * half-applied account — an email cleared with `emailVerified` still true, or a
+ * credential removed with nothing in the trail to say who did it.
+ */
+export interface IdentityTx {
+  readonly store: IdentityStore;
+  /** The audit append, bound to the SAME handle as the writes above. */
+  readonly audit: AuditStore;
+}
+
 export interface IdentityServices {
   config: IdentityConfig;
   store: IdentityStore;
+  /**
+   * Commit an identity change WITH its record — and with its own other writes.
+   *
+   * The same seam WS-J and WS-H carry (`ModerationTransactor`,
+   * `InvariantPlatformServices.transact`) over the shared
+   * `lib/in-memory-unit-of-work.ts`: one `db.transaction` in production, an
+   * atomic + serialised fold in the in-memory twin.
+   */
+  transact<T>(work: (tx: IdentityTx) => Promise<T>): Promise<T>;
   sessions: SessionStore;
   /** WebAuthn challenges + SIWE nonces. */
   challenges: EphemeralStore;
@@ -312,18 +337,39 @@ export function identityConfigFromEnv(env: {
 
 /** Build a fresh, fully in-memory service bundle (tests/CI; prod swaps adapters). */
 export function createInMemoryIdentityServices(config: IdentityConfig): IdentityServices {
-  return {
+  const store = new InMemoryIdentityStore();
+  const audit = new InMemoryAuditStore();
+  // The stores are read from `services` at RUN time: the production boot swaps
+  // the Drizzle adapters in afterwards, and a unit that captured the in-memory
+  // ones would keep writing where nothing else reads.
+  const unit = new InMemoryUnitOfWork<IdentityTx>(
+    {
+      get store(): IdentityStore {
+        return services.store;
+      },
+      get audit(): AuditStore {
+        return services.audit;
+      },
+    },
+    () => [
+      ...(services.store instanceof InMemoryIdentityStore ? [services.store] : []),
+      ...(services.audit instanceof InMemoryAuditStore ? [services.audit] : []),
+    ],
+  );
+  const services: IdentityServices = {
     config,
-    store: new InMemoryIdentityStore(),
+    store,
+    transact: (work) => unit.run(work),
     sessions: new InMemorySessionStore(),
     challenges: new InMemoryEphemeralStore(),
     otp: new InMemoryEphemeralStore(),
     rateLimit: new AuthRateLimiter(new InMemoryAuthRateLimitStore()),
-    audit: new InMemoryAuditStore(),
+    audit,
     mailer: new RecordingMailer(),
     secretBox: createLocalSecretBox(config.masterSecret),
     objectStore: new InMemoryObjectStore(createLocalSecretBox(config.masterSecret)),
   };
+  return services;
 }
 
 let _services: IdentityServices | undefined;

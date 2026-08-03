@@ -16,6 +16,7 @@
 //     casual DELETE path.
 //   • The right-to-erasure scrub NULLs user subjects EXCEPT under a legal
 //     hold (the audited carve-out), exactly like the in-memory adapter.
+
 import {
   complianceCaseAudits,
   type createDbClient,
@@ -41,6 +42,7 @@ import type {
   SarStatus,
 } from '@licio/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, sql } from 'drizzle-orm';
+import { DrizzleAuditStore } from '../identity/drizzle-store.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   CaseAuditRecord,
@@ -1585,6 +1587,10 @@ function complianceStoresOver(db: DbOrTx): ComplianceTxStores {
     sars: new DrizzleSarStore(db),
     lawfulAccess: new DrizzleLawfulAccessStore(db),
     pins: new DrizzleWalletRiskPinStore(db),
+    declarations: new DrizzleRegionDeclarationStore(db),
+    kyc: new DrizzleKycVerificationStore(db),
+    // The WS-D trail on the SAME handle: one action, both records.
+    identityAudit: new DrizzleAuditStore(db),
   };
 }
 

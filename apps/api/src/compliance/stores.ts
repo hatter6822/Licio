@@ -26,7 +26,11 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
-import type { InMemoryRollback as InMemoryRollbackContract } from '../lib/in-memory-rollback.js';
+import type { AuditStore } from '../identity/audit.js';
+import {
+  type InMemoryRollback as InMemoryRollbackContract,
+  mapRollback,
+} from '../lib/in-memory-rollback.js';
 import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { UniqueViolationError } from '../lib/pg-errors.js';
 
@@ -515,6 +519,21 @@ export interface ComplianceTxStores {
   sars: SarStore;
   lawfulAccess: LawfulAccessStore;
   pins: WalletRiskPinStore;
+  /** §19.1 region declarations — a declaration change is one of the mutations
+   *  that carries an identity-trail row, so it belongs in the same unit. */
+  declarations: RegionDeclarationStore;
+  /** KYC standing — a reviewer's verify/revoke is the same shape. */
+  kyc: KycVerificationStore;
+  /**
+   * The WS-D identity audit, on this handle too.
+   *
+   * A compliance mutation carries TWO records: this module's own hash-chained
+   * entry, and the identity trail row a user reads on their security page. They
+   * describe one action, so they commit with it — otherwise a declaration can
+   * change with the user's own trail silently missing the change, which is the
+   * half a §19.1 subject would notice.
+   */
+  identityAudit: AuditStore;
 }
 
 /**
@@ -984,7 +1003,15 @@ export class InMemoryCaseAuditStore implements CaseAuditStore, InMemoryRollbackC
   }
 }
 
-export class InMemoryRegionDeclarationStore implements RegionDeclarationStore {
+export class InMemoryRegionDeclarationStore
+  implements RegionDeclarationStore, InMemoryRollbackContract
+{
+  /** The unit of work's undo — this store now takes part in one, because its
+   *  writes carry an identity-trail row that commits with them. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, RegionDeclarationRecord>();
 
   async get(userId: string): Promise<RegionDeclarationRecord | null> {
@@ -1017,7 +1044,15 @@ export class InMemoryRegionDeclarationStore implements RegionDeclarationStore {
   }
 }
 
-export class InMemoryKycVerificationStore implements KycVerificationStore {
+export class InMemoryKycVerificationStore
+  implements KycVerificationStore, InMemoryRollbackContract
+{
+  /** The unit of work's undo — this store now takes part in one, because its
+   *  writes carry an identity-trail row that commits with them. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, KycVerificationRecord>();
 
   async get(userId: string): Promise<KycVerificationRecord | null> {

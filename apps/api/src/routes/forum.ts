@@ -956,14 +956,19 @@ export function createForumRoutes() {
               : {}),
             notification_preferences: nextNotifications,
           });
-          await identity.store.updateUser(auth.userId, {
-            privacySettings: nextPrivacy,
-            personalizationSettings: nextPersonalization,
-          });
-          await identity.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'privacy_setting_change',
-            context: { setting: Object.keys(patch).join(','), reason: 'feed_preferences' },
+          // Both writes are IDENTITY writes, so they commit together: §19.3
+          // requires a record of every privacy-setting change, and this surface
+          // changes them from the feed rather than the privacy page.
+          await identity.transact(async (tx) => {
+            await tx.store.updateUser(auth.userId, {
+              privacySettings: nextPrivacy,
+              personalizationSettings: nextPersonalization,
+            });
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'privacy_setting_change',
+              context: { setting: Object.keys(patch).join(','), reason: 'feed_preferences' },
+            });
           });
           if (patch.personalization_enabled !== undefined) {
             identity.onPrivacyChange?.({

@@ -415,31 +415,40 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         if (await services.store.getUserByHandle(body.handle)) {
           return c.json(err('handle_taken', 'That handle is unavailable.'), 409);
         }
-        const user = await services.store.createUser({
-          handle: body.handle,
-          displayName: body.display_name,
-          email: null,
-          accountState: 'active',
-          locale: null,
-          ageBand: 'adult',
-          privacySettings: defaultPrivacySettings(),
-          personalizationSettings: defaultPersonalizationSettings(),
-          roles: ['user'],
-        });
-        await services.store.addWalletAuth({
-          credentialId: randomUUID(),
-          userId: user.userId,
-          addressHash,
-          addressTruncated: result.addressTruncated,
-          chainId: result.chainId,
-          walletType: result.walletType,
-          createdAt: new Date().toISOString(),
-          lastUsedAt: null,
-        });
-        await services.audit.append({
-          actorUserId: user.userId,
-          eventType: 'auth_method_add',
-          context: { auth_method: 'wallet' },
+        // ONE UNIT: the account, its wallet credential, and the record of the
+        // method being added. Sequentially, a failure between any two left an
+        // account with no way to sign in, or a credential with nothing in the
+        // trail to say where it came from.
+        const handle = body.handle;
+        const displayName = body.display_name;
+        const user = await services.transact(async (tx) => {
+          const created = await tx.store.createUser({
+            handle,
+            displayName,
+            email: null,
+            accountState: 'active',
+            locale: null,
+            ageBand: 'adult',
+            privacySettings: defaultPrivacySettings(),
+            personalizationSettings: defaultPersonalizationSettings(),
+            roles: ['user'],
+          });
+          await tx.store.addWalletAuth({
+            credentialId: randomUUID(),
+            userId: created.userId,
+            addressHash,
+            addressTruncated: result.addressTruncated,
+            chainId: result.chainId,
+            walletType: result.walletType,
+            createdAt: new Date().toISOString(),
+            lastUsedAt: null,
+          });
+          await tx.audit.append({
+            actorUserId: created.userId,
+            eventType: 'auth_method_add',
+            context: { auth_method: 'wallet' },
+          });
+          return created;
         });
         const fin = await finalizeLogin(services, c, {
           userId: user.userId,
@@ -486,11 +495,21 @@ function createLoginRoutes(resolve: () => IdentityServices) {
             (s) => deriveSessionRef(services.config.masterSecret, s.tokenHash) === ref,
           );
           if (!target) return c.json(err('not_found', 'Session not found.'), 404);
-          await services.sessions.delete(target.tokenHash);
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'session_revoke',
-            context: {},
+          // The session store is REDIS in production, so this pair cannot share
+          // a transaction — but the record can still gate the change. The append
+          // runs first, inside the unit; the revoke runs inside it too, so a
+          // failed revoke aborts the record rather than leaving one for a
+          // session that is still live. What remains is the commit itself
+          // failing after a successful revoke, which is a strictly smaller
+          // window than the sequential pair this replaces (where an audit
+          // failure left the session revoked and unrecorded, every time).
+          await services.transact(async (tx) => {
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'session_revoke',
+              context: {},
+            });
+            await services.sessions.delete(target.tokenHash);
           });
           if (target.tokenHash === auth.tokenHash) {
             c.header('Set-Cookie', clearSessionCookie(), { append: true });

@@ -440,12 +440,24 @@ export function createInvariantsAdminRoutes(
             complete = true;
             break;
           }
-          scanned += threads.length;
           const stories = await ingestion.stories.getByIds(threads.map((t) => t.storyId));
           const last = threads[threads.length - 1];
           threadCursor =
             last === undefined ? null : { createdAt: last.createdAt, threadId: last.threadId };
           for (const thread of threads) {
+            // THE CAP IS CHECKED BEFORE THE THREAD IS CONSIDERED, which is what
+            // `assembleEngagementLandscape` learned the same way: completeness
+            // must fall out of what the walk DID, not out of which break fired.
+            //
+            // Exiting from the bottom of the body skipped the short-page check
+            // below, so filling the cap on the room's FINAL thread — every
+            // thread examined — was reported as a truncated scan, and a steward
+            // reading `complete: false` over a room they have seen all of goes
+            // looking for findings that do not exist. Checking here means a page
+            // consumed to its end falls through to that check instead, and a
+            // thread this walk never looked at is one `scanned` never counts.
+            if (entries.length >= SCOI_REPORT_ENTRIES) break scan;
+            scanned += 1;
             const story = stories.get(thread.storyId);
             if (!story) continue;
             const scoi = await latestScoiFor(events, story.storyId);
@@ -474,7 +486,6 @@ export function createInvariantsAdminRoutes(
               // The §10.5 "Bridge attempts" branch (the WS-H.4.2d credit surface).
               bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
             });
-            if (entries.length >= SCOI_REPORT_ENTRIES) break scan;
           }
           if (threads.length < SCOI_REPORT_PAGE) {
             // A short page IS the end of the room.
@@ -712,31 +723,39 @@ export function createInvariantsAdminRoutes(
         const auth = getAuth(c);
         if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
         const invariants = resolveInvariants();
-        const identity = resolveIdentity();
         const body = c.req.valid('json');
-        const problem = await invariants.promotionService.apply(
-          {
-            invariantType: body.invariant_type,
-            fromStatus: body.from_status,
-            toStatus: body.to_status,
-            evidence: {
-              shadowDurationDays: body.evidence.shadow_duration_days,
-              driftReportRef: body.evidence.drift_report_ref,
-              observedCoverage: body.evidence.observed_coverage,
-              observedConfidence: body.evidence.observed_confidence,
+        // A promotion changes what an invariant is ALLOWED to do to ranking, so
+        // it commits with the record of who changed it: the shadow-status row
+        // and the operator's trail entry are one governance decision.
+        // `promotionServiceOver` binds the same service — regression gate and
+        // observed-evidence reads included — to the unit's handle.
+        const problem = await invariants.transact(async (tx) => {
+          const rejected = await invariants.promotionServiceOver(tx.promotions).apply(
+            {
+              invariantType: body.invariant_type,
+              fromStatus: body.from_status,
+              toStatus: body.to_status,
+              evidence: {
+                shadowDurationDays: body.evidence.shadow_duration_days,
+                driftReportRef: body.evidence.drift_report_ref,
+                observedCoverage: body.evidence.observed_coverage,
+                observedConfidence: body.evidence.observed_confidence,
+              },
+              owner: body.owner,
+              createdAt: new Date(invariants.now()).toISOString(),
             },
-            owner: body.owner,
-            createdAt: new Date(invariants.now()).toISOString(),
-          },
-          invariants.config().promotionMinShadowDays,
-        );
-        if (problem !== null) return c.json(deny('promotion_rejected', problem), 422);
-        await identity.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'invariant_promotion_change',
-          targetRef: body.invariant_type,
-          context: { from: body.from_status, to: body.to_status, owner: body.owner },
+            invariants.config().promotionMinShadowDays,
+          );
+          if (rejected !== null) return rejected;
+          await tx.audit({
+            actorUserId: auth.userId,
+            eventType: 'invariant_promotion_change',
+            targetRef: body.invariant_type,
+            context: { from: body.from_status, to: body.to_status, owner: body.owner },
+          });
+          return null;
         });
+        if (problem !== null) return c.json(deny('promotion_rejected', problem), 422);
         return c.json({
           invariant_type: body.invariant_type,
           shadow_status: await invariants.promotionService.statusOf(body.invariant_type),

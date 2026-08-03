@@ -18,10 +18,14 @@ import { randomUUID } from 'node:crypto';
 import {
   canonicalDirectoryStubBytes,
   canonicalRegistrationProofBytes,
+  defaultPersonalizationSettings,
+  defaultPrivacySettings,
   type SignedDirectoryStubBody,
 } from '@licio/shared';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
+import { getIdentityServices } from '../identity/services.js';
+import { createSession } from '../identity/sessions.js';
 import { getModerationServices } from '../moderation/services.js';
 import { PrivateRoomStubService, setPrivateRoomStubService } from '../private-rooms/service.js';
 import {
@@ -1028,16 +1032,43 @@ describe('registration proves POSSESSION of the room key', () => {
 });
 
 describe('the staff delist is bound to the case it names', () => {
-  it('rolls the demotion BACK when the supplied case is not open for this room', async () => {
-    // The demotion runs first inside the unit, and §21.3 does not make the mode
-    // patchable back — so a stale console click (another reviewer resolved the
-    // case, or the id names a different room) would otherwise apply the
-    // irreversible remedy and commit an unscoped audit row for it.
-    const store = new InMemoryPrivateRoomStubStore();
-    const svc = new PrivateRoomStubService(store);
-    setPrivateRoomStubService(svc);
-    const created = await svc.create(listedRequest(), ACCOUNT);
-    if (!created.ok) throw new Error('create failed');
+  /** A TOTP-cleared platform admin: the §21.4 staff bar is `admin` + a session
+   *  whose MFA was verified THIS session, which is what `requireSteward`-grade
+   *  actions demand. */
+  async function staffSession(): Promise<{ cookie: string; token: string }> {
+    const identity = getIdentityServices();
+    const user = await identity.store.createUser(
+      {
+        handle: `staff${randomUUID().slice(0, 8)}`,
+        displayName: 'Staff',
+        email: null,
+        accountState: 'active',
+        locale: null,
+        ageBand: 'adult',
+        privacySettings: defaultPrivacySettings(),
+        personalizationSettings: defaultPersonalizationSettings(),
+        roles: ['user', 'admin'],
+      },
+      Date.now(),
+    );
+    await identity.store.setAuth(user.userId, { mfaEnabled: true });
+    const { token: sid } = await createSession(identity.sessions, {
+      userId: user.userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'test',
+      rememberMe: false,
+      // Cleared THIS session, which is the §21.4 staff bar — an enrolled but
+      // unverified session is exactly the stolen-cookie case it excludes.
+      mfaVerified: true,
+    });
+    const cookie = `__Host-sid=${sid}`;
+    const res = await createApp().request('/api/csrf-token', { headers: { Cookie: cookie } });
+    const { token } = (await res.json()) as { token: string };
+    return { cookie, token };
+  }
+
+  /** Wire the moderation unit to a real stub store, as the composition roots do. */
+  function bindDelist(svc: PrivateRoomStubService, store: InMemoryPrivateRoomStubStore): void {
     const mod = getModerationServices();
     // The unit can only undo what it knows about — the same registration the
     // composition roots make.
@@ -1046,24 +1077,97 @@ describe('the staff delist is bound to the case it names', () => {
       (await svc.delistListed(roomServerId)) !== null;
     mod.isPubliclyListedRoom = async (roomServerId: string) =>
       await svc.isPubliclyListed(roomServerId);
+  }
 
-    const staleCase = randomUUID();
-    const refused = await mod.transactor
-      .run(async (tx) => {
-        await tx.delistListedRoom?.(created.value.room_server_id);
-        const resolved = await tx.cases.resolveIfOpen(staleCase, {
-          targetType: 'room',
-          targetId: created.value.room_server_id,
-        });
-        if (resolved === null) throw new Error('stale case');
-        return true;
-      })
-      .catch(() => false);
+  it('rolls the demotion BACK when the supplied case is not open for this room', async () => {
+    // THROUGH THE ROUTE, deliberately. The previous version of this test built
+    // its own unit and threw inside it, which proved the transactor rolls back
+    // on a throw — a fact about `in-memory-unit-of-work.ts` — while the handler
+    // it was written for threw nothing at all: `resolveIfOpen` returning null
+    // merely dropped `case_id` from the audit row and committed the demotion.
+    // `StaleDelistCaseError` and the whole `case_not_open` response existed and
+    // were unreachable. A test that constructs the behaviour it is checking
+    // cannot notice that.
+    //
+    // §21.3 does not make the mode patchable back, so a stale console click —
+    // another reviewer resolved the case, or the id names a different room —
+    // would otherwise apply the irreversible remedy, leave the named case open
+    // in the queue with no mention of the enforcement, and answer 200.
+    const store = new InMemoryPrivateRoomStubStore();
+    const svc = new PrivateRoomStubService(store);
+    setPrivateRoomStubService(svc);
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    bindDelist(svc, store);
 
-    expect(refused).toBe(false);
+    const { cookie, token } = await staffSession();
+    const res = await createApp().request(
+      `/v1/private-rooms/${created.value.room_server_id}/delist`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          Cookie: cookie,
+          'X-CSRF-Token': token,
+        },
+        body: JSON.stringify({ case_id: randomUUID() }),
+      },
+    );
+
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: 'case_not_open' },
+    });
     // The record is STILL listed: the unit rolled the demotion back with the
     // refusal, rather than leaving the remedy applied without its case.
     expect(await svc.isPubliclyListed(created.value.room_server_id)).toBe(true);
+  });
+
+  it('delists and RESOLVES when the case is open for this room', async () => {
+    // The other arm, so the rollback above is not passing for the trivial
+    // reason that staff delisting never works through this route.
+    const store = new InMemoryPrivateRoomStubStore();
+    const svc = new PrivateRoomStubService(store);
+    setPrivateRoomStubService(svc);
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    bindDelist(svc, store);
+
+    const mod = getModerationServices();
+    const opened = await mod.cases.insert({
+      caseId: randomUUID(),
+      targetType: 'room',
+      targetId: created.value.room_server_id,
+      contentKind: null,
+      status: 'new',
+      severity: 'severe',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 1,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+
+    const { cookie, token } = await staffSession();
+    const res = await createApp().request(
+      `/v1/private-rooms/${created.value.room_server_id}/delist`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          Cookie: cookie,
+          'X-CSRF-Token': token,
+        },
+        body: JSON.stringify({ case_id: opened.caseId }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ delisted: true });
+    expect(await svc.isPubliclyListed(created.value.room_server_id)).toBe(false);
+    // …and the case closed WITH the delist, not beside it.
+    expect((await mod.cases.getById(opened.caseId))?.status).toBe('resolved');
   });
 });
 
@@ -1135,6 +1239,39 @@ describe('ONE record per room — adopted by its owner, refused to anyone else',
     // …and the first record is untouched — a refusal must not disturb it.
     expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(1);
     expect(await svc.exportForAccount(OTHER_ACCOUNT)).toHaveLength(0);
+  });
+
+  it('refuses a NON-CANONICAL spelling of a room key — one room, one text', async () => {
+    // Uniqueness is enforced on the TEXT (`private_room_stubs_room_key_uq`,
+    // and `=` everywhere it is compared), while possession is proved against
+    // the DECODED bytes. 32 bytes occupy 43 base64url characters with two bits
+    // to spare, so a key has four spellings that decode identically — and every
+    // one of them would satisfy the signature and the account-bound proof while
+    // presenting to Postgres as a different room. That is the room-registration
+    // uniqueness bypassed by editing one character, so the boundary takes only
+    // the canonical spelling.
+    const canonical = DEFAULT_KEYS.publicKey;
+    const stem = canonical.slice(0, 42);
+    const tail = canonical.slice(42);
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const index = alphabet.indexOf(tail);
+    const siblings = [1, 2, 3].map((offset) => stem + alphabet[(index & ~3) + (offset % 4)]);
+
+    // The premise: same key bytes, different text.
+    for (const sibling of siblings) {
+      expect(sibling).not.toBe(canonical);
+      expect(Buffer.from(sibling, 'base64url').toString('hex')).toBe(
+        Buffer.from(canonical, 'base64url').toString('hex'),
+      );
+      const parsed = privateRoomCreateStubRequestSchema.safeParse(
+        listedRequest({
+          signed_stub: { ...SIGNED_STUB, room_public_key: sibling },
+        }),
+      );
+      expect(parsed.success).toBe(false);
+    }
+    // …and the canonical spelling the client's encoder emits still passes.
+    expect(privateRoomCreateStubRequestSchema.safeParse(listedRequest()).success).toBe(true);
   });
 });
 

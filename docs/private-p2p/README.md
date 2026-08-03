@@ -229,7 +229,14 @@ room view's "Manage members & verify devices" toggle, all jsdom + axe tested):
   §21.4 failure mode.  A room has ONE record — the uniqueness key is the room's
   founder signing key, not `(account, room)` — so registration ADOPTS the
   caller's own record and REFUSES a room another account already registered
-  (`room_already_registered`); the panel correspondingly treats a `/mine` miss
+  (`room_already_registered`).  Two things make that key an identity rather than
+  a string: a REGISTRATION PROOF over `(room key, manifest commitment, account)`,
+  verified and discarded, so the public stub signature cannot simply be replayed
+  under another account; and CANONICAL base64url on every fixed-size field
+  (`isCanonicalBase64Url`, `@licio/shared`), because a 32-byte key has four
+  spellings that decode identically — and uniqueness is enforced on the TEXT
+  while possession is proved against the BYTES, so without it one room is four
+  rows, each provable by the same holder.  The panel correspondingly treats a `/mine` miss
   as "this account owns none", never as "the room has none", and offers
   registration only where absence is KNOWN (no stored handle, or a removal this
   device performed).  An unreadable record can be forgotten explicitly on this

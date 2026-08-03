@@ -114,6 +114,9 @@ export interface InvariantTx {
    * time. Both are re-asked inside the unit, against the row it holds.
    */
   readonly rooms: Pick<RoomStore, 'getById' | 'stewardRolesFor'>;
+  /** The shadow-status history — a promotion is a durable governance decision
+   *  and carries the operator's identity-trail row with it. */
+  readonly promotions: PromotionStore;
 }
 
 export interface InvariantPlatformServices {
@@ -136,6 +139,9 @@ export interface InvariantPlatformServices {
    * being re-derived per call site.
    */
   transact<T>(work: (tx: InvariantTx) => Promise<T>): Promise<T>;
+  /** The promotion service over a GIVEN store — so a caller inside a unit can
+   *  apply a promotion through the same handle that records it. */
+  promotionServiceOver(store: PromotionStore): PromotionService;
   sessions: SessionTopicSequenceStore;
   promotionService: PromotionService;
   meri: MeriService;
@@ -207,24 +213,28 @@ export function createInMemoryInvariantServices(
       get rooms(): Pick<RoomStore, 'getById' | 'stewardRolesFor'> {
         return forum.rooms;
       },
+      get promotions(): PromotionStore {
+        return services.promotions;
+      },
     },
-    () => (services.bridgeAttempts instanceof InMemoryBridgeAttemptStore ? [bridgeAttempts] : []),
+    () => [
+      ...(services.bridgeAttempts instanceof InMemoryBridgeAttemptStore ? [bridgeAttempts] : []),
+      ...(services.promotions instanceof InMemoryPromotionStore ? [services.promotions] : []),
+    ],
   );
-  const services: InvariantPlatformServices = {
-    promotions,
-    calibrations: new InMemoryCalibrationStore(),
-    runMetadata: new InMemoryRunMetadataStore(),
-    mfciCases: new InMemoryMfciCaseStore(),
-    mfciMargins: new InMemoryMfciMarginsStore(),
-    mfciRiskStates: new InMemoryMfciRiskStateStore(),
-    bridgeAttempts,
-    transact: (work) => unit.run(work),
-    sessions,
-    // Pass a GETTER so a post-construction store swap (the production boot
-    // replaces `promotions` with the Drizzle adapter) is honoured — otherwise
-    // the service would keep reading the orphaned in-memory store.
-    promotionService: createPromotionService(
-      () => services.promotions,
+
+  /**
+   * The promotion service over ONE store.
+   *
+   * Two call sites need it: the container's own (reading whichever adapter is
+   * installed) and `/promotions`, which must apply the change through the unit
+   * that records it — and a second construction would be a second copy of the
+   * regression gate and the observed-evidence reads, which is exactly how the
+   * gate a promotion is checked against drifts from the one documented.
+   */
+  const buildPromotionService = (store: () => PromotionStore): PromotionService =>
+    createPromotionService(
+      store,
       (invariantType) =>
         Object.values(INVARIANT_CARDS).find((c) => c.invariant_type === invariantType) ?? null,
       log,
@@ -246,7 +256,26 @@ export function createInMemoryInvariantServices(
           observedConfidence: health.confidenceRatio,
         };
       },
-    ),
+    );
+
+  const services: InvariantPlatformServices = {
+    promotions,
+    calibrations: new InMemoryCalibrationStore(),
+    runMetadata: new InMemoryRunMetadataStore(),
+    mfciCases: new InMemoryMfciCaseStore(),
+    mfciMargins: new InMemoryMfciMarginsStore(),
+    mfciRiskStates: new InMemoryMfciRiskStateStore(),
+    bridgeAttempts,
+    transact: (work) => unit.run(work),
+    sessions,
+    // Pass a GETTER so a post-construction store swap (the production boot
+    // replaces `promotions` with the Drizzle adapter) is honoured — otherwise
+    // the service would keep reading the orphaned in-memory store.
+    // The SAME service, over a caller-supplied store — so `/promotions` can run
+    // `apply()` inside the unit that records it without re-deriving the
+    // regression gate and the observed-evidence reads.
+    promotionServiceOver: (store) => buildPromotionService(() => store),
+    promotionService: buildPromotionService(() => services.promotions),
     // Services are constructed below (deps need the config getter).
     meri: undefined as unknown as MeriService,
     mfci: undefined as unknown as MfciService,

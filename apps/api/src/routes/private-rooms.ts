@@ -563,15 +563,21 @@ export function createPrivateRoomsRoutes() {
             // ago is neither reopened-and-reclosed nor stripped of the
             // `resolvedActionId` link to the enforcement that actually closed it.
             // Its history keeps the remedy that resolved it rather than gaining a
-            // later, unrelated one presented as the resolution — which is also
-            // why a non-match takes the audit's `case_id` with it.
-            let matchedCase: string | undefined;
+            // later, unrelated one presented as the resolution.
+            //
+            // A MISS ABORTS THE WHOLE REMEDY. Committing the demotion with the
+            // `case_id` merely dropped from the audit row is the worst of the
+            // three outcomes: the room is delisted, the reviewer's named case is
+            // still `new` in the queue, its history never mentions the
+            // enforcement, and the 200 tells them it all went through. Rolling
+            // back and answering `case_not_open` puts the decision back where it
+            // belongs — reload the case, then act on what it says now.
             if (caseId !== undefined) {
               const resolved = await tx.cases.resolveIfOpen(caseId, {
                 targetType: 'room',
                 targetId: params.data.roomServerId,
               });
-              if (resolved !== null) matchedCase = caseId;
+              if (resolved === null) throw new StaleDelistCaseError();
             }
             await tx.audit({
               actorUserId: auth.userId,
@@ -584,7 +590,9 @@ export function createPrivateRoomsRoutes() {
               priorState: 'listed',
               nextState: 'unlisted',
               reversible: false,
-              ...(matchedCase !== undefined ? { caseId: matchedCase } : {}),
+              // Reachable only past the resolve above, so the id on the row is
+              // always a case this same unit closed.
+              ...(caseId !== undefined ? { caseId } : {}),
               notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
             });
             return true;

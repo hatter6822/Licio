@@ -33,8 +33,16 @@ export interface PromotionStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryPromotionStore implements PromotionStore {
+export class InMemoryPromotionStore implements PromotionStore, InMemoryRollback {
   readonly #rows: PromotionRecordRow[] = [];
+
+  /** The unit of work's undo. Append-only, so the LENGTH is the whole of it. */
+  beginRollback(): () => void {
+    const saved = this.#rows.length;
+    return () => {
+      this.#rows.length = saved;
+    };
+  }
 
   async append(record: PromotionRecordRow): Promise<void> {
     this.#rows.push({ ...record });
