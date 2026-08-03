@@ -136,6 +136,21 @@ export interface StoredDirectoryStub {
     /** The §21.2 token that opens the record. Epoch-0 derived, never rotates. */
     readonly bootstrapBlindId: string;
   };
+  /**
+   * Set when the record this handle opens FAILED to verify against this room.
+   *
+   * A handle arrives in a sealed invite, and neither it nor the capability is
+   * bound to the room the invite is for — so an inviter who belongs to room A
+   * can put A's handle into an invite for room B. After joining B, the panel
+   * checks the record against B's own key and commitment; when that fails, the
+   * handle is not merely unusable, it is a pointer at ANOTHER room, and a member
+   * who later becomes an admin would copy it into every invite they issue.
+   *
+   * Quarantined rather than deleted: the member should be told what happened and
+   * decide, and a silent deletion is indistinguishable from never having had
+   * one. Nothing propagates it while this is set.
+   */
+  readonly quarantined?: boolean;
 }
 
 /*

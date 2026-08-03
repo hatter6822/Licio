@@ -254,6 +254,44 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
 });
 
 describe('§21 directory capability carried through the SEALED invite (WS-S.1.2b)', () => {
+  it('stops handing out a QUARANTINED handle in new invites', async () => {
+    // A handle rides a sealed invite and is not bound to the room that invite is
+    // for, so a member can be given another room's. Post-join verification is
+    // where that shows up — and a member who later becomes an admin would copy
+    // the poisoned reference into every invite they issue, spreading it through
+    // people who did nothing wrong.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Listed Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const payload = await founder.directoryStubPayload();
+    await founder.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const before = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    expect(before.invite.room_stub_ref).toBe('11111111-1111-4111-8111-111111111111');
+
+    await founder.quarantineDirectoryStub();
+    const after = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    expect(after.invite.room_stub_ref).toBeUndefined();
+    expect(after.invite.bootstrap_blind_id).toBeUndefined();
+  });
+
   it('takes NO handle when two invites for one room disagree about the record', async () => {
     // A grant carries the room's manifest, not the invite it answers, and one
     // preparation uses one KeyPackage for all of them — so two invites for the

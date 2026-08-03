@@ -72,6 +72,7 @@ function sessionDouble(
     canRegisterDirectory: true,
     name: 'Neighbourhood watch',
     clearDirectoryStub: async () => {},
+    quarantineDirectoryStub: async () => {},
     directoryStubPayload: async () => ({
       roomPublicKey: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
       manifestKeyCommitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
@@ -201,14 +202,23 @@ describe('DirectoryRecordPanel', () => {
     // room key — so a client that does not verify makes both the signature and
     // the server's identity-preservation refusal decoration.
     mockApi(() => bootstrapBody());
+    const quarantined = vi.fn().mockResolvedValue(undefined);
     const session = sessionDouble(STUB);
     (session as unknown as { verifyDirectoryRecord: unknown }).verifyDirectoryRecord = async () =>
       false;
+    (session as unknown as { quarantineDirectoryStub: unknown }).quarantineDirectoryStub =
+      quarantined;
     render(<DirectoryRecordPanel session={session} />);
-    expect(await screen.findByRole('alert')).toHaveTextContent(/the room did not sign/i);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/did not sign/i);
     // Fail CLOSED: nothing from the record is displayed, since its commitments
     // are what a member would bootstrap from.
     expect(screen.queryByText('Neighbourhood watch')).toBeNull();
+    // …and the handle STOPS TRAVELLING. A handle that fails verification points
+    // at another room, and an admin holding it copies it into every invite they
+    // issue — the poisoned reference spreading through honest members.
+    await waitFor(() => expect(quarantined).toHaveBeenCalled());
+    // The member is offered the deliberate way out rather than left with it.
+    expect(screen.getByRole('button', { name: /Forget this record/i })).toBeInTheDocument();
   });
 
   it('ADOPTS an existing record instead of minting a second one', async () => {

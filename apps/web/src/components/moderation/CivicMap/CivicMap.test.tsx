@@ -40,7 +40,6 @@ function landscape(over: Partial<CivicMapResponse> = {}): CivicMapResponse {
         title: 'Flooding on the ring road',
         // A deliberately distinctive number so a printed level is detectable.
         level: 4242,
-        thread_id: 'aaaaaaaa-1111-4111-8111-111111111111',
         topics: [TOPIC],
         final: true,
       },
@@ -48,7 +47,6 @@ function landscape(over: Partial<CivicMapResponse> = {}): CivicMapResponse {
         basin_id: BASIN_B,
         title: 'Council budget vote',
         level: 17,
-        thread_id: 'bbbbbbbb-2222-4222-8222-222222222222',
         topics: [TOPIC],
         final: false,
       },
@@ -56,7 +54,6 @@ function landscape(over: Partial<CivicMapResponse> = {}): CivicMapResponse {
         basin_id: BASIN_C,
         title: 'Untargetable basin',
         level: 5,
-        thread_id: null,
         topics: [],
         final: true,
       },
@@ -180,7 +177,6 @@ describe('CivicMap', () => {
       basin_id: `${String(i).padStart(8, '0')}-1111-4111-8111-111111111111`,
       title: `Basin ${i}`,
       level: 20 - i,
-      thread_id: null,
       topics: [],
       final: true,
     }));

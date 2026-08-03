@@ -89,17 +89,19 @@ export const civicMapBasinSchema = z.object({
    *  axis, never a score: see the header. */
   level: z.number().int().min(0),
   /** The peak story's thread, when it has one — the bridge-request target. */
-  /**
-   * The thread a bridge request would target — null when there is none the
-   * CALLER can act on.
+  /* No `thread_id` HERE.
    *
-   * Null covers two different facts on purpose, because the surface should
-   * distinguish neither: the basin has no thread, or this analyst holds no
-   * steward role in its room. Offering a control that deterministically 404s is
-   * the worse of the two, and reporting WHICH it is would tell an analyst
-   * without authority that a room exists and who stewards it.
+   * A basin carried one, resolved through the full bridge-eligibility chain —
+   * the thread, its room, this caller's steward grants, any open attempt and a
+   * SCOI baseline — and the panel never read it: the only bridge control the map
+   * offers is a saddle's `bridge_thread_id`, because the actionable thing is a
+   * fragile JOIN, not a peak. A window of disconnected stories makes every node
+   * a peak, so up to 100 basins each ran that chain serially: several hundred
+   * store round trips per map load, for a field with no consumer.
+   *
+   * The field is removed rather than nulled: a value that is always null is a
+   * consumer's next question, and the answer would be "it was never used".
    */
-  thread_id: uuidSchema.nullable(),
   /** Catalog topics on the peak story (the sentinel is never included). */
   topics: z.array(civicMapTopicSchema).max(8),
   /** True when this basin is still distinct after the full sweep. */

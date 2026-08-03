@@ -107,6 +107,19 @@ export function DirectoryRecordPanel({
         record.stub_signature === null ||
         !(await session.verifyDirectoryRecord(record.signed_stub, record.stub_signature))
       ) {
+        // QUARANTINE the handle, do not merely refuse to show the record.
+        //
+        // A handle arrives in a sealed invite and is not bound to the room that
+        // invite is for, so an inviter who belongs to room A can hand out A's
+        // handle in an invite for room B. Failing verification here is that
+        // case: this is a pointer at ANOTHER room. Left alone it keeps
+        // travelling — a member who later becomes an admin copies it into every
+        // invite they issue, spreading the poisoned reference through people who
+        // did nothing wrong.
+        //
+        // Marked rather than deleted: the member is told, and forgets it
+        // deliberately. It stops propagating the moment this lands.
+        await session.quarantineDirectoryStub();
         setState({ kind: 'unverified' });
         return false;
       }
@@ -273,7 +286,7 @@ export function DirectoryRecordPanel({
           <p className="text-error-on-soft text-sm" role="alert">
             {t(
               'privateRoom.record.unverified',
-              'Licio returned a record for this room that the room did not sign. It is not shown, and nothing here should be trusted until you can check with another member.',
+              'Licio returned a record that this room did not sign. It is not shown, this device has stopped handing it out in invites, and nothing about it should be trusted — forget it here once you have checked with another member.',
             )}
           </p>
         ) : state.kind === 'absent' ? (
@@ -629,7 +642,8 @@ export function DirectoryRecordPanel({
             asks them to assert it: forgetting is a local act on this device,
             and afterwards the panel offers registration because the handle is
             genuinely gone rather than because a lookup was read as proof. */}
-        {state.kind === 'unreadable' && roomServerId !== undefined ? (
+        {(state.kind === 'unreadable' || state.kind === 'unverified') &&
+        roomServerId !== undefined ? (
           <div>
             <Button
               type="button"

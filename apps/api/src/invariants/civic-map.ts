@@ -156,6 +156,15 @@ export async function buildCivicMap(
     topicsByStory.set(node.id, topicsFor(byId.get(node.id)?.topicIds ?? []));
   }
 
+  // NO eligibility resolution here.
+  //
+  // A basin used to carry a `thread_id` resolved through the full bridge chain,
+  // and nothing rendered it: the map's only bridge control is a saddle's
+  // `bridge_thread_id`, because what is actionable is a fragile JOIN rather than
+  // a peak. A window of disconnected stories makes every node a peak, so up to
+  // 100 basins each ran that chain — the thread, its room, this caller's steward
+  // grants, any open attempt, a SCOI baseline — one after another. Several
+  // hundred serial round trips per map load, for a field with no consumer.
   const basins: CivicMapBasin[] = [];
   for (const peak of graph.peaks) {
     const story = byId.get(peak.basin);
@@ -169,7 +178,6 @@ export async function buildCivicMap(
       // removed along with the race it reopened.
       title: story?.title ?? '',
       level: peak.level,
-      thread_id: await actionableThread(peak.basin),
       topics,
       final: finalBasins.has(peak.basin),
     });

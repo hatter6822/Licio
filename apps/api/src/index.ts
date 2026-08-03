@@ -301,7 +301,12 @@ import {
 } from './private-rendezvous/scheduler.js';
 import { getRendezvousService } from './private-rendezvous/service.js';
 import { DrizzlePrivateRoomStubStore } from './private-rooms/drizzle-store.js';
-import { getPrivateRoomStubService, inMemoryStubStore } from './private-rooms/service.js';
+import {
+  getPrivateRoomStubService,
+  inMemoryStubStore,
+  PrivateRoomStubService,
+  setPrivateRoomStubService,
+} from './private-rooms/service.js';
 import { loadPwattRuntimeConfig, loadTriggerThreshold } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
@@ -655,6 +660,15 @@ if (db) {
   invariantServices.mfciMargins = new DrizzleMfciMarginsStore(db);
   invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
   invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
+  // …and the directory-stub service on THIS client.
+  //
+  // Its lazy builder creates its own `createDbClient` when `DATABASE_URL` is
+  // set, which is a SECOND postgres.js pool against the same database — another
+  // ten connections per replica, for one table. The composition root already
+  // holds the client every other store shares, so it installs the service
+  // rather than letting the fallback mint a pool (the same correction
+  // `lcap/service.ts` carries).
+  setPrivateRoomStubService(new PrivateRoomStubService(new DrizzlePrivateRoomStubStore(db)));
   // …AND the unit those writes commit through. Swapping the store without this
   // would leave the in-memory unit running over the Drizzle store: the writes
   // would land, and the ATOMICITY they are inside the unit for would not — an

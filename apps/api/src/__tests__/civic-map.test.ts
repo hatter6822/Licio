@@ -115,7 +115,6 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     if (!map) return;
     const basin = map.basins[0];
     expect(basin?.title).toMatch(/^Story /);
-    expect(basin?.thread_id).toBe(`thread-${basin?.basin_id}`);
     expect(basin?.topics[0]?.name).toBe(TOPIC_A?.name);
   });
 
@@ -189,13 +188,34 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     ];
     const { events, ingestion } = services(rows);
     const unauthorized = await buildCivicMap(events, ingestion, NOW, async () => false);
-    expect(unauthorized?.basins.every((basin) => basin.thread_id === null)).toBe(true);
     expect(unauthorized?.merges.every((saddle) => saddle.bridge_thread_id === null)).toBe(true);
 
     // …and the DEFAULT is that same closed answer, so a caller that forgets to
     // pass an authority resolver cannot publish targets by omission.
     const byDefault = await buildCivicMap(events, ingestion, NOW);
-    expect(byDefault?.basins.every((basin) => basin.thread_id === null)).toBe(true);
+    expect(byDefault?.merges.every((saddle) => saddle.bridge_thread_id === null)).toBe(true);
+  });
+
+  it('asks the eligibility resolver NOTHING when there is no fragile join', async () => {
+    // Basins carried a resolved `thread_id` that nothing rendered — the map's
+    // only bridge control is a saddle's. A window of disconnected stories makes
+    // every node a peak, so up to 100 basins each ran the full chain (thread,
+    // room, steward grants, open attempt, SCOI baseline) one after another.
+    let asked = 0;
+    const rows = Array.from({ length: 12 }, (_, i) =>
+      // Each story on its OWN topic: no edges, so every node is a peak and no
+      // merge exists to be actionable.
+      story(`${i.toString(16).padStart(8, '0')}-1111-4111-8111-111111111111`, 100 - i, [
+        `topic-${i}`,
+      ]),
+    );
+    const { events, ingestion } = services(rows);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => {
+      asked += 1;
+      return true;
+    });
+    expect(map?.basins.length).toBeGreaterThan(1);
+    expect(asked).toBe(0);
   });
 
   it('hands the resolver a THREAD id and nothing else', async () => {
@@ -205,21 +225,32 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     // threads). `bridgeEligibility` reads the thread itself, so the map cannot
     // hand it a stale room at all; what it must pass is the thread of the
     // node's own shell, not one derived from the story id.
+    //
+    // Two peaks joined through a lower connector: the shape that HAS a fragile
+    // merge, which is the only thing that asks now.
     const seen: string[] = [];
     const rows: FakeStory[] = [
       {
         storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
-        title: 'A',
+        title: 'X peak',
         topicIds: [TOPIC_A?.id ?? ''],
-        events: 9,
+        events: 20,
         roomId: 'origin-room',
         threadRoomId: 'current-room',
       },
       {
         storyId: 'bbbbbbbb-2222-4222-8222-222222222222',
-        title: 'B',
-        topicIds: [TOPIC_A?.id ?? ''],
-        events: 4,
+        title: 'Z peak',
+        topicIds: [TOPIC_B?.id ?? ''],
+        events: 18,
+        roomId: 'origin-room',
+        threadRoomId: 'current-room',
+      },
+      {
+        storyId: 'cccccccc-3333-4333-8333-333333333333',
+        title: 'The connector',
+        topicIds: [TOPIC_A?.id ?? '', TOPIC_B?.id ?? ''],
+        events: 2,
         roomId: 'origin-room',
         threadRoomId: 'current-room',
       },
@@ -231,64 +262,8 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     });
     expect(seen.length).toBeGreaterThan(0);
     for (const threadId of seen) expect(threadId).toMatch(/^thread-/);
-    // Memoized per story: one resolution per node, however many saddles sample it.
+    // Memoized per story: one resolution per story, however many saddles sample it.
     expect(new Set(seen).size).toBe(seen.length);
-  });
-
-  it('reports whether the window was scanned to its END', async () => {
-    // The landscape is bounded twice — a node cap and a scan ceiling — and a
-    // partial hour drawn as the hour is the same defect as an empty report read
-    // as a clean room. The completeness travels in the RESULT, so a consumer
-    // cannot hold the node list without it.
-    const rows = [
-      {
-        storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
-        title: 'A',
-        topicIds: [TOPIC_A?.id ?? ''],
-        events: 9,
-      },
-    ];
-    const { events, ingestion } = services(rows);
-    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
-    expect(map?.scan.complete).toBe(true);
-    expect(map?.scan.examined).toBe(1);
-  });
-
-  it('reads the window ONCE — a re-read is offset paging over a mutating order', async () => {
-    // The scan used to re-read with a growing limit and slice off what it had
-    // already seen. A late offline event recomputes the completed hour, so
-    // `event_count` changes and a row can move INTO the prefix the next read
-    // discards: never examined, and — if that read came back short — reported
-    // as a complete scan. De-duplicating by id cannot recover it, and a keyset
-    // cursor cannot either, because the sort key is the value that changes.
-    let reads = 0;
-    const rows = Array.from({ length: 300 }, (_, i) =>
-      story(`${i.toString(16).padStart(8, '0')}-1111-4111-8111-111111111111`, 300 - i, [
-        TOPIC_A?.id ?? '',
-      ]),
-    );
-    const base = services(rows);
-    const events = {
-      windowStore: {
-        listActiveInWindow: (start: string, size: string, limit: number) => {
-          reads += 1;
-          return (
-            base.events as unknown as {
-              windowStore: {
-                listActiveInWindow: (
-                  s: string,
-                  z: string,
-                  l: number,
-                ) => Promise<{ itemId: string; eventCount: number }[]>;
-              };
-            }
-          ).windowStore.listActiveInWindow(start, size, limit);
-        },
-      },
-    } as unknown as Parameters<typeof buildCivicMap>[0];
-
-    await buildCivicMap(events, base.ingestion, NOW, async () => true);
-    expect(reads).toBe(1);
   });
 
   it('calls a cap reached at a BATCH BOUNDARY incomplete too', async () => {

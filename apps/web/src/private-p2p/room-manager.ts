@@ -775,6 +775,20 @@ export class PrivateRoomSession {
     this.session = rest;
     await putRoomSession(this.session);
   }
+  /**
+   * Mark the stored handle as pointing at ANOTHER room.
+   *
+   * Called when the post-join verification fails: the record the handle opens is
+   * not signed by this room, so it was never this room's. Kept rather than
+   * deleted — the member is told, and can forget it deliberately — but it stops
+   * travelling in invites the moment it is set.
+   */
+  async quarantineDirectoryStub(): Promise<void> {
+    const stored = this.session.directoryStub;
+    if (stored === undefined || stored.quarantined === true) return;
+    this.session = { ...this.session, directoryStub: { ...stored, quarantined: true } };
+    await putRoomSession(this.session);
+  }
 
   /**
    * Can this device derive the room's §21.2 capability?
@@ -1463,7 +1477,12 @@ export class PrivateRoomSession {
     // they are about to enter — and the room-signed `room_public_key` in that
     // record is the one cross-check on the invite that does not come from the
     // person who sent it.
-    const stub = this.session.directoryStub?.capability;
+    // …unless it is QUARANTINED. A handle that failed verification against THIS
+    // room points at another one, and copying it into an invite is how a
+    // poisoned reference spreads through honest members — the next admin hands
+    // it to everyone they invite. It travels only after it has verified.
+    const stored = this.session.directoryStub;
+    const stub = stored?.quarantined === true ? undefined : stored?.capability;
     const invite = this.p2p.createRoomInvite({
       roomPublicKey,
       grantedRole: params.grantedRole ?? 'member',

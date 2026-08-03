@@ -149,7 +149,7 @@ const caseReview: CaseReviewResponse = {
   thread_context: [
     {
       contribution_id: '00000000-0000-4000-8000-0000000000d1',
-      thread_id: '00000000-0000-4000-8000-0000000000e1',
+      thread_id: '00000000-0000-4000-8000-0000000000t1',
       type: 'comment',
       body: 'the reported contribution text',
       citations: [],
@@ -277,7 +277,6 @@ const civicLandscape: CivicMapResponse = {
       basin_id: 'aaaaaaaa-1111-4111-8111-111111111111',
       title: 'Flooding on the ring road',
       level: 30,
-      thread_id: 'cccccccc-1111-4111-8111-111111111111',
       topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
       final: true,
     },
@@ -285,7 +284,6 @@ const civicLandscape: CivicMapResponse = {
       basin_id: 'bbbbbbbb-2222-4222-8222-222222222222',
       title: 'Council budget vote',
       level: 8,
-      thread_id: 'dddddddd-2222-4222-8222-222222222222',
       topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
       final: false,
     },
@@ -360,7 +358,7 @@ const evidenceQueue: EvidenceQueueResponse = {
   items: [
     {
       contribution_id: CONTRIB_ID,
-      thread_id: '00000000-0000-4000-8000-0000000000e1',
+      thread_id: '00000000-0000-4000-8000-0000000000t1',
       story_id: '00000000-0000-4000-8000-0000000000a5',
       story_title: 'Regional water board publishes the dataset',
       type: 'comment',
