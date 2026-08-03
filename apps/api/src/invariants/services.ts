@@ -35,8 +35,10 @@ import {
 import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
+import type { AuditEntryInput } from '../identity/audit.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { deterministicEventId } from '../pwatt/scoring.js';
 import { INVARIANT_CARDS, validateAllCards } from './cards.js';
 import {
@@ -80,6 +82,18 @@ import {
   type SessionTopicSequenceStore,
 } from './stores.js';
 
+/**
+ * The stores one invariant UNIT writes through, bound to a single handle.
+ *
+ * Small on purpose: it holds exactly the pair that must commit together — a
+ * durable invariant record and the WS-D audit row that accounts for it.
+ */
+export interface InvariantTx {
+  readonly bridgeAttempts: BridgeAttemptStore;
+  /** The audit append, bound to the SAME handle as the write above. */
+  readonly audit: (input: AuditEntryInput) => Promise<unknown>;
+}
+
 export interface InvariantPlatformServices {
   promotions: PromotionStore;
   calibrations: CalibrationStore;
@@ -88,6 +102,18 @@ export interface InvariantPlatformServices {
   mfciMargins: MfciMarginsStore;
   mfciRiskStates: MfciRiskStateStore;
   bridgeAttempts: BridgeAttemptStore;
+  /**
+   * Commit a durable invariant write WITH its audit record.
+   *
+   * The bridge-request endpoint inserted the attempt and then appended the
+   * audit, so an append failure answered 500 while leaving a live request
+   * behind: the map withheld the target, every retry answered `already_open`,
+   * and the durable action had no record. That is the shape
+   * `ModerationTransactor` exists for one module along, and it is not a
+   * moderation-specific obligation — so the seam lives here too rather than
+   * being re-derived per call site.
+   */
+  transact<T>(work: (tx: InvariantTx) => Promise<T>): Promise<T>;
   sessions: SessionTopicSequenceStore;
   promotionService: PromotionService;
   meri: MeriService;
@@ -142,6 +168,20 @@ export function createInMemoryInvariantServices(
 
   const promotions = new InMemoryPromotionStore();
   const sessions = new InMemorySessionTopicSequenceStore();
+  const bridgeAttempts = new InMemoryBridgeAttemptStore();
+  // The in-memory unit reads its stores from `services` at RUN time, for the
+  // same reason the service getters below do: the production boot swaps the
+  // adapters in afterwards, and a unit that captured the in-memory ones would
+  // keep writing to stores nothing else reads.
+  const unit = new InMemoryUnitOfWork<InvariantTx>(
+    {
+      get bridgeAttempts(): BridgeAttemptStore {
+        return services.bridgeAttempts;
+      },
+      audit: (input) => identity.audit.append(input),
+    },
+    () => (services.bridgeAttempts instanceof InMemoryBridgeAttemptStore ? [bridgeAttempts] : []),
+  );
   const services: InvariantPlatformServices = {
     promotions,
     calibrations: new InMemoryCalibrationStore(),
@@ -149,7 +189,8 @@ export function createInMemoryInvariantServices(
     mfciCases: new InMemoryMfciCaseStore(),
     mfciMargins: new InMemoryMfciMarginsStore(),
     mfciRiskStates: new InMemoryMfciRiskStateStore(),
-    bridgeAttempts: new InMemoryBridgeAttemptStore(),
+    bridgeAttempts,
+    transact: (work) => unit.run(work),
     sessions,
     // Pass a GETTER so a post-construction store swap (the production boot
     // replaces `promotions` with the Drizzle adapter) is honoured — otherwise

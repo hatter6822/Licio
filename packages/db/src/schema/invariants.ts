@@ -26,6 +26,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -197,6 +198,22 @@ export const bridgeAttempts = pgTable(
   },
   (t) => [
     index('bridge_attempts_thread_idx').on(t.threadId, t.status),
+    /**
+     * At most ONE open request per thread — the constraint the route's
+     * `openForThread()` pre-check could only approximate.
+     *
+     * Two stewards of the same room both see the Civic Map's fragile join, so
+     * the concurrent pair is the expected case: both read "none open" and both
+     * insert. The duplicate is not the harm — the credit consumer credits the
+     * NEWEST, after which the older row is "the open attempt" again and a later
+     * contribution credits a second time for one bridge.
+     *
+     * PARTIAL: a thread accumulates any number of CREDITED attempts over its
+     * life, and this must not forbid the next one.
+     */
+    uniqueIndex('bridge_attempts_open_thread_uq')
+      .on(t.threadId)
+      .where(sql`${t.status} = 'requested'`),
     check('bridge_attempts_status', sql`${t.status} in ('requested', 'credited')`),
     check('bridge_attempts_baseline', sql`${t.scoiBaseline} >= 0 and ${t.scoiBaseline} <= 1`),
   ],

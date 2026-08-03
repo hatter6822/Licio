@@ -68,6 +68,9 @@ pnpm lint:lockfile                  # lockfile integrity
 pnpm audit:advisories               # dependency advisories (npm BULK endpoint; classic `pnpm audit` is retired)
 pnpm check:deps                     # dependency budgets      · check:workspace-deps — boundary enforcement
 pnpm check:policy                   # doctrine documents      · check:prod-parity — dev↔prod adapter/env parity
+pnpm check:audited-writes           # a durable change and its audit row commit in ONE unit
+                                    #   (route handlers; pre-existing sites are allowlisted with reasons
+                                    #   and tracked in docs/planning/audit-residuals-2026-07.md)
 pnpm check:csp-parity               # index.html carries NO hand-written CSP, and (after a web build)
                                     #   dist/index.html carries exactly the injected shared policy — the
                                     #   courier WebView's only policy, and the one delivery point the
@@ -440,6 +443,27 @@ write for a file the foreground agent may also touch.
   value that IS live (`z.infer<typeof xSchema>`, `typeof table.$inferSelect`,
   `(typeof CONST)[number]`).  Those are uniform by construction — every table
   having a `Row` type is worth more than pruning the few nothing imports yet.
+
+- **A state change commits WITH its record, and a precondition lives in the
+  WRITE.**  Two shapes account for most of what review finds here, and both have
+  a house answer:
+
+  *Read-then-write.*  `if (await store.findOpen(...)) return conflict;
+  await store.insert(...)` is a check, not a constraint — the two concurrent
+  callers this is meant to stop both pass it.  Push the precondition into one
+  statement (`claimIfUnassigned`, `delayEnforcementIfNotDelayed`,
+  `insertIfNoneOpenForTarget`, `resolveIfOpen`, `insertIfNoneOpen`), backed by a
+  partial unique index where the database can hold it.  The in-memory twin
+  checks and writes with NO `await` between, which is the same guarantee on a
+  single-threaded runtime.
+
+  *Change-then-audit.*  A durable change and the audit row accounting for it are
+  one fact and must commit together — `ModerationTransactor` for WS-J,
+  `InvariantPlatformServices.transact` for WS-H, both over the shared
+  `lib/in-memory-unit-of-work.ts`.  Act-then-audit leaves an irreversible change
+  with no record; audit-then-act records a change that failed; a compensating
+  write is itself best-effort.  `check:audited-writes` enforces this for route
+  handlers.
 
 - **Pino is the ONLY server logging path.**  Redaction is worth exactly
   as much as the share of output that passes through it, so a `console.*`

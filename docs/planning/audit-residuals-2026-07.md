@@ -674,3 +674,33 @@ ratification path already does exactly that and is the model to copy.
 - **[LOW]** `apps/web/public/sw-push.js:30` — Workbox's generated ungated SKIP_WAITING listener nullifies the private-bundle service-worker activation gate
 - **[LOW]** `apps/web/src/components/ugc/UgcBody.tsx:62` — Middle-click (auxclick) on a UGC/citation link navigates to a blocklisted drainer domain without the §18.5 interstitial
 
+### Audited writes — a change and its record commit together (`check:audited-writes`)
+
+The gate added 2026-08-03 asks every route handler the question
+`ModerationTransactor` already answers for WS-J: a durable state change and the
+audit row that accounts for it must be ONE unit, because act-then-audit leaves
+an irreversible change with no record and audit-then-act records a change that
+did not happen (a compensating write is itself best-effort, so it is not a third
+option).  The bridge-request endpoint is what made the cost concrete: an audit
+failure answered 500 with a live request behind it, the map then withheld the
+target, and every retry answered `already_open`.
+
+**29 handlers across 9 route files predate the gate.**  Each is allowlisted in
+`scripts/check-audited-writes.ts` with its reason; they are debt rather than
+design, and they close one DOMAIN SEAM at a time — a per-domain transactor, in
+its own PR, in this order:
+
+| Domain | Files | Handlers | What closing it needs |
+|---|---|---|---|
+| WS-D identity | `auth.ts`, `auth-mfa.ts`, `auth-register.ts`, `auth-credentials.ts`, `privacy.ts` | 17 | An identity transactor binding `store` + `audit`. Highest count and the highest stakes (an MFA/credential change with no record), and the handlers pair SEVERAL store writes — so the unit fixes their mutual atomicity too, which is why binding only the audit first would advertise a guarantee they do not have |
+| WS-N compliance | `compliance.ts` | 4 | A compliance transactor spanning its OWN hash-chained trail and the WS-D audit |
+| WS-F ingestion | `ingestion-admin.ts` | 4 | An ingestion transactor for source/syndication/takedown operator actions |
+| WS-Q rooms | `rooms.ts` | 2 | A room-lifecycle transactor |
+| WS-G forum | `forum.ts` | 1 | Extending the contributions transactor to preference state |
+| WS-H invariants | `invariants-admin.ts` | 1 | `promotionService.apply` accepting a store per call, so the promotion write can bind to the unit's handle (the bridge endpoint in the same file is already inside `invariants.transact`) |
+
+The seam itself is domain-agnostic and already shipped:
+`apps/api/src/lib/in-memory-unit-of-work.ts` (atomicity + isolation for the
+in-memory twins) plus a per-domain transactor whose production binding is one
+`db.transaction`.  WS-J and WS-H (`InvariantPlatformServices.transact`) are the
+two worked examples.

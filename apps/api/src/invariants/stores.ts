@@ -11,6 +11,7 @@
 // at append time so session state can never grow without bound.
 
 import type { TopicTransition } from '@licio/invariants';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 // ---------------------------------------------------------------------------
 // Promotions (WS-H.1.2e)
@@ -337,6 +338,25 @@ export interface BridgeAttemptRecord {
 
 export interface BridgeAttemptStore {
   insert(record: BridgeAttemptRecord): Promise<void>;
+  /**
+   * INSERT-IF-NONE-OPEN: create the attempt only while the thread has no open
+   * one, and otherwise return the attempt that is already there.
+   *
+   * `inserted: false` is the caller's `already_open`, decided by the write
+   * rather than by a read taken before it. The route asked `openForThread()`
+   * and then inserted, which two stewards of the same room — the Civic Map
+   * offers a fragile join to all of them at once — both passed. The duplicate
+   * is not the harm: the credit consumer credits the NEWEST, after which the
+   * older row is "the open attempt" again and a later contribution credits a
+   * second time for one bridge.
+   *
+   * Postgres decides it through `bridge_attempts_open_thread_uq`; the in-memory
+   * twin checks and inserts with no await between, which is the same guarantee
+   * on a single-threaded runtime.
+   */
+  insertIfNoneOpen(
+    record: BridgeAttemptRecord,
+  ): Promise<{ attempt: BridgeAttemptRecord; inserted: boolean }>;
   /** The open (requested) attempt for a thread, if any. */
   openForThread(threadId: string): Promise<BridgeAttemptRecord | null>;
   listForThread(threadId: string, limit: number): Promise<BridgeAttemptRecord[]>;
@@ -359,11 +379,31 @@ export interface BridgeAttemptStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryBridgeAttemptStore implements BridgeAttemptStore {
+export class InMemoryBridgeAttemptStore implements BridgeAttemptStore, InMemoryRollback {
   readonly #rows = new Map<string, BridgeAttemptRecord>();
+
+  /** The unit of work's undo — a bridge attempt commits WITH its audit record,
+   *  so a failed append must leave no attempt behind here either. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
 
   async insert(record: BridgeAttemptRecord): Promise<void> {
     this.#rows.set(record.attemptId, { ...record, candidateUserIds: [...record.candidateUserIds] });
+  }
+
+  async insertIfNoneOpen(
+    record: BridgeAttemptRecord,
+  ): Promise<{ attempt: BridgeAttemptRecord; inserted: boolean }> {
+    // Read, test and write with NO `await` between them, matching the partial
+    // unique index the Drizzle twin relies on.
+    const open = [...this.#rows.values()].find(
+      (r) => r.threadId === record.threadId && r.status === 'requested',
+    );
+    if (open) return { attempt: { ...open }, inserted: false };
+    const stored = { ...record, candidateUserIds: [...record.candidateUserIds] };
+    this.#rows.set(record.attemptId, stored);
+    return { attempt: { ...stored }, inserted: true };
   }
 
   async openForThread(threadId: string): Promise<BridgeAttemptRecord | null> {

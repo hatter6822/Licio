@@ -655,6 +655,19 @@ if (db) {
   invariantServices.mfciMargins = new DrizzleMfciMarginsStore(db);
   invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
   invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
+  // …AND the unit those writes commit through. Swapping the store without this
+  // would leave the in-memory unit running over the Drizzle store: the writes
+  // would land, and the ATOMICITY they are inside the unit for would not — an
+  // audit failure would leave the attempt behind, which is the defect the unit
+  // exists to close. One `db.transaction`, both stores bound to that handle.
+  const invariantDb = db;
+  invariantServices.transact = (work) =>
+    invariantDb.transaction((tx) =>
+      work({
+        bridgeAttempts: new DrizzleBridgeAttemptStore(tx),
+        audit: (input) => new DrizzleAuditStore(tx).append(input),
+      }),
+    );
 }
 // The PHI session-topic sequences are SESSION-SCOPED ephemera (WS-H.6.1a) —
 // Redis, never Postgres, is their durable-enough production home: attention

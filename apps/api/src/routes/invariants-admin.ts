@@ -606,30 +606,47 @@ export function createInvariantsAdminRoutes(
         }
         const { thread, baseline } = verdict;
         const candidates = await bridgeCandidatesFor(forum, ingestion, threadId);
-        const attemptId = crypto.randomUUID();
-        await invariants.bridgeAttempts.insert({
-          attemptId,
-          threadId,
-          storyId: thread.storyId,
-          status: 'requested',
-          requestedBy: `steward:${auth.userId}`,
-          candidateUserIds: candidates,
-          contributionId: null,
-          bridgeUserId: null,
-          scoiBaseline: baseline.scoi,
-          scoiAfter: null,
-          createdAt: new Date(invariants.now()).toISOString(),
-          resolvedAt: null,
+        // ONE UNIT: the attempt and the record of it commit together, and the
+        // "only one open" rule is decided by the WRITE.
+        //
+        // Both halves were sequential steps before. The `openForThread` check
+        // above the insert is a check — two stewards of the same room both see
+        // the Civic Map's fragile join, both pass it, and both insert; the
+        // credit consumer then credits the newest and the older row becomes the
+        // open one again, so a later contribution credits twice for one bridge.
+        // And an audit failure after the insert answered 500 while leaving a
+        // live request behind: the map withheld the target, every retry said
+        // `already_open`, and the durable action had no record at all.
+        const opened = await invariants.transact(async (tx) => {
+          const attempt = await tx.bridgeAttempts.insertIfNoneOpen({
+            attemptId: crypto.randomUUID(),
+            threadId,
+            storyId: thread.storyId,
+            status: 'requested',
+            requestedBy: `steward:${auth.userId}`,
+            candidateUserIds: candidates,
+            contributionId: null,
+            bridgeUserId: null,
+            scoiBaseline: baseline.scoi,
+            scoiAfter: null,
+            createdAt: new Date(invariants.now()).toISOString(),
+            resolvedAt: null,
+          });
+          // The loser of the race writes NO audit row: it performed no action.
+          if (!attempt.inserted) return attempt;
+          await tx.audit({
+            actorUserId: auth.userId,
+            eventType: 'bridge_request',
+            targetRef: threadId,
+            context: { candidate_count: candidates.length, scoi_baseline: baseline.scoi },
+          });
+          return attempt;
         });
-        const identity = resolveIdentity();
-        await identity.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'bridge_request',
-          targetRef: threadId,
-          context: { candidate_count: candidates.length, scoi_baseline: baseline.scoi },
-        });
+        if (!opened.inserted) {
+          return c.json(deny('already_open', 'A bridge request is already open'), 409);
+        }
         return c.json({
-          attempt_id: attemptId,
+          attempt_id: opened.attempt.attemptId,
           scoi_baseline: baseline.scoi,
           candidates,
         });

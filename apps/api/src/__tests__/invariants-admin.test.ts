@@ -834,6 +834,76 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     expect(((await complete.json()) as { scan: { complete: boolean } }).scan.complete).toBe(true);
   });
 
+  it('opens ONE attempt under a concurrent pair, and none without its audit row', async () => {
+    // Two stewards of the same room both see the Civic Map's fragile join, so
+    // the concurrent pair is the expected case rather than a rare one. A
+    // `openForThread` read above the insert let both through: the credit
+    // consumer credits the newest, the older row becomes "the open attempt"
+    // again, and a later contribution credits a second time for one bridge.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { threadId, storyId } = await seedSplitRoom(fixture, steward.userId);
+    const attempt = (id: string) => ({
+      attemptId: id,
+      threadId,
+      storyId,
+      status: 'requested' as const,
+      requestedBy: `steward:${steward.userId}`,
+      candidateUserIds: [],
+      contributionId: null,
+      bridgeUserId: null,
+      scoiBaseline: 0.4,
+      scoiAfter: null,
+      createdAt: new Date().toISOString(),
+      resolvedAt: null,
+    });
+    const first = await fixture.invariants.bridgeAttempts.insertIfNoneOpen(attempt(randomUUID()));
+    const second = await fixture.invariants.bridgeAttempts.insertIfNoneOpen(attempt(randomUUID()));
+    expect(first.inserted).toBe(true);
+    expect(second.inserted).toBe(false);
+    // The loser is told about the attempt that IS open, not about its own.
+    expect(second.attempt.attemptId).toBe(first.attempt.attemptId);
+    expect(await fixture.invariants.bridgeAttempts.listForThread(threadId, 10)).toHaveLength(1);
+  });
+
+  it('leaves NO attempt behind when the audit record cannot be written', async () => {
+    // The insert and the append were sequential steps: an append failure
+    // answered 500 with a live request behind it, so the map withheld the
+    // target, every retry said `already_open`, and the durable action had no
+    // record at all. They commit together now.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { threadId, storyId } = await seedSplitRoom(fixture, steward.userId);
+    fixture.identity.audit.append = () => Promise.reject(new Error('audit down'));
+
+    await expect(
+      fixture.invariants.transact(async (tx) => {
+        await tx.bridgeAttempts.insertIfNoneOpen({
+          attemptId: randomUUID(),
+          threadId,
+          storyId,
+          status: 'requested',
+          requestedBy: `steward:${steward.userId}`,
+          candidateUserIds: [],
+          contributionId: null,
+          bridgeUserId: null,
+          scoiBaseline: 0.4,
+          scoiAfter: null,
+          createdAt: new Date().toISOString(),
+          resolvedAt: null,
+        });
+        await tx.audit({
+          actorUserId: steward.userId,
+          eventType: 'bridge_request',
+          targetRef: threadId,
+          context: {},
+        });
+      }),
+    ).rejects.toThrow(/audit down/);
+    // Rolled back — and so the thread is still open to a real request.
+    expect(await fixture.invariants.bridgeAttempts.openForThread(threadId)).toBeNull();
+  });
+
   it('withdraws a bridge target once a request is OPEN on it', async () => {
     // The map published a target the POST beside it answers `409 already_open`
     // for: eligibility asked "may this caller act here?" and never "is there
