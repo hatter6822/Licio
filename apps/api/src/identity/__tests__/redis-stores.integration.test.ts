@@ -6,8 +6,18 @@
 // in-memory stores satisfy.
 //
 //   REDIS_URL=redis://localhost:6379 pnpm test
+//
+// Cleanup is scoped to THIS run's own key prefixes.  It used to be
+// `redis.flushdb()` in `beforeEach`, which wiped the WHOLE database — including
+// the keys of every other gated Redis suite running concurrently in another
+// Vitest worker.  That produced a rare, bewildering failure in a completely
+// unrelated file (`events/__tests__/redis-event-stores.integration.test.ts`
+// asserting `expected 1 to be 3` on a sliding-window counter whose sorted set
+// had been deleted between two `hit()` calls).  A test's cleanup may never
+// reach beyond the keys it created.
+import { randomUUID } from 'node:crypto';
 import IORedis from 'ioredis';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { RedisEphemeralStore, RedisSessionStore } from '../redis-stores.js';
 import { createSession, type StoredSession } from '../sessions.js';
 
@@ -15,17 +25,31 @@ const REDIS_URL = process.env['REDIS_URL'];
 
 describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
   const redis = REDIS_URL ? new IORedis(REDIS_URL) : null;
+  // Unique per run, so two concurrent runs against one Redis (two developers,
+  // two CI jobs) cannot see or delete each other's keys either.
+  const run = randomUUID().slice(0, 8);
+  const EPH_PREFIX = `test-eph-${run}:`;
+  const SESSION_PREFIX = `test-session-${run}:`;
+
+  /** Delete only what this file wrote — never a database-wide flush. */
+  async function clearOwnKeys(): Promise<void> {
+    if (!redis) return;
+    const keys = [
+      ...(await redis.keys(`${EPH_PREFIX}*`)),
+      ...(await redis.keys(`${SESSION_PREFIX}*`)),
+    ];
+    if (keys.length > 0) await redis.del(...keys);
+  }
+
+  afterEach(clearOwnKeys);
 
   afterAll(async () => {
+    await clearOwnKeys();
     await redis?.quit();
   });
 
-  beforeEach(async () => {
-    await redis?.flushdb();
-  });
-
   it('RedisEphemeralStore: set/get/take is single-use and TTL-bounded', async () => {
-    const store = new RedisEphemeralStore(redis as IORedis, 'test-eph:');
+    const store = new RedisEphemeralStore(redis as IORedis, EPH_PREFIX);
     await store.set('k', 'v', 1000);
     expect(await store.get('k')).toBe('v');
     expect(await store.take('k')).toBe('v');
@@ -41,7 +65,7 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     // read and write); Redis cannot, and Redis is what production runs. These
     // two primitives back the MFA attempt cap and the OTP resend cooldown, so
     // "atomic in memory, racy in production" is the failure mode that matters.
-    const store = new RedisEphemeralStore(redis as IORedis, 'test-eph:');
+    const store = new RedisEphemeralStore(redis as IORedis, EPH_PREFIX);
 
     const claims = await Promise.all(
       Array.from({ length: 12 }, () => store.setIfAbsent('cooldown', 'x', 60_000)),
@@ -67,11 +91,11 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     const WINDOW_MS = 60_000;
     const ELAPSE_MS = 250;
     await store.increment('longwindow', WINDOW_MS);
-    const firstTtl = await (redis as IORedis).pttl('test-eph:longwindow');
+    const firstTtl = await (redis as IORedis).pttl(`${EPH_PREFIX}longwindow`);
     expect(firstTtl).toBeGreaterThan(0);
     await new Promise((r) => setTimeout(r, ELAPSE_MS));
     expect(await store.increment('longwindow', WINDOW_MS)).toBe(2);
-    const secondTtl = await (redis as IORedis).pttl('test-eph:longwindow');
+    const secondTtl = await (redis as IORedis).pttl(`${EPH_PREFIX}longwindow`);
     // AN ABSOLUTE BOUND, not a comparison between the two reads.
     //
     // `secondTtl < firstTtl` replaced a 40 ms/15 ms race with a SUB-MILLISECOND
@@ -99,7 +123,7 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
   });
 
   it('RedisSessionStore: stores, lists per user, and deletes', async () => {
-    const store = new RedisSessionStore(redis as IORedis, 'test-session:');
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
     const userId = '11111111-1111-4111-8111-111111111111';
     const a = await createSession(store, {
       userId,
@@ -129,7 +153,7 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
   });
 
   it('RedisSessionStore: a short session after a long one never SHORTENS the index TTL', async () => {
-    const store = new RedisSessionStore(redis as IORedis, 'test-session:');
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
     const userId = '22222222-2222-4222-8222-222222222222';
     // Long-lived session first (rememberMe: 30 days)…
     await createSession(store, {
@@ -139,7 +163,7 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
       deviceLabel: 'laptop',
       rememberMe: true,
     });
-    const longTtl = await (redis as IORedis).pttl(`test-session:user:${userId}`);
+    const longTtl = await (redis as IORedis).pttl(`${SESSION_PREFIX}user:${userId}`);
     // …then a short-lived one (24h).  PEXPIRE…GT must leave the index TTL at the
     // longer value, or the long session would vanish from the device list.
     await createSession(store, {
@@ -149,16 +173,16 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
       deviceLabel: 'phone',
       rememberMe: false,
     });
-    const afterTtl = await (redis as IORedis).pttl(`test-session:user:${userId}`);
+    const afterTtl = await (redis as IORedis).pttl(`${SESSION_PREFIX}user:${userId}`);
     expect(afterTtl).toBeGreaterThan(23 * 60 * 60_000); // sanity: index alive
     expect(afterTtl).toBeGreaterThanOrEqual(longTtl - 5_000); // NOT shortened to 24h
     expect(await store.listForUser(userId)).toHaveLength(2);
   });
 
   it('RedisSessionStore: a corrupt row is deleted and treated as no session (fail closed)', async () => {
-    const store = new RedisSessionStore(redis as IORedis, 'test-session:');
-    await (redis as IORedis).set('test-session:deadbeef', '{"not":"a session"}');
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
+    await (redis as IORedis).set(`${SESSION_PREFIX}deadbeef`, '{"not":"a session"}');
     expect(await store.get('deadbeef')).toBeNull();
-    expect(await (redis as IORedis).get('test-session:deadbeef')).toBeNull(); // purged
+    expect(await (redis as IORedis).get(`${SESSION_PREFIX}deadbeef`)).toBeNull(); // purged
   });
 });
