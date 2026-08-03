@@ -63,7 +63,17 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
     await client.end();
   });
 
-  async function createListed(roomServerId: string) {
+  /** A distinct 32-byte base64url room key per call.
+   *
+   *  One room has ONE record (`private_room_stubs_room_key_uq`), so a fixture
+   *  that reused one key was describing the SAME room every time: the second
+   *  create adopted the first record rather than making another, and every
+   *  assertion after it was about a row from an earlier case. Distinct rooms
+   *  have to look distinct. */
+  const newRoomKey = (): string =>
+    Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+
+  async function createListed(roomServerId: string, roomPublicKey = newRoomKey()) {
     return await store.create({
       stubId: crypto.randomUUID(),
       roomServerId,
@@ -75,7 +85,7 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
       bootstrapHints: [{ kind: 'manual', value: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8' }],
       signedStub: {
         schema: 'licio.private.directory_stub.v2',
-        room_public_key: COMMITMENT,
+        room_public_key: roomPublicKey,
         manifest_key_commitment: COMMITMENT,
       },
       stubSignature: SIGNATURE,
@@ -105,7 +115,8 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
 
   it('round-trips the stub, including the jsonb bootstrap hints and signed stub', async () => {
     const roomId = newRoomId();
-    await createListed(roomId);
+    const roomKey = newRoomKey();
+    await createListed(roomId, roomKey);
     const read = await store.getByRoomId(roomId);
     expect(read?.displayName).toBe('Gated listed room');
     expect(read?.bootstrapHints).toEqual([
@@ -113,13 +124,13 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
     ]);
     expect(read?.signedStub).toEqual({
       schema: 'licio.private.directory_stub.v2',
-      room_public_key: COMMITMENT,
+      room_public_key: roomKey,
       manifest_key_commitment: COMMITMENT,
     });
     // The capability is its OWN column, never inside the projected body.
     expect(read?.bootstrapBlindId).toBe(TOKEN);
     // …and the commitment columns are DERIVED from that body, not sent beside it.
-    expect(read?.roomPublicKey).toBe(COMMITMENT);
+    expect(read?.roomPublicKey).toBe(roomKey);
     expect(read?.manifestKeyCommitment).toBe(COMMITMENT);
     expect(read?.latestManifestCommitment).toBe(null);
   });

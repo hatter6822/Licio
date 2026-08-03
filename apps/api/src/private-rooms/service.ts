@@ -31,6 +31,7 @@ import {
   type PrivateRoomCreateStubRequest,
   type PrivateRoomStubStore,
   type PrivateRoomStubUpdateRequest,
+  RoomAlreadyRegisteredError,
   type StoredPrivateRoomStub,
 } from './stores.js';
 
@@ -179,8 +180,22 @@ export interface AccountStubExport {
   readonly updated_at: string;
 }
 
-/** The `/mine` projection: the owner's record MINUS the capability. */
-export type OwnedStubRow = Omit<AccountStubExport, 'bootstrap_blind_id'>;
+/**
+ * The `/mine` projection: the owner's record MINUS the capability.
+ *
+ * `signed_stub`/`stub_signature` are NULLABLE here, as a pair: a migrated v1
+ * body carries the capability inside it, so this projection withholds the body
+ * itself for those rows rather than handing the token back through the field
+ * next to the column it was moved out of. (A signature over a body the caller
+ * cannot see verifies nothing, so the pair travels together or not at all.)
+ */
+export type OwnedStubRow = Omit<
+  AccountStubExport,
+  'bootstrap_blind_id' | 'signed_stub' | 'stub_signature'
+> & {
+  readonly signed_stub: Record<string, unknown> | null;
+  readonly stub_signature: string | null;
+};
 
 /** Aggregate-only counters — no room, account, or token identity (§27.2). */
 export interface PrivateRoomStubMetrics {
@@ -243,25 +258,37 @@ export class PrivateRoomStubService {
     // second tab, idempotent). A different account is refused: it is not that
     // the caller lacks a right, it is that the room already has its record —
     // and only the account holding it can delist or remove it (§21.3/§21.4).
+    // The store DECIDES this — it adopts the caller's own record and raises
+    // `RoomAlreadyRegisteredError` for another account's, atomically with the
+    // insert. This read only lets the common case answer without attempting a
+    // write; the race is settled below, where both concurrent callers end up.
     const forRoom = await this.store.findByRoomKey(request.signed_stub.room_public_key);
     if (forRoom !== null && forRoom.createdByAccountId !== accountId) {
       return { ok: false, reason: 'room_already_registered' };
     }
 
-    const stub = await this.store.create({
-      stubId: this.newId(),
-      roomServerId: this.newId(),
-      directoryMode: request.directory_mode,
-      displayName: request.display_name ?? null,
-      displayDescription: request.display_description ?? null,
-      displayAvatarPublicCid: request.display_avatar_public_cid ?? null,
-      rendezvousPolicy: request.rendezvous_policy,
-      bootstrapHints: request.bootstrap_hints ?? [],
-      signedStub: request.signed_stub,
-      stubSignature: request.stub_signature,
-      bootstrapBlindId: request.bootstrap_blind_id,
-      createdByAccountId: accountId,
-    });
+    let stub: StoredPrivateRoomStub;
+    try {
+      stub = await this.store.create({
+        stubId: this.newId(),
+        roomServerId: this.newId(),
+        directoryMode: request.directory_mode,
+        displayName: request.display_name ?? null,
+        displayDescription: request.display_description ?? null,
+        displayAvatarPublicCid: request.display_avatar_public_cid ?? null,
+        rendezvousPolicy: request.rendezvous_policy,
+        bootstrapHints: request.bootstrap_hints ?? [],
+        signedStub: request.signed_stub,
+        stubSignature: request.stub_signature,
+        bootstrapBlindId: request.bootstrap_blind_id,
+        createdByAccountId: accountId,
+      });
+    } catch (error) {
+      if (error instanceof RoomAlreadyRegisteredError) {
+        return { ok: false, reason: 'room_already_registered' };
+      }
+      throw error;
+    }
     this.#metrics.created += 1;
     return {
       ok: true,
@@ -575,7 +602,23 @@ export class PrivateRoomStubService {
    */
   #lookupRow(stub: StoredPrivateRoomStub): OwnedStubRow {
     const { bootstrap_blind_id: _withheld, ...rest } = this.#exportRow(stub);
-    return rest;
+    // …AND the legacy body, which is where the capability lives on a migrated
+    // v1 record.
+    //
+    // Dropping the column alone withheld nothing for those rows: the token was
+    // written INSIDE `signed_stub` before it had a column of its own, and the
+    // migration deliberately left the body byte-for-byte as it was signed (the
+    // server holds no room key, so it cannot re-sign). Projecting it here put
+    // the stable capability straight back onto the polled endpoint the column
+    // was moved out of.
+    //
+    // The open bootstrap read already refuses a legacy body to a caller who did
+    // not present the token; this is the same rule for the same reason. The
+    // Art. 15 export is the deliberate exception — an archive that omits what
+    // is held about you is not an archive.
+    return isLegacySignedStub(stub.signedStub)
+      ? { ...rest, signed_stub: null, stub_signature: null }
+      : rest;
   }
 
   async listForAccountPage(
@@ -700,8 +743,7 @@ export class PrivateRoomStubService {
    * general visibility switch.
    */
   #project(stub: StoredPrivateRoomStub, capable: boolean): BootstrapResponse {
-    const legacyBody = stub.signedStub['schema'] !== 'licio.private.directory_stub.v2';
-    const withBody = capable || !legacyBody;
+    const withBody = capable || !isLegacySignedStub(stub.signedStub);
     return {
       room_server_id: stub.roomServerId,
       directory_mode: stub.directoryMode,
@@ -720,6 +762,19 @@ export class PrivateRoomStubService {
       updated_at: stub.updatedAt,
     };
   }
+}
+
+/**
+ * A body written BEFORE the capability moved into its own column — so a body
+ * that still contains the token.
+ *
+ * One predicate, because two projections must answer it the same way: the open
+ * bootstrap read withholds such a body from a caller without the token, and the
+ * owner's `/mine` row withholds it from every caller, since that endpoint is
+ * polled and its whole point is to carry no capability.
+ */
+function isLegacySignedStub(body: Record<string, unknown>): boolean {
+  return body['schema'] !== 'licio.private.directory_stub.v2';
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

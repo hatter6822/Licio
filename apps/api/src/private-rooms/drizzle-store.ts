@@ -28,6 +28,7 @@ import type {
   SignedStubBody,
   StoredPrivateRoomStub,
 } from './stores.js';
+import { RoomAlreadyRegisteredError } from './stores.js';
 
 /**
  * The opaque shell name/slug for a P2P room (§8.1 — never the real title), from
@@ -92,11 +93,10 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
     // unique violation rather than a second row. Answering it with the row that
     // is already there is what makes registration idempotent: the client's
     // retry converges on the record it was trying to create.
-    if (input.createdByAccountId !== null) {
-      const existing = await this.findForAccount(input.createdByAccountId, {
-        roomPublicKey: input.signedStub.room_public_key,
-      });
-      if (existing) return existing;
+    const forRoom = await this.findByRoomKey(input.signedStub.room_public_key);
+    if (forRoom !== null) {
+      if (forRoom.createdByAccountId === input.createdByAccountId) return forRoom;
+      throw new RoomAlreadyRegisteredError();
     }
     const { name, slug } = shellIdentity();
     // An EXPLICIT millisecond timestamp, not the column's `defaultNow()`.
@@ -162,14 +162,21 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
       })
       .catch(async (error: unknown) => {
         // The RACE the pre-check cannot close: both callers read "nothing there"
-        // and both insert. The loser sees 23505 and adopts the winner's row,
-        // which is the same answer it would have got a moment earlier.
-        if (!isUniqueViolation(error) || input.createdByAccountId === null) throw error;
-        const existing = await this.findForAccount(input.createdByAccountId, {
-          roomPublicKey: input.signedStub.room_public_key,
-        });
-        if (!existing) throw error;
-        return existing;
+        // and both insert, and `private_room_stubs_room_key_uq` picks the winner.
+        //
+        // The loser's answer depends on WHOSE row won, which is why this looks
+        // up by ROOM rather than by its own account: the winner's row adopted if
+        // it is this caller's (the same answer a moment earlier would have
+        // given), and the room-level refusal otherwise. Looking up only this
+        // account's rows found nothing when another account won and rethrew the
+        // 23505 as a 500.
+        if (!isUniqueViolation(error)) throw error;
+        const winner = await this.findByRoomKey(input.signedStub.room_public_key);
+        if (winner === null) throw error;
+        if (winner.createdByAccountId !== input.createdByAccountId) {
+          throw new RoomAlreadyRegisteredError();
+        }
+        return winner;
       });
   }
 

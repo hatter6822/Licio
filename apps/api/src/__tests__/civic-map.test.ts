@@ -248,6 +248,43 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(map?.scan.examined).toBe(1);
   });
 
+  it('reads the window ONCE — a re-read is offset paging over a mutating order', async () => {
+    // The scan used to re-read with a growing limit and slice off what it had
+    // already seen. A late offline event recomputes the completed hour, so
+    // `event_count` changes and a row can move INTO the prefix the next read
+    // discards: never examined, and — if that read came back short — reported
+    // as a complete scan. De-duplicating by id cannot recover it, and a keyset
+    // cursor cannot either, because the sort key is the value that changes.
+    let reads = 0;
+    const rows = Array.from({ length: 300 }, (_, i) =>
+      story(`${i.toString(16).padStart(8, '0')}-1111-4111-8111-111111111111`, 300 - i, [
+        TOPIC_A?.id ?? '',
+      ]),
+    );
+    const base = services(rows);
+    const events = {
+      windowStore: {
+        listActiveInWindow: (start: string, size: string, limit: number) => {
+          reads += 1;
+          return (
+            base.events as unknown as {
+              windowStore: {
+                listActiveInWindow: (
+                  s: string,
+                  z: string,
+                  l: number,
+                ) => Promise<{ itemId: string; eventCount: number }[]>;
+              };
+            }
+          ).windowStore.listActiveInWindow(start, size, limit);
+        },
+      },
+    } as unknown as Parameters<typeof buildCivicMap>[0];
+
+    await buildCivicMap(events, base.ingestion, NOW, async () => true);
+    expect(reads).toBe(1);
+  });
+
   it('calls a NODE-CAPPED window incomplete even when the batch was short', async () => {
     // The case between the two bounds: 101–199 active stories fill the 100-node
     // cap inside a batch that is itself shorter than the scan batch, so the walk

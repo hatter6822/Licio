@@ -427,6 +427,20 @@ export interface PrivateRoomStubPatch {
 }
 
 /**
+ * A directory record already exists for this ROOM, under another account.
+ *
+ * Thrown by `create` in BOTH adapters, so the refusal is the store's answer
+ * rather than a race the caller's pre-check happened to lose. The service maps
+ * it to `room_already_registered`; nothing else should catch it.
+ */
+export class RoomAlreadyRegisteredError extends Error {
+  constructor() {
+    super('A directory record already exists for this room');
+    this.name = 'RoomAlreadyRegisteredError';
+  }
+}
+
+/**
  * The durable boundary for the stub service.  An in-memory adapter ships here;
  * the gated Postgres adapter over `rooms` + `private_room_stubs` lives in
  * `drizzle-store.ts`.
@@ -434,7 +448,10 @@ export interface PrivateRoomStubPatch {
  * `create` writes the P2P room SHELL and its stub as ONE unit: the shell exists
  * only to give the stub a `room_server_id` to reference (the §8.3-allowed
  * shell ⇄ room link), and a shell with no stub would be an orphan the directory
- * can never reach or clean up.
+ * can never reach or clean up.  It is also where "one record per ROOM" is
+ * decided: the caller's own record is ADOPTED, and another account's raises
+ * {@link RoomAlreadyRegisteredError} — a service-level pre-check cannot settle a
+ * race it is on one side of.
  */
 export interface PrivateRoomStubStore {
   /** Mint the p2p room shell + its stub atomically. */
@@ -577,16 +594,27 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore, InMem
   constructor(private readonly now: () => number = () => Date.now()) {}
 
   create(input: PrivateRoomStubInsertInput): Promise<StoredPrivateRoomStub> {
-    // ONE record per account per room — the same constraint the Postgres unique
-    // index enforces, so both adapters answer a retry the same way: with the row
-    // that is already there.
-    if (input.createdByAccountId !== null) {
-      const existing = [...this.#stubs.values()].find(
-        (stub) =>
-          stub.createdByAccountId === input.createdByAccountId &&
-          stub.roomPublicKey === input.signedStub.room_public_key,
-      );
-      if (existing) return Promise.resolve(existing);
+    // ONE RECORD PER ROOM, decided HERE rather than by the caller's pre-check.
+    //
+    // A check in the service is a check: two concurrent registrations — the same
+    // founder device signed into two accounts is the realistic one — both read
+    // "nothing there" and both create. The Postgres adapter has its
+    // `private_room_stubs_room_key_uq` index to fall back on; this adapter is
+    // the whole authority in dev and in the E2E harness, so the invariant has to
+    // be enforced at the same point, and both adapters must answer the loser the
+    // same way.
+    //
+    // The caller's OWN record is adopted (a retry converges); another account's
+    // is refused, because the room already has its record and only the account
+    // holding it can change or remove it (§21.3/§21.4).
+    const forRoom = [...this.#stubs.values()].find(
+      (stub) => stub.roomPublicKey === input.signedStub.room_public_key,
+    );
+    if (forRoom !== undefined) {
+      if (forRoom.createdByAccountId === input.createdByAccountId) {
+        return Promise.resolve(forRoom);
+      }
+      return Promise.reject(new RoomAlreadyRegisteredError());
     }
     const at = new Date(this.now()).toISOString();
     const stub: StoredPrivateRoomStub = {

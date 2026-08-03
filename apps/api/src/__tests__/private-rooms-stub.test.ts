@@ -13,6 +13,8 @@
 //     the directory);
 //   • DELETE removes Licio's record, and says so — it is not a room deletion;
 //   • the stub surface authenticates writes (§21.1) and leaves reads open.
+
+import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import { PrivateRoomStubService, setPrivateRoomStubService } from '../private-rooms/service.js';
@@ -22,6 +24,7 @@ import {
   type PrivateRoomCreateStubRequest,
   privateRoomCreateStubRequestSchema,
   privateRoomStubUpdateRequestSchema,
+  RoomAlreadyRegisteredError,
   SIGNED_STUB_TOO_DEEP,
 } from '../private-rooms/stores.js';
 
@@ -764,6 +767,39 @@ describe('ONE record per room — adopted by its owner, refused to anyone else',
     expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(1);
   });
 
+  it('refuses in the STORE, so a concurrent pair cannot both create', async () => {
+    // The service's pre-check is a check: two registrations for the same room —
+    // the same founder device signed into two accounts is the realistic pair —
+    // both read "nothing there" before either write. Postgres has its unique
+    // index to fall back on; the in-memory adapter is the whole authority in dev
+    // and in the E2E harness, so it decides too, and both answer the loser the
+    // same way.
+    const store = new InMemoryPrivateRoomStubStore();
+    const svc = new PrivateRoomStubService(store);
+    const insert = (accountId: string) =>
+      store.create({
+        stubId: randomUUID(),
+        roomServerId: randomUUID(),
+        directoryMode: 'unlisted',
+        displayName: null,
+        displayDescription: null,
+        displayAvatarPublicCid: null,
+        rendezvousPolicy: 'licio_blind',
+        bootstrapHints: [],
+        signedStub: SIGNED_STUB,
+        stubSignature:
+          'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+        bootstrapBlindId: TOKEN,
+        createdByAccountId: accountId,
+      });
+    await insert(ACCOUNT);
+    await expect(insert(OTHER_ACCOUNT)).rejects.toThrow(RoomAlreadyRegisteredError);
+    // …and the caller's OWN row is still adopted rather than duplicated.
+    const mine = await insert(ACCOUNT);
+    expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(1);
+    expect(mine.createdByAccountId).toBe(ACCOUNT);
+  });
+
   it('REFUSES another account registering a room that already has a record', async () => {
     // The record is the ROOM's public handle, not an account's possession: its
     // `room_server_id` is what invites carry and what the §4.2 directory
@@ -828,6 +864,47 @@ describe('the owner lookup withholds the capability', () => {
     // …and the Art. 15 archive still discloses it: what the purge deletes, the
     // export declares.
     expect((await svc.exportForAccount(ACCOUNT))[0]?.bootstrap_blind_id).toBe(TOKEN);
+  });
+
+  it('withholds a MIGRATED v1 body, which is where the token lives on those rows', async () => {
+    // The capability got its own column, but a preserved v1 record still
+    // carries it INSIDE `signed_stub` — the migration left the body exactly as
+    // it was signed, because the server holds no room key and cannot re-sign.
+    // Dropping the column alone therefore withheld nothing for those rows: the
+    // stable token rode the body straight back onto the polled endpoint the
+    // column exists to keep it off.
+    const store = new InMemoryPrivateRoomStubStore();
+    const svc = new PrivateRoomStubService(store);
+    await store.create({
+      stubId: randomUUID(),
+      roomServerId: randomUUID(),
+      directoryMode: 'unlisted',
+      displayName: null,
+      displayDescription: null,
+      displayAvatarPublicCid: null,
+      rendezvousPolicy: 'licio_blind',
+      bootstrapHints: [],
+      // A v1 body, token and all — exactly what migration 0120 preserved.
+      signedStub: {
+        schema: 'licio.private.directory_stub.v1',
+        room_public_key: SIGNED_STUB.room_public_key,
+        manifest_key_commitment: SIGNED_STUB.manifest_key_commitment,
+        bootstrap_blind_id: TOKEN,
+      } as unknown as typeof SIGNED_STUB,
+      stubSignature:
+        'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+      bootstrapBlindId: TOKEN,
+      createdByAccountId: ACCOUNT,
+    });
+
+    const page = await svc.listForAccountPage(ACCOUNT, {});
+    expect(JSON.stringify(page)).not.toContain(TOKEN);
+    // Withheld as a PAIR — a signature over a body the caller cannot see
+    // verifies nothing.
+    expect(page.stubs[0]?.signed_stub).toBeNull();
+    expect(page.stubs[0]?.stub_signature).toBeNull();
+    // …while the archive still declares the whole record.
+    expect(JSON.stringify(await svc.exportForAccount(ACCOUNT))).toContain(TOKEN);
   });
 });
 

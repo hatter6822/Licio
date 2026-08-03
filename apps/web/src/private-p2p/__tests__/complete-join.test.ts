@@ -254,6 +254,59 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
 });
 
 describe('§21 directory capability carried through the SEALED invite (WS-S.1.2b)', () => {
+  it('takes NO handle when two invites for one room disagree about the record', async () => {
+    // A grant carries the room's manifest, not the invite it answers, and one
+    // preparation uses one KeyPackage for all of them — so two invites for the
+    // SAME room are indistinguishable to `completeJoin`. Last-write-wins
+    // attached the other invite's handle silently, and that handle then travels
+    // into every invite this device makes afterwards.
+    //
+    // A wrong record is worse than none, so disagreement fails closed.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Listed Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const payload = await founder.directoryStubPayload();
+    await founder.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const first = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    // The record is removed and registered again — a second invite for the same
+    // room now names a DIFFERENT record.
+    await founder.attachDirectoryStub({
+      roomServerId: '22222222-2222-4222-8222-222222222222',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+    const second = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    for (const url of [first.inviteUrl, second.inviteUrl]) {
+      await prep.complete(url.slice(url.indexOf('#invite=') + '#invite='.length));
+    }
+
+    const { request } = await prep.complete(
+      first.inviteUrl.slice(first.inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const { grant } = await founder.admitJoinRequest(first.invite, request);
+    if (!grant) throw new Error('expected a grant');
+    const joiner = await prep.completeJoin(parseJoinGrant(serializeJoinGrant(grant)) as never);
+    expect(joiner.directoryStub).toBeUndefined();
+  });
+
   it('hands the joiner a working directory handle it could never derive itself', async () => {
     const mkStore = await storeFactory();
     const founder = await PrivateRoomSession.create({

@@ -229,7 +229,10 @@ const myStubSchema = z.object({
   stub_id: z.string(),
   directory_mode: z.enum(DIRECTORY_MODES),
   room_public_key: z.string(),
-  signed_stub: z.record(z.string(), z.unknown()),
+  // NULLABLE as a pair: a migrated v1 body carries the §21.2 capability inside
+  // it, so `/mine` — a polled endpoint that must carry no capability — withholds
+  // the body and its signature together for those rows.
+  signed_stub: z.record(z.string(), z.unknown()).nullable(),
 });
 export type MyStub = z.infer<typeof myStubSchema>;
 

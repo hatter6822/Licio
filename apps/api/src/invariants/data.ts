@@ -845,10 +845,13 @@ export async function assembleActivitySnapshots(
 
 /** The most active PUBLIC items one landscape sweep draws. */
 const LANDSCAPE_NODES = 100;
-/** How many window rows one scan step reads while looking for that many. */
-const LANDSCAPE_SCAN_BATCH = 200;
+/** How many candidates are HYDRATED per round trip while looking for that many.
+ *  Hydration is the expensive half (it joins rooms for the visibility bar), so
+ *  it stays batched even though the candidates arrive in one read. */
+const LANDSCAPE_HYDRATE_BATCH = 200;
 /** …and the point at which it stops looking: a window whose active rows are
- *  overwhelmingly restricted must not turn one map load into a table walk. */
+ *  overwhelmingly restricted must not turn one map load into a table walk.
+ *  This is now the size of the SINGLE candidate read, not a sum of pages. */
 const LANDSCAPE_SCAN_CEILING = 1_000;
 
 export async function assembleEngagementLandscape(
@@ -884,13 +887,36 @@ export async function assembleEngagementLandscape(
   // stories draw events too — so limiting the candidate query to
   // `LANDSCAPE_NODES` spent the whole budget before anything was filtered: a
   // hundred high-activity restricted rows produced an EMPTY map for an hour with
-  // real public activity. It scans in bounded batches until the landscape is
-  // full or the window is exhausted, with a hard scan ceiling so a window that
-  // is overwhelmingly restricted cannot turn one map load into a table walk.
+  // real public activity. It hydrates in bounded batches until the landscape is
+  // full or the candidates run out, with a hard ceiling on the candidate read so
+  // a window that is overwhelmingly restricted cannot turn one map load into a
+  // table walk.
   const nodes: ReebNode[] = [];
   const topicsById = new Map<string, readonly string[]>();
   const byId = new Map<string, StoryRecord>();
   let examined = 0;
+  // ONE SNAPSHOT of the candidates, then a walk over it.
+  //
+  // The scan used to re-read the window with a growing limit and slice off what
+  // it had already seen, which is OFFSET pagination over an ordering that
+  // MUTATES: a late offline event recomputes the completed hour, `event_count`
+  // changes, and a row can move into the prefix the next read discards — never
+  // examined, and (if that enlarged read came back short) reported as a
+  // complete scan. De-duplicating by id, which is what the loop did carry,
+  // prevents a duplicate node; it cannot recover a row that moved into the
+  // discarded prefix.
+  //
+  // A keyset cursor does not fix it either, because the sort key IS the value
+  // that changes. What does is not paging the candidates at all: one bounded
+  // read of the ceiling, ordered once, and every later decision made against
+  // that fixed array. The read is two columns and at most `LANDSCAPE_SCAN_CEILING`
+  // rows; the expensive half — hydration, which joins rooms for the visibility
+  // bar — stays batched below.
+  const candidates = await events.windowStore.listActiveInWindow(
+    windowStart,
+    '1h',
+    LANDSCAPE_SCAN_CEILING,
+  );
   // TWO independent facts, and the answer is the conjunction of both.
   //
   // Deriving completeness from the LAST break alone was wrong in the case
@@ -899,32 +925,15 @@ export async function assembleEngagementLandscape(
   // dropped rows — and reporting the short batch as "complete" suppressed the
   // partial-scan warning over a map that was missing stories. The window
   // running out and every candidate being included are different questions.
-  let exhausted = false;
-  let capped = false;
-  for (let scanned = 0; scanned < LANDSCAPE_SCAN_CEILING; scanned += LANDSCAPE_SCAN_BATCH) {
-    const active = await events.windowStore.listActiveInWindow(
-      windowStart,
-      '1h',
-      scanned + LANDSCAPE_SCAN_BATCH,
-    );
+  //
+  // The candidate read being CAPPED is the third: a window with more active
+  // rows than the ceiling was never fully offered to this walk.
+  let capped = candidates.length >= LANDSCAPE_SCAN_CEILING;
+  for (let at = 0; at < candidates.length; at += LANDSCAPE_HYDRATE_BATCH) {
+    const page = candidates.slice(at, at + LANDSCAPE_HYDRATE_BATCH);
     // Hydrate PUBLIC-ONLY, in one query: the restriction lives in the read
     // rather than in a filter afterwards, so a restricted story cannot reach a
     // surface whose caller's room authority is unknown.
-    // De-duplicate ACROSS iterations, not just within one.
-    //
-    // The scan re-reads with a larger limit and slices off what it already saw,
-    // which assumes the ordering is stable between reads — and it is not: a
-    // late-arriving event recomputes the hour, `event_count` changes, and a row
-    // already appended reappears at a new position. `reebGraph` throws on a
-    // duplicate node id, so the Civic Map answered 500 for a race that is only
-    // reachable once restricted rows push the scan past its first batch.
-    const page = active.slice(scanned).filter((row) => !topicsById.has(row.itemId));
-    if (page.length === 0) {
-      // The window had nothing further to offer — the walk ENDED rather than
-      // being cut short.
-      exhausted = true;
-      break;
-    }
     const hydrated = await ingestion.stories.getPublicByIds(page.map((row) => row.itemId));
     for (const row of page) {
       // Checked BEFORE the row is considered, so `capped` means "there was a
@@ -942,16 +951,10 @@ export async function assembleEngagementLandscape(
       nodes.push({ id: row.itemId, value: row.eventCount });
       topicsById.set(row.itemId, story.topicIds);
     }
-    if (capped) break;
-    if (active.length < scanned + LANDSCAPE_SCAN_BATCH) {
-      // A short page IS the end of the window.
-      exhausted = true;
-      break;
-    }
+    if (nodes.length >= LANDSCAPE_NODES) break;
   }
-  // …and the scan ceiling exits the loop through neither branch, which is the
-  // third way to be incomplete.
-  const complete = exhausted && !capped;
+  // The walk covered every candidate the read offered unless a bound stopped it.
+  const complete = !capped;
 
   const edges: ReebEdge[] = [];
   for (let i = 0; i < nodes.length; i += 1) {

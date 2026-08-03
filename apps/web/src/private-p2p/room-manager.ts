@@ -1539,7 +1539,10 @@ export class PrivateRoomSession {
      * the grant's own manifest carries, so the match is exact rather than
      * positional.
      */
-    const directoryByRoomKey = new Map<string, StoredDirectoryStub['capability']>();
+    const directoryByRoomKey = new Map<
+      string,
+      { capability: StoredDirectoryStub['capability']; ambiguous: boolean }
+    >();
     return {
       inviteePublicKey,
       async complete(sealedInvite: string) {
@@ -1549,9 +1552,35 @@ export class PrivateRoomSession {
         // this device — the grant that follows is plaintext on an out-of-band
         // channel.
         if (invite.room_stub_ref !== undefined && invite.bootstrap_blind_id !== undefined) {
-          directoryByRoomKey.set(invite.room_public_key, {
+          const capability = {
             roomServerId: invite.room_stub_ref,
             bootstrapBlindId: invite.bootstrap_blind_id,
+          };
+          // TWO invites for the SAME room are indistinguishable to the grant.
+          //
+          // A grant carries the room's manifest, not the invite it answers, and
+          // one preparation uses one KeyPackage for all of them — so when two
+          // invites for one room disagree about the record (a stale invite from
+          // before the record was removed and registered again), nothing here
+          // can tell which grant belongs to which. Last-write-wins silently
+          // attached the other invite's handle, and that handle then travels
+          // into every invite this device makes.
+          //
+          // Agreement is the common case and is not a conflict. Disagreement
+          // fails CLOSED: the session takes no handle, and the panel can attach
+          // the right one deliberately — a room addressed by the wrong record is
+          // worse than one addressed by none.
+          const seen = directoryByRoomKey.get(invite.room_public_key);
+          const conflicts =
+            seen !== undefined &&
+            (seen.capability.roomServerId !== capability.roomServerId ||
+              seen.capability.bootstrapBlindId !== capability.bootstrapBlindId);
+          directoryByRoomKey.set(invite.room_public_key, {
+            // FIRST wins where they agree (the value is identical anyway); once
+            // ambiguous, always ambiguous — a third agreeing invite does not
+            // resolve which of the first two a grant answers.
+            capability: seen?.capability ?? capability,
+            ambiguous: seen?.ambiguous === true || conflicts,
           });
         }
         const request = await p2p.buildJoinRequest({
@@ -1568,7 +1597,10 @@ export class PrivateRoomSession {
         // MANIFEST carries. An unmatched grant simply gets no capability — a
         // wrong one would point this room's settings at another room's record.
         const roomKey = manifestRoomPublicKey(grant.manifest);
-        const directory = roomKey === undefined ? undefined : directoryByRoomKey.get(roomKey);
+        const retained = roomKey === undefined ? undefined : directoryByRoomKey.get(roomKey);
+        // Ambiguous ⇒ NONE. See the retention above: a wrong record is worse
+        // than no record, because it propagates.
+        const directory = retained?.ambiguous === false ? retained.capability : undefined;
         return PrivateRoomSession.finishJoin(grant, {
           bundle: keyPackage,
           signingPrivateKey: signing.privateKey,
