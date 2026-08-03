@@ -22,6 +22,7 @@
 //   • The §8.1 forbidden key classes are refused inside `signed_stub`, the one
 //     free-form field a column allowlist cannot see into.
 import { createDbClient } from '@licio/db';
+import { z } from 'zod';
 import { createLogger } from '../lib/logger.js';
 import { pgNoticeLogLevel } from '../lib/pg-notices.js';
 import { DrizzlePrivateRoomStubStore } from './drizzle-store.js';
@@ -780,6 +781,28 @@ function isLegacySignedStub(body: Record<string, unknown>): boolean {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Split `<iso>|<stubId>`; anything else is treated as no cursor at all. */
+/**
+ * A directory/`/mine` cursor the server can actually READ, checked at the route
+ * boundary.
+ *
+ * `parseDirectoryCursor` fails soft — a mangled link must not 500 an
+ * unauthenticated route — and that is right for the parser and wrong as the
+ * whole answer: the caller cannot tell "the next page" from "I could not read
+ * your cursor, so here is the FIRST page again". The directory client appends
+ * pages, so it re-appended page one and re-received the same `next_cursor`,
+ * duplicating rows on every scroll, indefinitely.
+ *
+ * The grammar is the parser's own, so the two cannot drift: a value this schema
+ * accepts is one `parseDirectoryCursor` returns a cursor for.
+ */
+export const directoryCursorSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((cursor) => parseDirectoryCursor(cursor) !== undefined, {
+    message: 'malformed cursor — pass the `next_cursor` from the previous page, or omit it',
+  });
+
 function parseDirectoryCursor(
   cursor: string | undefined,
 ): { createdAt: string; stubId: string } | undefined {

@@ -638,13 +638,26 @@ export function DirectoryRecordPanel({
               onClick={() =>
                 void run('forget', async () => {
                   await session.clearDirectoryStub();
+                  // STATE DIRECTLY, not another read.
+                  //
+                  // `read` is a closure over the roomServerId and token that
+                  // existed when it was built, and the handle has just been
+                  // cleared — so re-running it starts a lookup for a record this
+                  // device no longer has a capability for, and that lookup lands
+                  // AFTER the re-render has already settled on `absent`,
+                  // overwriting it with `unreadable`. With the handle gone, the
+                  // panel then renders neither the forget control nor the
+                  // registration it promised, and nothing but a remount clears
+                  // it. Forgetting is a local act whose outcome is known here:
+                  // this device holds no record.
+                  setState({ kind: 'absent' });
+                  setError(null);
                   setStatus(
                     t(
                       'privateRoom.record.forgotten',
                       'This device no longer holds a pointer to Licio’s record for this room.',
                     ),
                   );
-                  await read();
                 })
               }
             >

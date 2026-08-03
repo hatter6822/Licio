@@ -22,7 +22,7 @@
 // states the same rule for consumers).
 
 import { reebGraph } from '@licio/invariants';
-import type { CivicMapBasin, CivicMapResponse, CivicMapSaddle, CivicMapTopic } from '@licio/shared';
+import type { CivicMapBasin, CivicMapEnvelope, CivicMapSaddle, CivicMapTopic } from '@licio/shared';
 import { isSentinelTopicId, topicById } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -96,7 +96,7 @@ export async function buildCivicMap(
    * that agree until they do not.
    */
   canBridge: (threadId: string) => Promise<boolean> = async () => false,
-): Promise<CivicMapResponse | null> {
+): Promise<CivicMapEnvelope> {
   const {
     nodes,
     edges,
@@ -107,7 +107,12 @@ export async function buildCivicMap(
   // and drops anything that no longer hydrates as public, so an empty result
   // means a quiet hour or a window whose stories are all restricted — both real
   // states this surface renders as "nothing to map yet" rather than an error.
-  if (nodes.length === 0) return null;
+  //
+  // The COVERAGE still travels: a candidate read that filled its ceiling with
+  // rows that all turned out to be restricted also produces no nodes, and that
+  // hour was truncated rather than quiet. Returning a bare `null` threw the one
+  // fact that distinguishes them away.
+  if (nodes.length === 0) return { landscape: null, scan };
 
   const graph = reebGraph(nodes, edges);
 
@@ -243,25 +248,28 @@ export async function buildCivicMap(
   const windowEnd = Math.floor(nowMs / hourMs) * hourMs;
 
   return {
-    window: {
-      start: new Date(windowEnd - hourMs).toISOString(),
-      end: new Date(windowEnd).toISOString(),
-    },
-    summary: {
-      basin_count: graph.peaks.length,
-      merge_count: graph.merges.length,
-      split_count: graph.splits.length,
-      fragile_saddle_count: graph.bridgePrompts.length,
-      final_basin_count: graph.finalBasins.length,
-    },
-    basins: basins.slice(0, 120),
-    merges: await Promise.all(graph.merges.slice(0, 240).map(toSaddle(true))),
-    // A split is a basin coming APART — there is no join to bridge, so no
-    // target is resolved for one.
-    splits: await Promise.all(graph.splits.slice(0, 240).map(toSaddle(false))),
-    coverage: nodes.length === 0 ? 0 : connected.size / nodes.length,
-    // Carried through UNCHANGED from the assembly: a map drawn from part of an
-    // hour must not be read as the hour, and only the walk knows which it was.
     scan,
+    landscape: {
+      window: {
+        start: new Date(windowEnd - hourMs).toISOString(),
+        end: new Date(windowEnd).toISOString(),
+      },
+      summary: {
+        basin_count: graph.peaks.length,
+        merge_count: graph.merges.length,
+        split_count: graph.splits.length,
+        fragile_saddle_count: graph.bridgePrompts.length,
+        final_basin_count: graph.finalBasins.length,
+      },
+      basins: basins.slice(0, 120),
+      merges: await Promise.all(graph.merges.slice(0, 240).map(toSaddle(true))),
+      // A split is a basin coming APART — there is no join to bridge, so no
+      // target is resolved for one.
+      splits: await Promise.all(graph.splits.slice(0, 240).map(toSaddle(false))),
+      coverage: nodes.length === 0 ? 0 : connected.size / nodes.length,
+      // Carried on the LANDSCAPE too, so a consumer holding just the map still
+      // knows whether the hour it draws is the whole hour.
+      scan,
+    },
   };
 }

@@ -680,16 +680,18 @@ describe('moderation console (role-gated)', () => {
     expect(list.status).toBe(200);
     expect(((await list.json()) as { count: number }).count).toBe(1);
 
-    // A MALFORMED CURSOR RESTARTS THE PAGE, it does not fail the read.  `cursor` is a
-    // client-supplied string whose two parts are cast `::timestamptz` and `::uuid` in the
-    // store; this queue's decoder checked only that both were non-empty, so two arbitrary
-    // tokens reached Postgres and came back as a 500 on a plain GET.
+    // A MALFORMED CURSOR IS REFUSED — never a 500, and never a silent page 1.
+    // `cursor` is a client-supplied string whose two parts are cast
+    // `::timestamptz` and `::uuid` in the store, so the decoder must reject them
+    // (it once checked only non-emptiness and two arbitrary tokens reached
+    // Postgres as a 500). Restarting instead is the failure this queue shares
+    // with every paging surface: a client that appends re-appends page one and
+    // gets the same `next_cursor` back, duplicating rows on every scroll.
     const garbage = Buffer.from('yesterday|not-a-uuid', 'utf-8').toString('base64url');
     const bad = await app().request(
       get(`/v1/moderation/incidents?cursor=${garbage}`, integrity.cookie),
     );
-    expect(bad.status).toBe(200);
-    expect(((await bad.json()) as { count: number }).count).toBe(1);
+    expect(bad.status).toBe(400);
 
     const resolved = await app().request(
       post(

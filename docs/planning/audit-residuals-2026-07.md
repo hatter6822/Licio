@@ -704,3 +704,26 @@ The seam itself is domain-agnostic and already shipped:
 in-memory twins) plus a per-domain transactor whose production binding is one
 `db.transaction`.  WS-J and WS-H (`InvariantPlatformServices.transact`) are the
 two worked examples.
+
+### Cursor grammar — a malformed cursor must not restart pagination
+
+`decodeKeysetCursor` and `parseDirectoryCursor` both fail SOFT (an unreadable
+cursor becomes "no cursor"), which is right for a decoder — a mangled link must
+never 500 an unauthenticated route — and wrong as the whole answer: the caller
+cannot tell "the next page" from "I could not read your cursor, so here is the
+FIRST page again", and a client that APPENDS pages then re-appends page one and
+receives the same `next_cursor`, duplicating rows on every scroll, indefinitely.
+That is what `?cursor=garbage` did to the §4.2 directory list.
+
+The boundary now validates the grammar it will later parse — `keysetCursorSchema`
+(the `(timestamp, uuid)` base64url form) and `directoryCursorSchema` (the
+private-room `<iso>|<uuid>` form), each defined next to the parser it mirrors, so
+the two cannot drift. Applied to the 5 route params whose service uses the
+matching decoder (`/private-rooms/directory`, `/private-rooms/mine`, and the
+three moderation-console queues).
+
+**10 cursor params still take `z.string().min(1).max(512)`** — the forum thread
+and comment pages, the room thread page, the signal ledger, the mute/block/notice
+lists — each with its own decoder, and each needing that decoder's grammar
+expressed as a schema before it can be tightened. Same defect, one surface at a
+time; converting them blind would 400 cursors that are currently valid.

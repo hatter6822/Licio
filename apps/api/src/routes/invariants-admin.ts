@@ -553,7 +553,10 @@ export function createInvariantsAdminRoutes(
               )
             ).ok,
         );
-        return c.json({ landscape: map }, 200);
+        // The ENVELOPE, coverage included: an hour whose candidates were all
+        // restricted has no map AND was truncated, and only the second fact
+        // stops a steward reading "nothing to map yet" as "nothing happened".
+        return c.json(map, 200);
       })
 
       .post('/scoi/threads/:threadId/bridge-requests', async (c) => {

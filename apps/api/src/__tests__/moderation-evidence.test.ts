@@ -323,7 +323,12 @@ describe('GET /v1/moderation/evidence-queue (ROLE_EVIDENCE)', () => {
     second.threadRemoved = false;
   });
 
-  it('a malformed cursor restarts from page 1 instead of erroring', async () => {
+  it('a malformed cursor is REFUSED, rather than silently answered with page 1', async () => {
+    // Restarting was the old behaviour, and it is indistinguishable from "here
+    // is your next page": a client that APPENDS re-appends page one, receives
+    // the same `next_cursor`, and duplicates rows on every scroll — forever.
+    // The decoder still fails soft underneath (a mangled link must never 500 an
+    // unauthenticated route); the boundary is where the caller is told.
     for (const cursor of [
       'garbage', // not a decodable createdAt|id pair at all
       Buffer.from('not-a-timestamp|not-a-uuid', 'utf-8').toString('base64url'),
@@ -332,14 +337,18 @@ describe('GET /v1/moderation/evidence-queue (ROLE_EVIDENCE)', () => {
       const res = await app().fetch(
         get(`/v1/moderation/evidence-queue?cursor=${cursor}`, evidenceSteward.cookie),
       );
-      expect(res.status).toBe(200); // restart-from-beginning, never a 500
-      const body = evidenceQueueResponseSchema.parse(await res.json());
-      expect(body.items.map((i) => i.body_preview)).toEqual([
-        'Sourced comment 1',
-        'Sourced comment 2',
-        'Sourced comment 3',
-      ]);
+      expect(res.status).toBe(400); // never a 500, and never a silent page 1
     }
+    // …and a WELL-FORMED cursor still pages.
+    const valid = Buffer.from(
+      `2026-01-01T00:00:00.000Z|${'11111111-1111-4111-8111-111111111111'}`,
+      'utf-8',
+    ).toString('base64url');
+    const ok = await app().fetch(
+      get(`/v1/moderation/evidence-queue?cursor=${valid}`, evidenceSteward.cookie),
+    );
+    expect(ok.status).toBe(200);
+    evidenceQueueResponseSchema.parse(await ok.json());
   });
 });
 

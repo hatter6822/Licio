@@ -260,6 +260,9 @@ const incidentView = {
   reviewed_by: null,
 };
 /** A minimal landscape with one fragile join, for the Integrity-tab cases. */
+/** A scan that reached the end of its window — the ordinary case. */
+const FULL_SCAN = { complete: true, examined: 2 } as const;
+
 const civicLandscape: CivicMapResponse = {
   window: { start: '2026-08-02T10:00:00.000Z', end: '2026-08-02T11:00:00.000Z' },
   summary: {
@@ -836,7 +839,8 @@ describe('AppealsPanel', () => {
 
 /** The Integrity tab now renders the Civic Map above the incident queue; the
  *  landscape defaults to "nothing to map" unless a case opts in. */
-const emptyLandscape = () => vi.mocked(api.fetchCivicMap).mockResolvedValue(null);
+const emptyLandscape = () =>
+  vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: null, scan: FULL_SCAN });
 
 describe('IncidentsPanel', () => {
   it('lists incidents and confirms one (protecting the target)', async () => {
@@ -878,7 +882,7 @@ describe('IncidentsPanel', () => {
   it('renders the Civic Map above the queue and routes a bridge request', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
-    vi.mocked(api.fetchCivicMap).mockResolvedValue(civicLandscape);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: civicLandscape, scan: FULL_SCAN });
     vi.mocked(api.openBridgeRequest).mockResolvedValue({
       attempt_id: '99999999-9999-4999-8999-999999999999',
       scoi_baseline: 0.4,
@@ -900,7 +904,7 @@ describe('IncidentsPanel', () => {
     // `409 already_open`.
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
-    vi.mocked(api.fetchCivicMap).mockResolvedValue(civicLandscape);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: civicLandscape, scan: FULL_SCAN });
     vi.mocked(api.openBridgeRequest).mockResolvedValue({
       attempt_id: '99999999-9999-4999-8999-999999999999',
       scoi_baseline: 0.4,
@@ -930,7 +934,7 @@ describe('IncidentsPanel', () => {
   it('keeps the landscape usable when the incident queue fails', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockRejectedValue(new ApiClientError('unavailable', 'no', 503));
-    vi.mocked(api.fetchCivicMap).mockResolvedValue(civicLandscape);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: civicLandscape, scan: FULL_SCAN });
     render(<ModerationConsole />, { wrapper: Providers });
     tab('Integrity');
     expect(await screen.findByText(/Attention landscape/i)).toBeInTheDocument();

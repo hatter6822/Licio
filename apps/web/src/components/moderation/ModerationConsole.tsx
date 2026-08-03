@@ -1747,18 +1747,30 @@ function CivicMapSection(): React.ReactElement | null {
       </p>
     );
   }
-  if (!map.data) {
-    // Undefined while loading; null when the window genuinely has nothing to
-    // sweep. Only the latter is worth a sentence.
-    return map.isSuccess ? (
+  if (!map.data?.landscape) {
+    // Undefined while loading; a null LANDSCAPE when the window has nothing to
+    // sweep. Only the latter is worth a sentence — and which sentence depends
+    // on `scan`: an hour whose candidates were all room-restricted produces the
+    // same empty map as a genuinely quiet one, and calling that "nothing
+    // happened" is the mistake the coverage exists to prevent.
+    if (!map.isSuccess || !map.data) return null;
+    return map.data.scan.complete ? (
       <p className="text-ink-muted text-xs">
         {t('civicMap.empty', 'No stories in this window to map yet.')}
       </p>
-    ) : null;
+    ) : (
+      <p className="text-ink-muted text-xs" role="note">
+        {t(
+          'civicMap.emptyTruncated',
+          'Nothing could be mapped from this hour, and it was not read to the end: {n} items were examined and none of them is publicly visible. Treat this as unexamined rather than quiet.',
+          { n: String(map.data.scan.examined) },
+        )}
+      </p>
+    );
   }
   return (
     <CivicMap
-      data={map.data}
+      data={map.data.landscape}
       pendingThreadIds={pending}
       onOpenBridge={(threadId, title) => bridge.mutate({ threadId, title })}
     />

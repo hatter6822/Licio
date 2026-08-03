@@ -210,6 +210,16 @@ export type CivicMapResponse = z.infer<typeof civicMapResponseSchema>;
  *  panel can say "nothing to map yet" instead of showing an error. */
 export const civicMapEnvelopeSchema = z.object({
   landscape: civicMapResponseSchema.nullable(),
+  /**
+   * How much of the window was examined — carried on the ENVELOPE, so a `null`
+   * landscape still says which kind of empty it is.
+   *
+   * A window whose candidate read filled the ceiling with rows that all turned
+   * out to be restricted produces no nodes and no map, and rendering that as
+   * "nothing to map yet" tells a steward the hour was quiet when it was
+   * TRUNCATED. The two are different facts and only one of them is reassuring.
+   */
+  scan: scanCoverageSchema,
 });
 export type CivicMapEnvelope = z.infer<typeof civicMapEnvelopeSchema>;
 

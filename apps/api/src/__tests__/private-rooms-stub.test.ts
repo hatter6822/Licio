@@ -686,11 +686,25 @@ describe('§4.2 directory — a listed room is one that can actually be found', 
     expect([...seen].sort()).toEqual([...ids].sort());
   });
 
-  it('treats a mangled cursor as no cursor rather than failing the browse', async () => {
+  it('treats a mangled cursor as no cursor INSIDE the service — the route refuses it', async () => {
+    // Defensive at the parser (a mangled link must never 500 an unauthenticated
+    // route) and REFUSED at the boundary: silently answering page one is what a
+    // paging client appends forever, duplicating rows on every scroll.
     const svc = freshService();
     await svc.create(listedRequest(), ACCOUNT);
     const page = await svc.listDirectory({ cursor: 'not-a-cursor' });
     expect(page.entries).toHaveLength(1);
+  });
+
+  it('answers 400 for a malformed cursor rather than the first page again', async () => {
+    setPrivateRoomStubService(freshService());
+    const app = createApp();
+    expect((await app.request('/v1/private-rooms/directory?cursor=garbage')).status).toBe(400);
+    // The valid grammar still pages.
+    const ok = await app.request(
+      `/v1/private-rooms/directory?cursor=${encodeURIComponent('2026-08-02T00:00:00.000Z|11111111-1111-4111-8111-111111111111')}`,
+    );
+    expect(ok.status).toBe(200);
   });
 
   it('serves the directory over GET /v1/private-rooms/directory without a session', async () => {

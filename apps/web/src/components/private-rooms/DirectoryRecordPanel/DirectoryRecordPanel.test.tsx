@@ -332,6 +332,15 @@ describe('DirectoryRecordPanel', () => {
     render(<DirectoryRecordPanel session={session} />);
     await userEvent.click(await screen.findByRole('button', { name: /Forget this record/i }));
     await waitFor(() => expect(cleared).toHaveBeenCalled());
+    // …and it SETTLES there. Re-running the read closure would start a lookup
+    // with the handle that was just cleared, and that answer lands after the
+    // rerender — flipping `absent` back to `unreadable`, with neither the forget
+    // control nor the promised registration rendered, until a remount.
+    expect(await screen.findByText(/no longer holds a pointer/i)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText(/Licio holds no record of this room/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/could not be opened with the key/i)).toBeNull();
   });
 
   it('repairs a failed cleanup on retry: the server 404 IS the record being gone', async () => {

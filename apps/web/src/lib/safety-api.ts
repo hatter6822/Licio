@@ -28,7 +28,7 @@ import {
   blockRecordSchema,
   bridgeRequestResponseSchema,
   type CaseReviewResponse,
-  type CivicMapResponse,
+  type CivicMapEnvelope,
   type ConsoleAction,
   type CreateAppealRequest,
   type CreateReportRequest,
@@ -343,10 +343,12 @@ export async function applyEvidenceDecision(
 
 /** The current attention landscape, or `null` when there is nothing to map
  *  (a quiet window is a real state, not an error). */
-export async function fetchCivicMap(): Promise<CivicMapResponse | null> {
+export async function fetchCivicMap(): Promise<CivicMapEnvelope> {
   const response = await client.v1.invariants.admin.reeb.landscape.$get();
-  const parsed = await parseResponse(response, civicMapEnvelopeSchema);
-  return parsed.landscape;
+  // The ENVELOPE, not just its landscape: a `null` map from a window whose
+  // candidates were all restricted is a TRUNCATED hour, not a quiet one, and
+  // `scan` is the only thing that tells them apart.
+  return await parseResponse(response, civicMapEnvelopeSchema);
 }
 
 /** Open a bridge request on a thread joined by a fragile saddle (WS-H.4.2d).

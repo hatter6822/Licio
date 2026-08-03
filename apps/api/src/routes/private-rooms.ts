@@ -30,6 +30,7 @@ import { getModerationServices } from '../moderation/services.js';
 import {
   DIRECTORY_DEFAULT_LIMIT,
   DIRECTORY_MAX_LIMIT,
+  directoryCursorSchema,
   getPrivateRoomStubService,
   type StubFailure,
 } from '../private-rooms/service.js';
@@ -126,7 +127,10 @@ const roomIdParamSchema = z.object({ roomServerId: z.uuid() });
  *  than a silent clamp, so a client never believes it read a page it did not. */
 const directoryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(DIRECTORY_MAX_LIMIT).optional(),
-  cursor: z.string().min(1).max(128).optional(),
+  // VALIDATED, not merely bounded: a cursor the server cannot read used to
+  // return page one, which a client that appends pages turns into the same rows
+  // forever.
+  cursor: directoryCursorSchema.optional(),
 });
 
 /**

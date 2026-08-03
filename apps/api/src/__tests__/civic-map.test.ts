@@ -13,9 +13,15 @@
 //   • a basin whose story row vanished still renders rather than dropping a
 //     node the tree's edges reference;
 //   • an empty landscape is `null` (a real state), not a throw.
-import { TOPICS, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
+import { type CivicMapResponse, TOPICS, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
-import { buildCivicMap } from '../invariants/civic-map.js';
+import { buildCivicMap as buildCivicMapEnvelope } from '../invariants/civic-map.js';
+
+/** The LANDSCAPE half of the envelope — what these cases are about. The
+ *  envelope's own coverage is asserted by the cases that name `scan`. */
+const buildCivicMap = async (
+  ...args: Parameters<typeof buildCivicMapEnvelope>
+): Promise<CivicMapResponse | null> => (await buildCivicMapEnvelope(...args)).landscape;
 
 /** Two real catalog topics to build a topic-adjacency edge from. */
 const SUBJECT = TOPICS.filter((topic) => topic.sentinel !== true);
