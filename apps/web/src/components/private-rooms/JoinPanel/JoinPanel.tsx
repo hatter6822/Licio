@@ -236,6 +236,12 @@ function JoinerSection({
               // evidence gets read as a check of what is on screen.
               setRequest(null);
               setRecordCheck(null);
+              // The GRANT too. It answers the previous invite, and `completeJoin`
+              // accepts whichever valid grant is pasted — the pending
+              // preparation reuses one key package across both — so a stale
+              // grant beside a replacement link joins room A while the screen
+              // shows invite B.
+              setGrantJson('');
               setError(null);
             }}
             rows={2}

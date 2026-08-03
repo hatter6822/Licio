@@ -890,7 +890,15 @@ export async function assembleEngagementLandscape(
     // Hydrate PUBLIC-ONLY, in one query: the restriction lives in the read
     // rather than in a filter afterwards, so a restricted story cannot reach a
     // surface whose caller's room authority is unknown.
-    const page = active.slice(scanned);
+    // De-duplicate ACROSS iterations, not just within one.
+    //
+    // The scan re-reads with a larger limit and slices off what it already saw,
+    // which assumes the ordering is stable between reads — and it is not: a
+    // late-arriving event recomputes the hour, `event_count` changes, and a row
+    // already appended reappears at a new position. `reebGraph` throws on a
+    // duplicate node id, so the Civic Map answered 500 for a race that is only
+    // reachable once restricted rows push the scan past its first batch.
+    const page = active.slice(scanned).filter((row) => !topicsById.has(row.itemId));
     if (page.length === 0) break;
     const hydrated = await ingestion.stories.getPublicByIds(page.map((row) => row.itemId));
     for (const row of page) {

@@ -771,6 +771,27 @@ describe('registration is IDEMPOTENT per account per room', () => {
   });
 });
 
+describe('a reported listing is captured before it can be edited', () => {
+  it('snapshots what a LISTED room publishes, and nothing for an unlisted one', async () => {
+    const svc = freshService();
+    const listed = await svc.create(
+      listedRequest({ display_name: 'Abusive name', display_description: 'Abusive text' }),
+      ACCOUNT,
+    );
+    const hidden = await svc.create(unlistedRequest(anotherRoom()), ACCOUNT);
+    if (!listed.ok || !hidden.ok) throw new Error('create failed');
+
+    expect(await svc.listingSnapshot(listed.value.room_server_id)).toEqual({
+      display_name: 'Abusive name',
+      display_description: 'Abusive text',
+    });
+    // An unlisted room publishes nothing to capture; an unknown id answers the
+    // same, so this cannot become an existence oracle either.
+    expect(await svc.listingSnapshot(hidden.value.room_server_id)).toBeNull();
+    expect(await svc.listingSnapshot('00000000-0000-4000-8000-999999999999')).toBeNull();
+  });
+});
+
 describe('the targeted owner lookup', () => {
   it('finds ONE record by room id or by the room’s signing key', async () => {
     const svc = freshService();

@@ -574,6 +574,23 @@ export class PrivateRoomStubService {
   }
 
   /**
+   * What a publicly listed room PUBLISHES, right now — for a report-time capture.
+   *
+   * A report about a listing has to preserve what was reported: the room's own
+   * members can edit the name and description afterwards (§21.3), and a console
+   * asking staff to delist a room without showing what was complained about is
+   * asking them to act on nothing. Null for an unlisted or unknown room, which
+   * publish nothing to capture.
+   */
+  async listingSnapshot(
+    roomServerId: string,
+  ): Promise<{ display_name: string | null; display_description: string | null } | null> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (stub?.directoryMode !== 'listed') return null;
+    return { display_name: stub.displayName, display_description: stub.displayDescription };
+  }
+
+  /**
    * Is this room's directory record publicly LISTED?
    *
    * The one question another surface may ask about a private room without a

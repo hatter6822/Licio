@@ -31,6 +31,7 @@ import { getIdentityServices } from '../identity/services.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { checkEligibility, submitAppeal } from '../moderation/appeals.js';
+import { writeAudit } from '../moderation/audit.js';
 import { listNotices } from '../moderation/notices.js';
 import {
   createBlock,
@@ -190,6 +191,18 @@ export function createTrustSafetyRoutes() {
               (await getPrivateRoomStubService().isPubliclyListed(request.target_id));
             if (!reportable) return c.json(deny('target_not_found', 'Target not found'), 404);
           }
+          // CAPTURE the listing that was reported, before it can be edited.
+          //
+          // §21.3 lets the room's own members change the published name and
+          // description, so a case reviewed later can be about text nobody can
+          // still see — and the console would be asking staff to delist a room
+          // without showing what was complained about. The audit trail is where
+          // "what was true when this happened" belongs, it is already rendered
+          // in the case panel, and it is tamper-evident.
+          const listing =
+            request.target_type === 'room'
+              ? await getPrivateRoomStubService().listingSnapshot(request.target_id)
+              : null;
           const outcome = await submitReport(
             mod,
             auth.userId,
@@ -197,6 +210,21 @@ export function createTrustSafetyRoutes() {
             resolvedContentKind,
             resolvedSubjectUserId,
           );
+          if (outcome.ok && listing !== null) {
+            // BEST EFFORT: the report has already committed, and losing the
+            // capture must not un-take it.
+            await writeAudit(mod, {
+              actorUserId: auth.userId,
+              actorRole: null,
+              action: 'private_room_listing_reported',
+              targetType: 'private_room_stub',
+              targetId: request.target_id,
+              reversible: false,
+              notes: `Listing as reported — name: ${listing.display_name ?? '(none)'}; description: ${
+                listing.display_description ?? '(none)'
+              }`,
+            });
+          }
           if (!outcome.ok) {
             // WS-N.2.3e: key-like material blocked with the standing warning
             // (the matched value was discarded, never stored or echoed).
