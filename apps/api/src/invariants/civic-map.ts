@@ -209,6 +209,12 @@ export async function buildCivicMap(
       connecting_edges: event.connectingEdges,
       fragile: event.fragile,
       survivor: event.survivor,
+      // Titles come from the landscape's OWN hydrated rows, not from a lookup in
+      // `basins`: a SPLIT's ids are ascending-sweep minima and appear in no peak
+      // list, so a consumer resolving them there finds nothing and names two
+      // "unavailable" stories.
+      basin_a_title: byId.get(event.basinA)?.title ?? '',
+      basin_b_title: byId.get(event.basinB)?.title ?? '',
       shared_topics: saddleTopics(event.connectingEdgeSample, topicsByStory),
       // Resolved ONLY where a bridge action exists: the surface offers one for a
       // FRAGILE merge and nowhere else, so authorizing a target for a sturdy

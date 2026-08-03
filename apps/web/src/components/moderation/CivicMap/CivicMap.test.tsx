@@ -70,6 +70,8 @@ function landscape(over: Partial<CivicMapResponse> = {}): CivicMapResponse {
         fragile: true,
         survivor: BASIN_A,
         bridge_thread_id: null,
+        basin_a_title: 'Flooding on the ring road',
+        basin_b_title: 'Council budget vote',
         shared_topics: [TOPIC],
       },
     ],
@@ -120,6 +122,8 @@ describe('CivicMap', () => {
       merges: landscape().merges.map((saddle) => ({
         ...saddle,
         bridge_thread_id: 'cccccccc-3333-4333-8333-333333333333',
+        basin_a_title: 'Flooding on the ring road',
+        basin_b_title: 'Council budget vote',
       })),
     });
     render(<CivicMap data={data} onOpenBridge={onOpenBridge} />);
@@ -148,6 +152,8 @@ describe('CivicMap', () => {
       merges: landscape().merges.map((saddle) => ({
         ...saddle,
         bridge_thread_id: 'cccccccc-3333-4333-8333-333333333333',
+        basin_a_title: 'Flooding on the ring road',
+        basin_b_title: 'Council budget vote',
       })),
     });
     render(
@@ -239,6 +245,8 @@ describe('CivicMap', () => {
           fragile: false,
           survivor: BASIN_A,
           bridge_thread_id: null,
+          basin_a_title: 'Flooding on the ring road',
+          basin_b_title: 'Untargetable basin',
           shared_topics: [],
         },
       ],
@@ -282,6 +290,10 @@ describe('CivicMap', () => {
           fragile: false,
           survivor: BASIN_A,
           bridge_thread_id: null,
+          // A SPLIT's ids are ascending-sweep minima and appear in no peak
+          // list, so the title has to travel with the saddle.
+          basin_a_title: 'Flooding on the ring road',
+          basin_b_title: 'Untargetable basin',
           shared_topics: [TOPIC],
         },
       ],

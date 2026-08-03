@@ -122,6 +122,18 @@ export const civicMapSaddleSchema = z.object({
    *  something else. */
   survivor: uuidSchema,
   /**
+   * The two basins' TITLES, carried here rather than looked up.
+   *
+   * A consumer cannot resolve them from `basins`: that list is the descending
+   * sweep's peaks, while a SPLIT's basin ids come from the ascending sweep and
+   * are local MINIMA — so a two-valleys landscape produced a split list naming
+   * two "unavailable" stories. Carrying the labels with the saddle makes both
+   * lists correct by construction rather than by a lookup that happens to work
+   * for one of them.
+   */
+  basin_a_title: z.string(),
+  basin_b_title: z.string(),
+  /**
    * The thread a bridge request on this join should open on — null when there
    * is none this caller can act on.
    *

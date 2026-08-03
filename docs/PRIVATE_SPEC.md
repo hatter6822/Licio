@@ -2225,15 +2225,35 @@ and every member who verifies would conclude their room's entry was forged.
 `latest_manifest_commitment` is a plain column outside the signed body, which is
 why refreshing it needs no re-signing at all.
 
-**Bootstrap hints are POINTERS, in a closed format per kind.** `value` was a
+**Bootstrap hints are POINTERS, in a closed format per kind, at the primitive's
+exact size.** `value` was a
 free 1 KiB string, which is the `signed_stub` defect one field along: a strict
 outer object around an unrestricted value channel, persisted and re-served
 verbatim through a column §8.2 permits precisely because a pointer is not
 content. Each kind now names what it can be — `licio_blind` and `manual` are
-base64url (a blind id, an out-of-band exchange code; NOT prose), and
-`member_relay` is an `https://` or `wss://` endpoint with no credentials, query
-or fragment, which is where a payload would otherwise ride a legitimate-looking
-URL.
+32-byte base64url (a blind id, an out-of-band exchange code; NOT prose, and not
+a bounded string either: an HMAC output has one size, so anything else is a
+payload), and `member_relay` is an `https://` or `wss://` endpoint with no
+credentials, query or fragment, which is where a payload would otherwise ride a
+legitimate-looking URL.
+
+The same rule governs the commitment fields. `room_public_key`,
+`manifest_key_commitment`, `bootstrap_blind_id` and `latest_manifest_commitment`
+are 32-byte base64url; `stub_signature` is 64. Unpadded base64url of n bytes is
+exactly `ceil(n·4/3)` characters, so each is a total constraint rather than a
+bound — a field whose name says "commitment" and whose schema says "up to 512
+characters" is a content channel, and the strict object and the §8.1 key scan
+see only legal field NAMES.
+
+**Every staff delist is recorded BEFORE it is taken.** The moderation audit and
+the stub store hold separate connections, so they cannot share a transaction;
+the ORDER carries the guarantee instead. An append that fails refuses the action
+(503, nothing changed), because the demotion is irreversible and a record
+written afterwards could not be rolled back to match. The residual is the
+opposite direction — an entry for a demotion that the owner performed in the
+same instant, or that was the owner's own — and both are compensated by a
+following entry rather than left standing: an over-recorded trail is readable
+and correctable, while an under-recorded one hides the use of a power.
 
 ### 21.4 Delete/delist stub
 

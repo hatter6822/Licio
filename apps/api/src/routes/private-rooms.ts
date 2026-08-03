@@ -436,28 +436,20 @@ export function createPrivateRoomsRoutes() {
         const { status, body } = refuse(result.reason);
         return c.json(body, status);
       }
-      // A staff delist is a platform moderation action taken against somebody
-      // else's record, so it leaves a durable actor/target entry. An aggregate
-      // counter cannot answer "who removed this listing" — best-effort, because
-      // the demotion has already committed and losing the record must not
-      // un-take an action that protects people.
-      // `staff_action` is the SERVICE's answer to "was staff authority used",
-      // not this route's guess from the caller's roles: a creator who is also an
-      // admin takes the owner arm, and an already-unlisted record demotes
-      // nothing. Auditing on the guess wrote both as staff moderation.
-      if (result.value.staff_action) {
+      // A creator who is ALSO an admin takes the owner arm, which needs no
+      // record — so the entry written on the `staff` guess above describes an
+      // action that was not a staff action. It is COMPENSATED rather than
+      // omitted, for the same reason as the no-op above: the entry exists, and
+      // the trail should say what it turned out to be.
+      if (staff && !result.value.staff_action) {
         await writeAudit(getModerationServices(), {
           actorUserId: auth.userId,
-          // The doctrine-steward roles do not cover this: §11.4 gives the
-          // power to platform staff as such, not to a safety/appeals lane.
           actorRole: null,
-          action: 'private_room_stub_delisted',
+          action: 'private_room_stub_delist_by_owner',
           targetType: 'private_room_stub',
           targetId: params.data.roomServerId,
-          priorState: 'listed',
-          nextState: 'unlisted',
           reversible: false,
-          notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
+          notes: 'The recorded staff delist was in fact the owner delisting their own room.',
         });
       }
       const { staff_action: _internal, ...body } = result.value;

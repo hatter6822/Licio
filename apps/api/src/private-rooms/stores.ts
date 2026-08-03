@@ -87,11 +87,17 @@ export type RendezvousPolicy = z.infer<typeof rendezvousPolicySchema>;
  * A discriminated union rather than a refinement, so the shape itself carries
  * the rule and a new kind cannot be added without choosing a format for it.
  */
-const blindHintValueSchema = z
-  .string()
-  .min(1)
-  .max(512)
-  .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
+/**
+ * A blind id or exchange code — the SAME 32-byte shape as every other opaque
+ * identifier on this plane.
+ *
+ * `1..512 base64url` was the value channel one level down from the one the kind
+ * union closed: sixteen hints × hundreds of bytes is a content path through a
+ * field whose name says pointer. A `licio_blind` value IS an HMAC-SHA256 output,
+ * and a `manual` code has no reason to be anything else, so both take the
+ * primitive's exact decoded length rather than a bound.
+ */
+const blindHintValueSchema = base64UrlBytes(32, 'blind id or exchange code');
 
 const relayHintValueSchema = z
   .string()

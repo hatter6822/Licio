@@ -343,7 +343,7 @@ describe('§21.3 update — only the mutable fields, only the creator', () => {
       privateRoomStubUpdateRequestSchema.safeParse({
         display_name: 'Renamed',
         rendezvous_policy: 'manual_only',
-        bootstrap_hints: [{ kind: 'manual', value: 'paste-me' }],
+        bootstrap_hints: [{ kind: 'manual', value: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8' }],
         latest_manifest_commitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
       }).success,
     ).toBe(true);
@@ -524,7 +524,7 @@ describe('§8.2 bootstrap hints — pointers, not a value channel', () => {
   it('refuses free text, key-like material and content in a hint value', () => {
     for (const hint of [
       { kind: 'licio_blind', value: 'a private message about the meeting' },
-      { kind: 'manual', value: 'Ask Alice — she is at the community centre' },
+      { kind: 'manual', value: 'Ask Alice - she is at the community centre' },
       { kind: 'member_relay', value: 'wss://relay.example/?payload=some-room-content' },
       { kind: 'member_relay', value: 'wss://user:secret@relay.example/' },
       { kind: 'member_relay', value: 'file:///etc/passwd' },
@@ -537,10 +537,24 @@ describe('§8.2 bootstrap hints — pointers, not a value channel', () => {
     }
   });
 
+  it('refuses a hint value that is not the primitive’s exact size', () => {
+    // A blind id IS an HMAC-SHA256 output. `1..512 base64url` left sixteen
+    // hints × hundreds of bytes as a content path through a field whose name
+    // says pointer.
+    for (const value of ['c2hvcnQ', `${'A'.repeat(200)}`]) {
+      expect(
+        privateRoomCreateStubRequestSchema.safeParse(
+          rawRequest({ bootstrap_hints: [{ kind: 'licio_blind', value }] }),
+        ).success,
+        `expected ${value.length}-char blind hint to be rejected`,
+      ).toBe(false);
+    }
+  });
+
   it('accepts the pointer each kind is FOR', () => {
     for (const hint of [
-      { kind: 'licio_blind', value: 'YmxpbmQtaWQtdmFsdWU' },
-      { kind: 'manual', value: 'ZXhjaGFuZ2UtY29kZQ' },
+      { kind: 'licio_blind', value: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A' },
+      { kind: 'manual', value: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8' },
       { kind: 'member_relay', value: 'wss://relay.example/p2p' },
       { kind: 'member_relay', value: 'https://relay.example' },
     ]) {

@@ -168,13 +168,9 @@ function hourLabel(iso: string): string {
 
 /** How a join is named back to the caller of `onOpenBridge` — the two basins,
  *  since the bridge target is a connecting conversation rather than either. */
-function joinLabel(
-  t: ReturnType<typeof useT>,
-  a: CivicMapBasin | undefined,
-  b: CivicMapBasin | undefined,
-): string {
+function joinLabel(t: ReturnType<typeof useT>, a: string, b: string): string {
   const unknown = t('civicMap.unknownBasin', 'an unavailable story');
-  return `${a?.title ?? unknown} ⇄ ${b?.title ?? unknown}`;
+  return `${a === '' ? unknown : a} ⇄ ${b === '' ? unknown : b}`;
 }
 
 /** The saddles worth acting on, strongest signal first (fewest connecting
@@ -304,8 +300,12 @@ export function CivicMap({
           </h4>
           <ul className="flex flex-col gap-2">
             {fragile.map((saddle) => {
-              const a = basinById.get(saddle.basin_a);
-              const b = basinById.get(saddle.basin_b);
+              // Titles come from the SADDLE, not from `basins`. See
+              // `civicMapSaddleSchema`: a split's ids are ascending-sweep
+              // minima and are in no peak list, so the lookup that happens to
+              // work for merges finds nothing for them.
+              const a = saddle.basin_a_title;
+              const b = saddle.basin_b_title;
               // ONE target, chosen by the SERVER: `bridge_thread_id`.
               //
               // Two things this component cannot know decide it. Which
@@ -332,8 +332,8 @@ export function CivicMap({
                     />
                     <span className="text-ink">
                       {t('civicMap.joinedBy', '“{a}” and “{b}” are joined by {n} connections', {
-                        a: a?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
-                        b: b?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
+                        a: a === '' ? t('civicMap.unknownBasin', 'an unavailable story') : a,
+                        b: b === '' ? t('civicMap.unknownBasin', 'an unavailable story') : b,
                         n: String(saddle.connecting_edges),
                       })}
                     </span>
@@ -376,8 +376,6 @@ export function CivicMap({
           </summary>
           <ul className="mt-2 flex flex-col gap-1">
             {data.merges.map((saddle) => {
-              const a = basinById.get(saddle.basin_a);
-              const b = basinById.get(saddle.basin_b);
               const survivor = basinById.get(saddle.survivor);
               return (
                 <li
@@ -388,8 +386,14 @@ export function CivicMap({
                     'civicMap.joinRow',
                     '“{a}” and “{b}” join by {n, plural, one {# connection} other {# connections}}; “{survivor}” continues',
                     {
-                      a: a?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
-                      b: b?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
+                      a:
+                        saddle.basin_a_title === ''
+                          ? t('civicMap.unknownBasin', 'an unavailable story')
+                          : saddle.basin_a_title,
+                      b:
+                        saddle.basin_b_title === ''
+                          ? t('civicMap.unknownBasin', 'an unavailable story')
+                          : saddle.basin_b_title,
                       n: saddle.connecting_edges,
                       survivor:
                         survivor?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
@@ -419,8 +423,6 @@ export function CivicMap({
           </summary>
           <ul className="mt-2 flex flex-col gap-1">
             {data.splits.map((split) => {
-              const a = basinById.get(split.basin_a);
-              const b = basinById.get(split.basin_b);
               const shared = split.shared_topics.map((topic) => topic.name).join(', ');
               return (
                 <li
@@ -431,8 +433,14 @@ export function CivicMap({
                     'civicMap.splitRow',
                     '“{a}” and “{b}” separate here, with {n, plural, one {# connection} other {# connections}} left between them',
                     {
-                      a: a?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
-                      b: b?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
+                      a:
+                        split.basin_a_title === ''
+                          ? t('civicMap.unknownBasin', 'an unavailable story')
+                          : split.basin_a_title,
+                      b:
+                        split.basin_b_title === ''
+                          ? t('civicMap.unknownBasin', 'an unavailable story')
+                          : split.basin_b_title,
                       n: split.connecting_edges,
                     },
                   )}

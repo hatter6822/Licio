@@ -162,6 +162,26 @@ describe('JoinPanel — the §21.2 pre-join directory check', () => {
     expect(screen.queryByText(/does not resolve/i)).toBeNull();
   });
 
+  it('drops a previous invite’s verdict when the link changes', async () => {
+    // Editing the field used to leave the old room's reassuring message and the
+    // old join request standing beside a new link — stale evidence read as a
+    // check of what is on screen.
+    const admin = await makeSession();
+    await registerStub(admin);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      jsonResponse({ display_name: 'Neighbourhood watch' }),
+    );
+    await openInvite(admin);
+    expect(
+      await screen.findByText(/listed publicly as “Neighbourhood watch”/i),
+    ).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/paste the invite link/i), 'x');
+    expect(screen.queryByText(/listed publicly as “Neighbourhood watch”/i)).toBeNull();
+    expect(screen.queryByLabelText(/your join request/i)).toBeNull();
+  });
+
   it('says there is no record rather than blocking the join', async () => {
     // A `detached` room carries no capability at all, and refusing to proceed
     // would break the mode whose entire point is that Licio knows nothing.

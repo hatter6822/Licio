@@ -91,8 +91,20 @@ function JoinerSection({
   const [requestJson, setRequestJson] = useState<string | null>(null);
   const [grantJson, setGrantJson] = useState('');
   const [joined, setJoined] = useState(false);
-  /** What Licio's own record says about the room this invite claims to be for. */
-  const [recordCheck, setRecordCheck] = useState<DirectoryLookup | null>(null);
+  /**
+   * What Licio's record says about the room this invite claims to be for —
+   * KEYED to the exact fragment it was computed from.
+   *
+   * A bare value went stale twice over: editing the field left the previous
+   * room's reassuring verdict standing beside a new link, and a slow lookup for
+   * the old invite could land after the field had already changed. Either way a
+   * user reads evidence about one invite as evidence about another, which is
+   * precisely the mistake this check exists to prevent.
+   */
+  const [recordCheck, setRecordCheck] = useState<{
+    fragment: string;
+    lookup: DirectoryLookup;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The pending preparation: holds the joiner's keys + the `complete`/`completeJoin` steps.
@@ -130,7 +142,7 @@ function JoinerSection({
       // invite carries — the reason it rides the SEALED invite rather than the
       // post-admission grant. See `lookUpDirectory` for what this does and does
       // not establish; either way it is a REPORT, never a gate.
-      setRecordCheck(await lookUpDirectory(invite));
+      setRecordCheck({ fragment, lookup: await lookUpDirectory(invite) });
     } catch {
       setError(
         t(
@@ -206,7 +218,16 @@ function JoinerSection({
           <TextArea
             label={t('privateRoom.join.sealedInvite', 'Paste the invite link from the admin')}
             value={sealedInvite}
-            onChange={(e) => setSealedInvite(e.target.value)}
+            onChange={(e) => {
+              setSealedInvite(e.target.value);
+              // A new link invalidates BOTH results. The request blob is
+              // derived from the old invite and the verdict describes the old
+              // room; leaving either beside a changed link is how stale
+              // evidence gets read as a check of what is on screen.
+              setRequestJson(null);
+              setRecordCheck(null);
+              setError(null);
+            }}
             rows={2}
           />
           <Button
@@ -226,16 +247,19 @@ function JoinerSection({
         </p>
       ) : null}
 
-      {recordCheck !== null ? (
+      {/* …and shown only while it still describes the link in the field, so a
+          lookup that resolves after the input changed cannot surface. */}
+      {recordCheck !== null &&
+      recordCheck.fragment === extractInviteFragment(sealedInvite.trim()) ? (
         <p
           className={
-            recordCheck.kind === 'unresolved'
+            recordCheck.lookup.kind === 'unresolved'
               ? 'text-error-on-soft text-sm'
               : 'text-ink-muted text-sm'
           }
-          role={recordCheck.kind === 'unresolved' ? 'alert' : 'status'}
+          role={recordCheck.lookup.kind === 'unresolved' ? 'alert' : 'status'}
         >
-          {directoryMessage(t, recordCheck)}
+          {directoryMessage(t, recordCheck.lookup)}
         </p>
       ) : null}
 

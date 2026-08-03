@@ -72,7 +72,7 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
       displayDescription: 'A description',
       displayAvatarPublicCid: 'bafkreiabc123',
       rendezvousPolicy: 'licio_blind',
-      bootstrapHints: [{ kind: 'manual', value: 'paste-me' }],
+      bootstrapHints: [{ kind: 'manual', value: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8' }],
       signedStub: {
         schema: 'licio.private.directory_stub.v2',
         room_public_key: COMMITMENT,
@@ -108,7 +108,9 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
     await createListed(roomId);
     const read = await store.getByRoomId(roomId);
     expect(read?.displayName).toBe('Gated listed room');
-    expect(read?.bootstrapHints).toEqual([{ kind: 'manual', value: 'paste-me' }]);
+    expect(read?.bootstrapHints).toEqual([
+      { kind: 'manual', value: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8' },
+    ]);
     expect(read?.signedStub).toEqual({
       schema: 'licio.private.directory_stub.v2',
       room_public_key: COMMITMENT,

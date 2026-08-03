@@ -294,6 +294,8 @@ const civicLandscape: CivicMapResponse = {
       fragile: true,
       survivor: 'aaaaaaaa-1111-4111-8111-111111111111',
       bridge_thread_id: 'cccccccc-1111-4111-8111-111111111111',
+      basin_a_title: 'Flooding on the ring road',
+      basin_b_title: 'Council budget vote',
       shared_topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
     },
   ],
