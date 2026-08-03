@@ -427,12 +427,66 @@ export function createPrivateRoomsRoutes() {
       // deliberately untouched: a room's own creator is not a steward and must
       // not need MFA to stop advertising their own room.
       const staff = auth.roles.includes('admin') && auth.mfaActive && auth.mfaVerified;
+
+      // AUDIT FIRST for the staff arm, and refuse the action if it cannot be
+      // written.
+      //
+      // §11.4 makes delist the single power staff hold over a P2P room and
+      // requires every use of it to be recorded, so the failure to eliminate is
+      // "demotion committed, no record". Checking `writeAudit`'s result
+      // afterwards cannot: by then the demotion has committed and its display
+      // metadata is gone, so there is nothing to roll back to match. The
+      // moderation audit and the stub store hold separate connections and
+      // cannot share a transaction, so the ORDER carries the guarantee.
+      if (staff) {
+        const audited = await writeAudit(getModerationServices(), {
+          actorUserId: auth.userId,
+          // The doctrine-steward roles do not cover this: §11.4 gives the power
+          // to platform staff as such, not to a safety/appeals lane.
+          actorRole: null,
+          action: 'private_room_stub_delisted',
+          targetType: 'private_room_stub',
+          targetId: params.data.roomServerId,
+          priorState: 'listed',
+          nextState: 'unlisted',
+          reversible: false,
+          notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
+        });
+        if (audited === null) {
+          return c.json(
+            {
+              error: {
+                code: 'audit_unavailable',
+                message:
+                  'This action is recorded before it is taken, and the record could not be written. Nothing was changed.',
+              },
+            },
+            503,
+          );
+        }
+      }
+
       const result = await getPrivateRoomStubService().delist(
         params.data.roomServerId,
         auth.userId,
         { staff },
       );
       if (!result.ok) {
+        // Audited a moment ago, then matched nothing — the owner delisted in
+        // between. Say so, rather than leaving an entry asserting a demotion
+        // that did not occur.
+        if (staff) {
+          await writeAudit(getModerationServices(), {
+            actorUserId: auth.userId,
+            actorRole: null,
+            action: 'private_room_stub_delist_noop',
+            targetType: 'private_room_stub',
+            targetId: params.data.roomServerId,
+            reversible: false,
+            notes:
+              'The recorded staff delist took no effect: the record was already unlisted or gone.',
+          });
+        }
         const { status, body } = refuse(result.reason);
         return c.json(body, status);
       }

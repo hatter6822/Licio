@@ -43,6 +43,7 @@ import {
 import { submitReport } from '../moderation/reports.js';
 import { getModerationServices } from '../moderation/services.js';
 import { buildSupportContact } from '../moderation/support.js';
+import { getPrivateRoomStubService } from '../private-rooms/service.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 
@@ -167,16 +168,27 @@ export function createTrustSafetyRoutes() {
             // A room report must reference a real room — otherwise a user could
             // open a moderation case against an arbitrary/nonexistent UUID.
             //
-            // "Real" means a SERVER room. A Private P2P shell would otherwise
-            // accept a report: server state created against a room the platform
-            // cannot moderate (§11.4), and a 404-vs-201 oracle confirming an
-            // `unlisted` room to anyone holding its id. `roomVisibleToUser` is
-            // the predicate that already says a p2p shell is not a room surface.
+            // "Real" means a SERVER room — OR a P2P room whose directory record
+            // is publicly LISTED.
+            //
+            // Rejecting every p2p shell closed an oracle and closed the only
+            // intake for the remedy §11.4 actually specifies: staff delisting an
+            // abusive public name. A listed room publishes that name to anyone
+            // browsing, so a report about it can reach moderation without
+            // telling anyone anything they could not already read — and the
+            // report is about the LISTING, which is the only thing staff can
+            // act on.
+            //
+            // `unlisted` stays rejected, identically to an unknown id: its
+            // existence is what the blind token protects, and it publishes no
+            // name to be abusive with.
             const forum = getForumServices();
             const room = await forum.rooms.getById(request.target_id);
-            if (!room || !(await roomVisibleToUser(forum, room, auth.userId))) {
-              return c.json(deny('target_not_found', 'Target not found'), 404);
-            }
+            if (!room) return c.json(deny('target_not_found', 'Target not found'), 404);
+            const reportable =
+              (await roomVisibleToUser(forum, room, auth.userId)) ||
+              (await getPrivateRoomStubService().isPubliclyListed(request.target_id));
+            if (!reportable) return c.json(deny('target_not_found', 'Target not found'), 404);
           }
           const outcome = await submitReport(
             mod,

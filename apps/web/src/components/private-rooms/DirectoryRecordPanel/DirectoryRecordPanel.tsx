@@ -43,12 +43,13 @@ import type { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { useAuthStore } from '../../../stores/auth.js';
 import { Button } from '../../ui/Button/index.js';
 import { Card } from '../../ui/Card/index.js';
+import { Input } from '../../ui/Input/index.js';
 
 export interface DirectoryRecordPanelProps {
   session: PrivateRoomSession;
 }
 
-type Action = 'refresh' | 'push' | 'delist' | 'remove' | 'register' | null;
+type Action = 'refresh' | 'push' | 'delist' | 'remove' | 'register' | 'display' | null;
 
 /** What the server currently holds for this room, as far as this panel knows. */
 type RecordState =
@@ -80,6 +81,8 @@ export function DirectoryRecordPanel({
   const [state, setState] = useState<RecordState>({ kind: 'reading' });
   const [removed, setRemoved] = useState<string | null>(null);
   const [busy, setBusy] = useState<Action>(null);
+  /** The §21.3 display fields, while the owner is editing them. */
+  const [editing, setEditing] = useState<{ name: string; description: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -343,6 +346,82 @@ export function DirectoryRecordPanel({
               </div>
             </dl>
 
+            {/* THE §21.3 MUTABLE FIELDS, editable by the record's owner.
+                They were write-once in practice: the only production PATCH sent
+                a manifest commitment, so correcting a published name meant
+                deleting the record — and the re-registration that follows is
+                unlisted-only, which cannot restore a listing at all. §21.3
+                exists to make exactly these correctable. */}
+            {owned && record !== null && record.directory_mode === 'listed' ? (
+              editing === null ? (
+                <div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      setEditing({
+                        name: record.display_name ?? '',
+                        description: record.display_description ?? '',
+                      })
+                    }
+                  >
+                    {t('privateRoom.record.edit', 'Edit the published name')}
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <Input
+                    label={t('privateRoom.record.editName', 'Published name')}
+                    value={editing.name}
+                    onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                  />
+                  <Input
+                    label={t('privateRoom.record.editDescription', 'Published description')}
+                    value={editing.description}
+                    onChange={(e) => setEditing({ ...editing, description: e.target.value })}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="primary"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run('display', async () => {
+                          // An EMPTY field clears the value — `null` rather than
+                          // `''`, because §21.3 distinguishes "no published
+                          // description" from one that is the empty string, and
+                          // the schema refuses the latter.
+                          const next = await updatePrivateRoomStub(roomServerId ?? '', {
+                            displayName: editing.name.trim() === '' ? null : editing.name.trim(),
+                            displayDescription:
+                              editing.description.trim() === '' ? null : editing.description.trim(),
+                          });
+                          setState({ kind: 'present', record: next });
+                          setEditing(null);
+                          setStatus(
+                            t('privateRoom.record.edited', 'Updated what Licio publishes.'),
+                          );
+                        })
+                      }
+                    >
+                      {busy === 'display'
+                        ? t('privateRoom.record.saving', 'Saving…')
+                        : t('privateRoom.record.save', 'Save')}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={busy !== null}
+                      onClick={() => setEditing(null)}
+                    >
+                      {t('privateRoom.record.cancelEdit', 'Cancel')}
+                    </Button>
+                  </div>
+                </div>
+              )
+            ) : null}
+
             {owned && record !== null ? (
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -364,9 +443,13 @@ export function DirectoryRecordPanel({
                       // refresh. `latest_manifest_commitment` is a plain column
                       // outside the signed body, which is why it is patchable at
                       // all.
-                      const payload = await session.directoryStubPayload();
+                      // Read directly — NOT through `directoryStubPayload()`,
+                      // which needs the genesis epoch to derive the capability
+                      // and therefore throws on every device that joined later.
+                      // This column is patchable precisely because it needs no
+                      // re-signing.
                       const next = await updatePrivateRoomStub(roomServerId ?? '', {
-                        latestManifestCommitment: payload.manifestKeyCommitment,
+                        latestManifestCommitment: session.manifestCommitmentB64,
                       });
                       setState({ kind: 'present', record: next });
                       setStatus(

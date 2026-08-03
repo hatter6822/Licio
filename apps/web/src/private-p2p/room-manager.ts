@@ -411,6 +411,18 @@ export class PrivateRoomSession {
   get signingPublicKey(): string {
     return this.session.signingPublicKey;
   }
+  /**
+   * The room's §13.1 manifest commitment, base64url.
+   *
+   * Separate from `directoryStubPayload()` on purpose: refreshing
+   * `latest_manifest_commitment` is §21.3-patchable WITHOUT re-signing anything,
+   * and the payload builder needs the GENESIS epoch to derive the capability —
+   * so routing the refresh through it made a plain column update impossible on
+   * every device that joined later.
+   */
+  get manifestCommitmentB64(): string {
+    return this.p2p.toBase64Url(this.session.manifestCommitment);
+  }
   /** The room's display name (from the persisted manifest). */
   get name(): string {
     return manifestName(this.session.manifest);
@@ -826,9 +838,13 @@ export class PrivateRoomSession {
       this.session.manifestCommitment,
     );
     if (founderDeviceId === undefined) return false;
-    const founder = this.session.bootstrapDevices.find(
-      (device) => device.deviceId === founderDeviceId,
-    );
+    // The room's OWN converged device roster, which retains removed devices —
+    // not the grant's bootstrap set, which excludes them. A founder device that
+    // has since been removed still signed the record, and rejecting it would
+    // make a valid record read as forged to every member who joined afterwards.
+    const founder =
+      this.engine.state().devices.get(founderDeviceId) ??
+      this.session.bootstrapDevices.find((device) => device.deviceId === founderDeviceId);
     if (founder === undefined || founder.signingPublicKey !== claimed) return false;
     try {
       const key = await this.p2p.importPublicKeyRaw(this.p2p.fromBase64Url(claimed));

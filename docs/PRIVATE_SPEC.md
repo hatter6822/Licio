@@ -2082,6 +2082,14 @@ commitments beside a signature verifying over different ones. The columns are
 now DERIVED from the signed body on write — one value, so there is no second
 copy to disagree, at this write site or at the next one.
 
+The room SHELL's `name`/`slug` are opaque AND unguessable — fresh randomness,
+not derived from `room_server_id`. Deriving them made the id probeable in the
+other direction: those columns are uniquely indexed across public rooms too, so
+anyone could create an ordinary room named `p2p <id>` and read the answer off
+the response — `duplicate_room` if that private room exists, success if it does
+not. A second existence oracle for `unlisted` rooms, reached without the blind
+token through an endpoint that has nothing to do with the directory.
+
 `detached` is absent from the create enum on purpose — a detached room stores
 no stub at all, which the `private_room_stubs_not_detached` CHECK also pins.
 
@@ -2261,6 +2269,13 @@ and correctable, while an under-recorded one hides the use of a power.
 DELETE /v1/private-rooms/:roomServerId
 POST /v1/private-rooms/:roomServerId/delist
 ```
+
+A report about a publicly LISTED room is accepted through the ordinary `room`
+report target, because staff delisting is the remedy §11.4 specifies and it
+needs an intake. A listed record publishes its name to anyone browsing, so
+accepting the report reveals nothing already private. An `unlisted` room is
+refused identically to an unknown id: its existence is what the blind token
+protects, and it publishes no name to be abusive with.
 
 **Delist** demotes `listed → unlisted` and drops the display metadata in one
 statement (the `private_room_stubs_listed_display_only` CHECK requires those

@@ -588,6 +588,23 @@ export class PrivateRoomStubService {
     };
   }
 
+  /**
+   * Is this room's directory record publicly LISTED?
+   *
+   * The one question another surface may ask about a private room without a
+   * capability, because a listed record publishes a name to anyone browsing —
+   * so the answer reveals nothing that is not already public. It exists for the
+   * report intake: staff delisting an abusive public name is the remedy §11.4
+   * specifies, and rejecting every p2p target left that remedy with no way in.
+   *
+   * False for `unlisted` and for an unknown id ALIKE, which is what keeps it
+   * from becoming the existence oracle the bootstrap read refuses to be.
+   */
+  async isPubliclyListed(roomServerId: string): Promise<boolean> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    return stub?.directoryMode === 'listed';
+  }
+
   /** A snapshot of the aggregate-only counters (no room identity). */
   metrics(): PrivateRoomStubMetrics {
     return { ...this.#metrics };

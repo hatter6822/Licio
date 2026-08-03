@@ -702,6 +702,27 @@ describe('owner reads — paged, and complete where completeness is the point', 
   });
 });
 
+describe('§11.4 — an abusive LISTED name has an intake', () => {
+  it('reports a listed record as publicly listed, and an unlisted one as not', async () => {
+    const svc = freshService();
+    const listed = await svc.create(listedRequest(), ACCOUNT);
+    const unlisted = await svc.create(unlistedRequest(), ACCOUNT);
+    if (!listed.ok || !unlisted.ok) throw new Error('create failed');
+
+    // A listed room publishes its name to anyone browsing, so answering this
+    // reveals nothing that is not already public — and staff delisting it is
+    // the remedy §11.4 specifies, which needs a way in.
+    expect(await svc.isPubliclyListed(listed.value.room_server_id)).toBe(true);
+    // An unlisted room and an unknown id answer ALIKE, which is what keeps this
+    // from becoming the oracle the bootstrap read refuses to be.
+    expect(await svc.isPubliclyListed(unlisted.value.room_server_id)).toBe(false);
+    expect(await svc.isPubliclyListed('00000000-0000-4000-8000-999999999999')).toBe(false);
+    // …and it stops being reportable the moment it is delisted.
+    await svc.delist(listed.value.room_server_id, ACCOUNT);
+    expect(await svc.isPubliclyListed(listed.value.room_server_id)).toBe(false);
+  });
+});
+
 describe('the targeted owner lookup', () => {
   it('finds ONE record by room id or by the room’s signing key', async () => {
     const svc = freshService();

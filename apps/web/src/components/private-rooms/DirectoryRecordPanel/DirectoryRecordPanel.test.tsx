@@ -66,6 +66,7 @@ function sessionDouble(
     // The panel VERIFIES the record against the room's own key before showing
     // it; the double accepts, and one test below rejects.
     verifyDirectoryRecord: async () => true,
+    manifestCommitmentB64: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8',
     // Only a device holding the GENESIS epoch can derive the room's §21.2
     // capability, so registration is offered only there.
     canRegisterDirectory: true,
@@ -160,6 +161,32 @@ describe('DirectoryRecordPanel', () => {
     expect(await screen.findByText(/Licio holds no record of this room/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /store a bootstrap record/i }));
     expect(await screen.findByRole('status')).toHaveTextContent(/now holds a bootstrap record/i);
+  });
+
+  it('lets the owner correct what Licio publishes', async () => {
+    // §21.3's mutable fields were write-once in practice: the only production
+    // PATCH sent a manifest commitment, so fixing a published name meant
+    // deleting the record — and re-registration is unlisted-only.
+    let patched: Record<string, unknown> | null = null;
+    mockApi((_url, init) => {
+      if (init?.method === 'PATCH' && typeof init.body === 'string') {
+        patched = JSON.parse(init.body) as Record<string, unknown>;
+        return bootstrapBody({ display_name: 'Corrected name' });
+      }
+      return bootstrapBody();
+    });
+    render(<DirectoryRecordPanel session={sessionDouble(STUB)} />);
+    await screen.findByText('Neighbourhood watch');
+
+    await userEvent.click(await screen.findByRole('button', { name: /edit the published name/i }));
+    const field = screen.getByLabelText(/published name/i);
+    await userEvent.clear(field);
+    await userEvent.type(field, 'Corrected name');
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => expect(patched).not.toBeNull());
+    expect(patched).toMatchObject({ display_name: 'Corrected name' });
+    expect(await screen.findByText('Corrected name')).toBeInTheDocument();
   });
 
   it('refuses to show a record the ROOM did not sign', async () => {

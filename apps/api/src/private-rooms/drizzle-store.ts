@@ -29,9 +29,25 @@ import type {
   StoredPrivateRoomStub,
 } from './stores.js';
 
-/** The opaque shell name/slug for a P2P room (§8.1 — never the real title). */
-function shellIdentity(roomServerId: string): { name: string; slug: string } {
-  return { name: `Private room ${roomServerId}`, slug: `p2p-${roomServerId}` };
+/**
+ * The opaque shell name/slug for a P2P room (§8.1 — never the real title), from
+ * FRESH RANDOMNESS rather than from the room id.
+ *
+ * Deriving them made the id guessable in the other direction: `rooms.slug` and
+ * `rooms.name` are uniquely indexed across PUBLIC rooms too, so anyone could
+ * create an ordinary room named `p2p <id>` and read the answer off the response
+ * — `duplicate_room` if that private room exists, success if it does not. A
+ * second existence oracle for `unlisted` rooms, reached without the blind token,
+ * through a completely different endpoint than the one whose identical-404
+ * contract it defeats.
+ *
+ * Nothing reads these values — they exist because the columns are NOT NULL and
+ * feed a generated `search_vector` that must never carry a private title — so
+ * they need only be unique, and randomness is what makes them unprobeable.
+ */
+function shellIdentity(): { name: string; slug: string } {
+  const opaque = crypto.randomUUID();
+  return { name: `Private room ${opaque}`, slug: `p2p-${opaque}` };
 }
 
 type StubRow = typeof privateRoomStubs.$inferSelect;
@@ -64,7 +80,7 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
   constructor(private readonly db: DbExecutor) {}
 
   async create(input: PrivateRoomStubInsertInput): Promise<StoredPrivateRoomStub> {
-    const { name, slug } = shellIdentity(input.roomServerId);
+    const { name, slug } = shellIdentity();
     // An EXPLICIT millisecond timestamp, not the column's `defaultNow()`.
     // Postgres stamps microseconds; `toStub` serializes through
     // `Date.toISOString()`, which truncates to milliseconds — so a keyset cursor
