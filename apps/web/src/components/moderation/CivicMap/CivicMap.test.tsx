@@ -115,10 +115,20 @@ describe('CivicMap', () => {
   it('routes the bridge action to the thread the server expects', async () => {
     const onOpenBridge = vi.fn();
     render(<CivicMap data={landscape()} onOpenBridge={onOpenBridge} />);
-    await userEvent.click(screen.getByRole('button', { name: /open a bridge request/i }));
+    // BOTH sides are offered: the bridge endpoint authorizes against the room of
+    // the thread you name, so an analyst who stewards only the far side must be
+    // able to pick it rather than be shown one button that always 404s.
+    const buttons = screen.getAllByRole('button', { name: /^Bridge on/i });
+    expect(buttons).toHaveLength(2);
+    await userEvent.click(screen.getByRole('button', { name: /Flooding on the ring road/i }));
     expect(onOpenBridge).toHaveBeenCalledWith(
       'aaaaaaaa-1111-4111-8111-111111111111',
       'Flooding on the ring road',
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Council budget vote/i }));
+    expect(onOpenBridge).toHaveBeenCalledWith(
+      'bbbbbbbb-2222-4222-8222-222222222222',
+      'Council budget vote',
     );
   });
 
@@ -127,7 +137,7 @@ describe('CivicMap', () => {
       basins: landscape().basins.map((b) => ({ ...b, thread_id: null })),
     });
     render(<CivicMap data={data} onOpenBridge={vi.fn()} />);
-    expect(screen.queryByRole('button', { name: /open a bridge request/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Bridge on/i })).toBeNull();
   });
 
   it('disables the action while its request is in flight', () => {
@@ -139,6 +149,11 @@ describe('CivicMap', () => {
       />,
     );
     expect(screen.getByRole('button', { name: /opening/i })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    // …and only THAT target is disabled; the other side stays actionable.
+    expect(screen.getByRole('button', { name: /Council budget vote/i })).not.toHaveAttribute(
       'aria-disabled',
       'true',
     );

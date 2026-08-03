@@ -17,7 +17,7 @@
 // (§19.1's first sanctioned form; the application never reads a client address).
 // `GET /bootstrap` is deliberately unauthenticated: a member joining from an
 // invite may have no Licio account at all.
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { perAccountRateLimit, rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, requireUnrestricted } from '../middleware/auth.js';
@@ -26,6 +26,61 @@ import {
   privateRoomCreateStubRequestSchema,
   privateRoomStubUpdateRequestSchema,
 } from '../private-rooms/stores.js';
+
+/**
+ * Reject a body larger than this BEFORE parsing it.
+ *
+ * The zod caps (8 KiB signed stub, bounded display fields) only apply after
+ * `c.req.json()` has already buffered and parsed the whole request, so an
+ * authenticated account could spend unbounded API memory on ONE enormous or
+ * chunked body — a per-account request COUNT does not bound the cost of a
+ * single request. Same reader and same bound the private-rendezvous surface
+ * uses, enforced whether or not `Content-Length` is present.
+ */
+const MAX_BODY_BYTES = 32 * 1024;
+
+/** Sentinel for an over-cap body (distinct from a malformed/empty `undefined`). */
+const TOO_LARGE = Symbol('too_large');
+
+async function readJsonBounded(c: Context, maxBytes: number): Promise<unknown | typeof TOO_LARGE> {
+  const declared = c.req.header('content-length');
+  if (declared !== undefined) {
+    const n = Number(declared);
+    if (Number.isFinite(n) && n > maxBytes) return TOO_LARGE;
+  }
+  const body = c.req.raw.body;
+  if (!body) return undefined;
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return TOO_LARGE;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return undefined;
+  }
+  if (total === 0) return undefined;
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(buf));
+  } catch {
+    return undefined;
+  }
+}
 
 const roomIdParamSchema = z.object({ roomServerId: z.uuid() });
 
@@ -123,9 +178,13 @@ export function createPrivateRoomsRoutes() {
       const auth = c.get('auth');
       if (!auth)
         return c.json({ error: { code: 'unauthenticated', message: 'Sign in required' } }, 401);
-      const parsed = privateRoomCreateStubRequestSchema.safeParse(
-        await c.req.json().catch(() => null),
-      );
+      const raw = await readJsonBounded(c, MAX_BODY_BYTES);
+      if (raw === TOO_LARGE)
+        return c.json(
+          { error: { code: 'oversized_request', message: 'Request body too large' } },
+          413,
+        );
+      const parsed = privateRoomCreateStubRequestSchema.safeParse(raw);
       if (!parsed.success) {
         return c.json({ error: { code: 'invalid_request', message: 'Invalid stub payload' } }, 400);
       }
@@ -172,9 +231,13 @@ export function createPrivateRoomsRoutes() {
         return c.json({ error: { code: 'unauthenticated', message: 'Sign in required' } }, 401);
       const params = roomIdParamSchema.safeParse({ roomServerId: c.req.param('roomServerId') });
       if (!params.success) return c.json(notFound, 404);
-      const parsed = privateRoomStubUpdateRequestSchema.safeParse(
-        await c.req.json().catch(() => null),
-      );
+      const raw = await readJsonBounded(c, MAX_BODY_BYTES);
+      if (raw === TOO_LARGE)
+        return c.json(
+          { error: { code: 'oversized_request', message: 'Request body too large' } },
+          413,
+        );
+      const parsed = privateRoomStubUpdateRequestSchema.safeParse(raw);
       if (!parsed.success) {
         return c.json({ error: { code: 'invalid_request', message: 'Invalid stub patch' } }, 400);
       }

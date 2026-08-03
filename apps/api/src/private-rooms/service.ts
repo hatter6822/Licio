@@ -81,8 +81,15 @@ export interface BootstrapResponse {
   readonly updated_at: string;
 }
 
-/** Does this signed stub carry the §21.2 bootstrap capability? */
-function hasBootstrapToken(signedStub: Record<string, unknown>): boolean {
+/**
+ * Does this signed stub carry the §21.2 bootstrap capability?
+ *
+ * Exported so it can be unit-tested directly: the wire schema now REQUIRES the
+ * field, so this guard is unreachable through a validated request and would
+ * otherwise be untestable. It stays as defence in depth for any non-HTTP caller
+ * (a future job, a migration) that reaches the service without the schema.
+ */
+export function hasBootstrapToken(signedStub: Record<string, unknown>): boolean {
   return typeof signedStub['bootstrap_blind_id'] === 'string';
 }
 
@@ -283,9 +290,19 @@ export class PrivateRoomStubService {
   ): Promise<StubResult<BootstrapResponse>> {
     const stub = await this.store.getByRoomId(roomServerId);
     if (!stub) return { ok: false, reason: 'not_found' };
-    if (stub.createdByAccountId !== accountId && options.staff !== true) {
-      return { ok: false, reason: 'forbidden' };
-    }
+    const owner = stub.createdByAccountId === accountId;
+    if (!owner && options.staff !== true) return { ok: false, reason: 'forbidden' };
+    // A STAFF caller may only act on a LISTED record.
+    //
+    // Delist is idempotent for the owner, which is right — but for staff that
+    // idempotence was a capability bypass: an admin who merely KNEW an
+    // unlisted `room_server_id` could call this and receive the full bootstrap
+    // projection (signed stub, hints, commitments) that §21.2 gates behind the
+    // blind token they do not hold. §11.4 gives staff power over the PUBLIC
+    // directory listing, not over the record. So a non-owner staff caller
+    // targeting an already-unlisted stub gets the same `not_found` an unknown
+    // room does — no oracle, no projection.
+    if (!owner && stub.directoryMode !== 'listed') return { ok: false, reason: 'not_found' };
     const next = await this.store.delist(roomServerId);
     if (!next) return { ok: false, reason: 'not_found' };
     this.#metrics.delisted += 1;

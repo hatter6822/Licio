@@ -2232,10 +2232,17 @@ apps/web/src/components/private-rooms/
   JoinPanel                 SafetyNumberPanel
 ```
 
-Everything under `apps/web/src/private-p2p/` is reached by **dynamic import
-only** — `check:private-p2p-split` forbids a static value import, and the
-measured initial-payload budget in `check-bundle-size.ts` keeps the plane
-chunk out of first paint.
+The enforced boundary is narrower than "this directory is lazy", and the
+distinction matters when one of the two mechanisms breaks. What
+`check:private-p2p-split` forbids is a static VALUE import of the
+`@licio/private-p2p` PACKAGE — the protocol/crypto core — so that core is
+reached only through `await import(…)`. The web glue above is ordinary module
+code and IS statically imported by its consumers (`CreatePrivateRoomWizard`
+imports `room-manager.ts` directly, for instance); what keeps it out of first
+paint is route code-splitting plus the measured initial-payload budget in
+`check-bundle-size.ts`, which also fails if `index.html` preloads a plane
+chunk. Reading the rule as "the whole directory is dynamic" would send a future
+change at the wrong invariant.
 
 ### 22.3 Worker architecture
 

@@ -51,6 +51,17 @@ function services(stories: FakeStory[], opts: { omitFromList?: string[] } = {}) 
             .filter((s) => !omitted.has(s.storyId))
             .map((s) => ({ storyId: s.storyId, title: s.title, topicIds: s.topicIds })),
         ),
+      getByIds: (ids: readonly string[]) =>
+        Promise.resolve(
+          new Map(
+            stories
+              .filter((s) => ids.includes(s.storyId) && !omitted.has(s.storyId))
+              .map((s) => [
+                s.storyId,
+                { storyId: s.storyId, title: s.title, topicIds: s.topicIds },
+              ]),
+          ),
+        ),
       getThreadsByStoryIds: (storyIds: readonly string[]) =>
         Promise.resolve(new Map(storyIds.map((id) => [id, { threadId: `thread-${id}` }]))),
     },
@@ -97,37 +108,80 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(map.summary.merge_count).toBe(0);
   });
 
-  it('keeps a basin whose story row vanished, naming it honestly', async () => {
-    const gone = '33333333-3333-4333-8333-333333333333';
-    const { events } = services([
-      story(gone, 10, [TOPIC_A?.id ?? '']),
-      story('22222222-2222-4222-8222-222222222222', 4, [TOPIC_A?.id ?? '']),
-    ]);
-    // The enrichment read is a SECOND call; simulate the row disappearing between
-    // them by having listRecent drop it only on the later call.
-    let call = 0;
-    const drifting = {
+  it('is unaffected by stories arriving mid-request (enrichment is by id)', async () => {
+    // `listRecent(n)` returns the n most recent AT THAT INSTANT, so a second
+    // read could push graph members out of the window and blank live basins.
+    // Enriching by the graph's own ids removes the race entirely.
+    const a = '11111111-1111-4111-8111-111111111111';
+    const b = '22222222-2222-4222-8222-222222222222';
+    const rows = [
+      { storyId: a, title: 'Original A', topicIds: [TOPIC_A?.id ?? ''] },
+      { storyId: b, title: 'Original B', topicIds: [TOPIC_A?.id ?? ''] },
+    ];
+    const events = {
+      windowStore: { get: () => Promise.resolve({ eventCount: 5 }) },
+    } as unknown as Parameters<typeof buildCivicMap>[0];
+    const busy = {
       stories: {
-        listRecent: () => {
-          call += 1;
-          const rows = [
-            { storyId: gone, title: 'Vanishing', topicIds: [TOPIC_A?.id ?? ''] },
-            {
-              storyId: '22222222-2222-4222-8222-222222222222',
-              title: 'Survivor',
-              topicIds: [TOPIC_A?.id ?? ''],
-            },
-          ];
-          return Promise.resolve(call === 1 ? rows : rows.slice(1));
-        },
-        getThreadsByStoryIds: (storyIds: readonly string[]) =>
-          Promise.resolve(new Map(storyIds.map((id) => [id, { threadId: `thread-${id}` }]))),
+        // The landscape sees the two originals…
+        listRecent: () => Promise.resolve(rows),
+        // …and by enrichment time a flood of newer stories has landed. A
+        // window-based re-read would miss both; an id-based one cannot.
+        getByIds: (ids: readonly string[]) =>
+          Promise.resolve(
+            new Map(rows.filter((r) => ids.includes(r.storyId)).map((r) => [r.storyId, r])),
+          ),
+        getThreadsByStoryIds: (ids: readonly string[]) =>
+          Promise.resolve(new Map(ids.map((id) => [id, { threadId: `thread-${id}` }]))),
       },
     } as unknown as Parameters<typeof buildCivicMap>[1];
-    const map = await buildCivicMap(events, drifting, NOW);
+    const map = await buildCivicMap(events, busy, NOW);
     expect(map).not.toBe(null);
     if (!map) return;
-    const vanished = map.basins.find((b) => b.basin_id === gone);
+    for (const basin of map.basins) {
+      expect(basin.title).not.toBe('Story unavailable');
+      expect(basin.topics.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('names a genuinely deleted story honestly rather than dropping its basin', async () => {
+    const gone = '33333333-3333-4333-8333-333333333333';
+    const rows = [
+      { storyId: gone, title: 'Vanishing', topicIds: [TOPIC_A?.id ?? ''] },
+      {
+        storyId: '22222222-2222-4222-8222-222222222222',
+        title: 'Survivor',
+        topicIds: [TOPIC_A?.id ?? ''],
+      },
+    ];
+    // `gone` must be the higher-valued story so it is a PEAK — a basin's name is
+    // its peak, and with equal values the smaller id would win instead.
+    const events = {
+      windowStore: {
+        get: (storyId: string) => Promise.resolve({ eventCount: storyId === gone ? 20 : 3 }),
+      },
+    } as unknown as Parameters<typeof buildCivicMap>[0];
+    const deleting = {
+      stories: {
+        listRecent: () => Promise.resolve(rows),
+        // The row really is gone by enrichment time — the fallback now MEANS
+        // deleted, because ordinary ingestion can no longer produce it.
+        getByIds: (ids: readonly string[]) =>
+          Promise.resolve(
+            new Map(
+              rows
+                .filter((r) => r.storyId !== gone && ids.includes(r.storyId))
+                .map((r) => [r.storyId, r]),
+            ),
+          ),
+        getThreadsByStoryIds: (ids: readonly string[]) =>
+          Promise.resolve(new Map(ids.map((id) => [id, { threadId: `thread-${id}` }]))),
+      },
+    } as unknown as Parameters<typeof buildCivicMap>[1];
+    const map = await buildCivicMap(events, deleting, NOW);
+    expect(map).not.toBe(null);
+    if (!map) return;
+    const vanished = map.basins.find((basin) => basin.basin_id === gone);
     expect(vanished).toBeDefined();
     expect(vanished?.title).toBe('Story unavailable');
   });

@@ -6,12 +6,16 @@
 // their stream), feed preferences, uploads, the drainer blocklist, and the
 // steward surface (thread-state transitions, forum config, metrics).
 //
-// The layered thread OVERVIEW, the per-BRANCH and SUBTREE reads, and the
-// summaries endpoint are gone — WS-T replaced the six-section thread with the
-// lightly-nested comment section a story owns (SPEC §6.4, §15.3, §24.3), and
-// the legacy `/threads/$threadId` client route redirects to the owning story's
-// `#comments` anchor.  The `/threads/*` handlers that remain are the thread
-// RECORD and its state transitions, not a reading surface.
+// What WS-T retired is the six-SECTION thread model: the layered OVERVIEW, the
+// per-branch/per-section projection, and the summaries endpoint (SPEC §6.4,
+// §15.3, §24.3), and the legacy `/threads/$threadId` CLIENT route now redirects
+// to the owning story's `#comments` anchor.
+//
+// Two `/threads/*` reads REMAIN and are live, not vestigial: `GET
+// /threads/:threadId` (the thread record) and `GET /threads/:threadId/
+// contributions` (its contributions, `?root=` scoping a subtree).  They are the
+// thread-keyed compatibility surface beneath the story-keyed comment section —
+// the same data, addressed by thread rather than by story.
 //
 // Every response is re-validated against the shared schema on egress (the
 // WS-C.1.2 boundary guarantee); logs and metrics carry ids and counts only.

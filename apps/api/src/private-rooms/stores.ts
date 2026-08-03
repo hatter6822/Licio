@@ -56,27 +56,37 @@ export type BootstrapHint = z.infer<typeof bootstrapHintSchema>;
 export const MAX_BOOTSTRAP_HINTS = 16;
 
 /**
- * The client-signed §8.2 stub body, stored VERBATIM so any member can verify
- * `stub_signature` over it with the room public key.  The server never
- * interprets it beyond two things:
+ * The client-signed §8.2 stub body — a CLOSED set of known commitment fields.
  *
- *  - it is a bounded object (DoS), and
- *  - for an `unlisted` room it MUST carry `bootstrap_blind_id`, the §21.2
- *    capability the bootstrap read is gated on.
+ * This was `.passthrough()`, reasoning that the signature covers the whole
+ * object so stripping an unknown key would break verification. That reasoning
+ * was about KEYS and missed VALUES entirely: a payload like
+ * `{ bootstrap_blind_id: "…", x: "<a private message or a member list>" }`
+ * satisfied every key-level check and was persisted verbatim into the server's
+ * jsonb — a direct bypass of the no-server-content boundary, through the one
+ * field the column allowlist cannot see into.
  *
- * `.passthrough()` is deliberate: the signature covers the WHOLE object, so
- * stripping an unknown key the client signed would make every verification
- * fail.  Confidentiality is not at risk from a key the client chose to publish
- * in a signed public record — but the FORBIDDEN-KEY scan below still refuses
- * the §8.1 classes outright, so a client cannot smuggle content or a member
- * list into the one free-form field.
+ * "Signed by the room" is not a safety property here. The server holds no room
+ * key, so it cannot distinguish a stub the members intended from one a
+ * compromised client emitted; and §8.2 does not permit arbitrary signed data,
+ * it permits COMMITMENTS. So the shape is `.strict()` and versioned: only the
+ * fields below may appear, unknown keys are rejected outright, and the client
+ * signs exactly this canonical set (`directoryStubPayload()` emits it).
+ * Widening it is then a deliberate, reviewable schema change rather than
+ * something a client can do unilaterally.
  */
 const signedStubSchema = z
-  .object({ bootstrap_blind_id: commitmentSchema.optional() })
-  .passthrough()
-  .refine((value) => JSON.stringify(value).length <= 8_192, {
-    message: 'signed_stub exceeds 8 KiB',
-  });
+  .object({
+    /** Pins the field set this body was signed under. */
+    schema: z.literal('licio.private.directory_stub.v1'),
+    /** The room's published verification key (base64url) — a commitment. */
+    room_public_key: commitmentSchema,
+    /** A commitment to the manifest key; never decrypting material. */
+    manifest_key_commitment: commitmentSchema,
+    /** The §21.2 bootstrap capability (see the service's `hasBootstrapToken`). */
+    bootstrap_blind_id: commitmentSchema,
+  })
+  .strict();
 
 /**
  * §8.1 key classes that may never appear in `signed_stub`, at any depth.
@@ -215,7 +225,14 @@ export const privateRoomStubUpdateRequestSchema = z
     stub_signature: commitmentSchema.optional(),
   })
   .strict()
-  .refine((value) => Object.keys(value).length > 0, { message: 'no updatable field supplied' });
+  .refine((value) => Object.keys(value).length > 0, { message: 'no updatable field supplied' })
+  // The stub body and its signature are ONE fact. Patching either alone leaves
+  // the bootstrap endpoint serving a body/signature pair that cannot verify —
+  // a record that looks authentic to the server and fails for every member.
+  .refine((value) => (value.signed_stub === undefined) === (value.stub_signature === undefined), {
+    message: 'signed_stub and stub_signature must be replaced together',
+    path: ['stub_signature'],
+  });
 export type PrivateRoomStubUpdateRequest = z.infer<typeof privateRoomStubUpdateRequestSchema>;
 
 /** A stored directory stub — the §8.2 allowed fields and nothing else. */

@@ -15,7 +15,11 @@
 //   • the stub surface authenticates writes (§21.1) and leaves reads open.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
-import { PrivateRoomStubService, setPrivateRoomStubService } from '../private-rooms/service.js';
+import {
+  hasBootstrapToken,
+  PrivateRoomStubService,
+  setPrivateRoomStubService,
+} from '../private-rooms/service.js';
 import {
   forbiddenSignedStubKeys,
   InMemoryPrivateRoomStubStore,
@@ -28,6 +32,13 @@ import {
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
 const OTHER_ACCOUNT = '22222222-2222-4222-8222-222222222222';
 const TOKEN = 'Ym9vdHN0cmFwLWJsaW5kLWlk';
+/** The canonical §8.2 stub body — a CLOSED set of commitment fields. */
+const SIGNED_STUB = {
+  schema: 'licio.private.directory_stub.v1',
+  room_public_key: 'cm9vbS1wdWJsaWMta2V5',
+  manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
+  bootstrap_blind_id: TOKEN,
+} as const;
 
 /** Deterministic ids so a test can address the room it just created. */
 function freshService(): PrivateRoomStubService {
@@ -51,7 +62,7 @@ function listedRequest(
     room_public_key: 'cm9vbS1wdWJsaWMta2V5',
     manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
     rendezvous_policy: 'licio_blind',
-    signed_stub: { bootstrap_blind_id: TOKEN },
+    signed_stub: SIGNED_STUB,
     stub_signature: 'c3R1Yi1zaWduYXR1cmU',
     ...over,
   };
@@ -65,7 +76,7 @@ function unlistedRequest(
     room_public_key: 'cm9vbS1wdWJsaWMta2V5',
     manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
     rendezvous_policy: 'licio_blind',
-    signed_stub: { bootstrap_blind_id: TOKEN },
+    signed_stub: SIGNED_STUB,
     stub_signature: 'c3R1Yi1zaWduYXR1cmU',
     ...over,
   };
@@ -109,14 +120,32 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
     );
   });
 
-  it('refuses a signed stub carrying a forbidden class (not a silent strip)', async () => {
-    const svc = freshService();
-    const result = await svc.create(
-      listedRequest({ signed_stub: { member_list: ['alice'] } }),
-      ACCOUNT,
-    );
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && result.reason).toBe('forbidden_stub_field');
+  it('refuses ANY unknown signed-stub field — values, not just keys', () => {
+    // `.passthrough()` used to accept arbitrary VALUES under unknown keys, so a
+    // private message or member list rode through every key-level check and was
+    // persisted verbatim. The body is a CLOSED commitment set now, so the
+    // smuggling field is rejected by shape.
+    for (const smuggled of [
+      { member_list: ['alice'] },
+      { x: 'a private message' },
+      { note: 'anything at all' },
+    ]) {
+      const parsed = privateRoomCreateStubRequestSchema.safeParse(
+        rawRequest({ signed_stub: { ...SIGNED_STUB, ...smuggled } }),
+      );
+      expect(parsed.success, `expected ${Object.keys(smuggled)[0]} to be rejected`).toBe(false);
+    }
+  });
+
+  it('refuses a signed stub missing the bootstrap capability', () => {
+    const { bootstrap_blind_id: _dropped, ...withoutToken } = SIGNED_STUB;
+    expect(
+      privateRoomCreateStubRequestSchema.safeParse(rawRequest({ signed_stub: withoutToken }))
+        .success,
+    ).toBe(false);
+    // …and the service's own guard still answers, for a non-HTTP caller.
+    expect(hasBootstrapToken(withoutToken)).toBe(false);
+    expect(hasBootstrapToken(SIGNED_STUB)).toBe(true);
   });
 
   it('refuses display metadata on an unlisted room instead of silently dropping it', async () => {
@@ -124,16 +153,6 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
     const result = await svc.create(unlistedRequest({ display_name: 'Leaky' }), ACCOUNT);
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.reason).toBe('display_requires_listed');
-  });
-
-  it('refuses an unlisted room with no bootstrap token — it would be unreachable forever', async () => {
-    const svc = freshService();
-    const result = await svc.create(
-      unlistedRequest({ signed_stub: { note: 'no token' } }),
-      ACCOUNT,
-    );
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && result.reason).toBe('unlisted_requires_token');
   });
 
   it('returns the room shell id, the stub id, and the rendezvous bootstrap endpoints', async () => {
@@ -158,13 +177,6 @@ describe('review fixes — the scan, the token invariant, and staff delisting', 
     expect(forbiddenSignedStubKeys({ a: { b: { c: 'ok' } } })).toEqual([]);
   });
 
-  it('requires the bootstrap token on a LISTED stub too — it can be delisted later', async () => {
-    const svc = freshService();
-    const result = await svc.create(listedRequest({ signed_stub: { note: 'no token' } }), ACCOUNT);
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && result.reason).toBe('unlisted_requires_token');
-  });
-
   it('a delisted record stays resolvable for members holding its token', async () => {
     const svc = freshService();
     const created = await svc.create(listedRequest(), ACCOUNT);
@@ -178,19 +190,21 @@ describe('review fixes — the scan, the token invariant, and staff delisting', 
     expect(read.ok && read.value.directory_mode).toBe('unlisted');
   });
 
-  it('refuses a PATCH that would strip the bootstrap token', async () => {
-    const svc = freshService();
-    const created = await svc.create(unlistedRequest(), ACCOUNT);
-    if (!created.ok) throw new Error('create failed');
-    const patched = await svc.update(
-      created.value.room_server_id,
-      { signed_stub: { note: 'token removed' } },
-      ACCOUNT,
+  it('refuses a PATCH that replaces only the stub or only its signature', () => {
+    // The body and its signature are ONE fact: patching either alone leaves the
+    // bootstrap endpoint serving a pair that cannot verify.
+    expect(privateRoomStubUpdateRequestSchema.safeParse({ signed_stub: SIGNED_STUB }).success).toBe(
+      false,
     );
-    expect(patched.ok).toBe(false);
-    expect(patched.ok === false && patched.reason).toBe('unlisted_requires_token');
-    // …and the record still resolves, because the patch was refused whole.
-    expect((await svc.bootstrap(created.value.room_server_id, TOKEN)).ok).toBe(true);
+    expect(privateRoomStubUpdateRequestSchema.safeParse({ stub_signature: 'c2ln' }).success).toBe(
+      false,
+    );
+    expect(
+      privateRoomStubUpdateRequestSchema.safeParse({
+        signed_stub: SIGNED_STUB,
+        stub_signature: 'c2ln',
+      }).success,
+    ).toBe(true);
   });
 
   it('lets platform staff delist an abusive listed record the creator will not remove', async () => {

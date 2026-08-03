@@ -771,6 +771,10 @@ export class PrivateRoomSession {
     // the SIGNED bytes and the transmitted object cannot drift: a field the
     // encoder would reject is a compile error here, not a signature every
     // member fails to verify.
+    // EXACTLY the server's closed §8.2 field set — no more, no less. The wire
+    // schema is `.strict()`, so an extra key here is a 400 rather than a
+    // silently-persisted one; that is the point, since "signed by the room" is
+    // not a safety property the server can check (it holds no room key).
     const signedStub = {
       schema: 'licio.private.directory_stub.v1',
       room_public_key: roomPublicKey,

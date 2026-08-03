@@ -63,12 +63,15 @@ export async function buildCivicMap(
 
   const graph = reebGraph(nodes, edges);
 
-  // One pass over the stories the landscape actually used, so the enrichment
-  // cannot drift from the graph (a second `listRecent` could return a different
-  // set as new stories land mid-request).
-  const storyIds = new Set(nodes.map((n) => n.id));
-  const stories = await ingestion.stories.listRecent(nodes.length);
-  const byId = new Map(stories.filter((s) => storyIds.has(s.storyId)).map((s) => [s.storyId, s]));
+  // Enrich BY THE GRAPH'S OWN IDS, not by a second `listRecent`.
+  //
+  // A repeat `listRecent(n)` returns the n most recent stories AT THAT INSTANT,
+  // so stories arriving between assembly and this read push older graph members
+  // out of the window — and filtering then dropped live basins to "Story
+  // unavailable" with no topics, blaming ordinary concurrent ingestion on a
+  // deletion. Fetching the exact ids removes the race and makes the fallback
+  // mean what it says: the row really is gone.
+  const byId = await ingestion.stories.getByIds(nodes.map((node) => node.id));
   const finalBasins = new Set(graph.finalBasins);
 
   // Only the basins' peak stories need a thread, not every node — and they are

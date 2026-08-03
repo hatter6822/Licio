@@ -864,7 +864,7 @@ describe('IncidentsPanel', () => {
     render(<ModerationConsole />, { wrapper: Providers });
     tab('Integrity');
     expect(await screen.findByText(/Attention landscape/i)).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: /open a bridge request/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Flooding on the ring road/i }));
     await waitFor(() =>
       expect(api.openBridgeRequest).toHaveBeenCalledWith('cccccccc-1111-4111-8111-111111111111'),
     );

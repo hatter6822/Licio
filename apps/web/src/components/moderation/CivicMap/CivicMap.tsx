@@ -29,7 +29,7 @@
 // sighted shortcut to the same facts. Nothing animates, so the §26.2
 // reduced-motion requirement is satisfied by construction rather than by a
 // media query.
-import type { CivicMapResponse, CivicMapSaddle } from '@licio/shared';
+import type { CivicMapBasin, CivicMapResponse, CivicMapSaddle } from '@licio/shared';
 import { useT } from '../../../i18n/index.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
@@ -240,8 +240,16 @@ export function CivicMap({
             {fragile.map((saddle) => {
               const a = basinById.get(saddle.basin_a);
               const b = basinById.get(saddle.basin_b);
-              const target = a?.thread_id ?? b?.thread_id ?? null;
-              const targetTitle = a?.thread_id ? (a?.title ?? '') : (b?.title ?? '');
+              // BOTH sides are offered when both have a thread, rather than
+              // always picking basin A. The bridge endpoint authorizes against
+              // the room of the thread you name, so an analyst who stewards
+              // only the other side would otherwise be shown one button that
+              // always 404s while an authorized target sat on the far side of
+              // the same join. Which room a given analyst stewards is not
+              // knowable here, so the choice belongs to them.
+              const targets = [a, b].filter(
+                (basin): basin is CivicMapBasin => basin?.thread_id != null,
+              );
               const shared = saddle.shared_topics.map((topic) => topic.name).join(', ');
               return (
                 <li
@@ -266,17 +274,25 @@ export function CivicMap({
                       {t('civicMap.sharedTopics', 'Shared topics: {topics}', { topics: shared })}
                     </span>
                   ) : null}
-                  {onOpenBridge && target ? (
-                    <span className="ps-6">
-                      <Button
-                        variant="ghost"
-                        onClick={() => onOpenBridge(target, targetTitle)}
-                        disabled={pending.has(target)}
-                      >
-                        {pending.has(target)
-                          ? t('civicMap.bridgeOpening', 'Opening…')
-                          : t('civicMap.openBridge', 'Open a bridge request')}
-                      </Button>
+                  {onOpenBridge && targets.length > 0 ? (
+                    <span className="flex flex-wrap gap-2 ps-6">
+                      {targets.map((basin) => {
+                        const threadId = basin.thread_id as string;
+                        return (
+                          <Button
+                            key={basin.basin_id}
+                            variant="ghost"
+                            onClick={() => onOpenBridge(threadId, basin.title)}
+                            disabled={pending.has(threadId)}
+                          >
+                            {pending.has(threadId)
+                              ? t('civicMap.bridgeOpening', 'Opening…')
+                              : t('civicMap.openBridgeOn', 'Bridge on “{title}”', {
+                                  title: basin.title,
+                                })}
+                          </Button>
+                        );
+                      })}
                     </span>
                   ) : null}
                 </li>
