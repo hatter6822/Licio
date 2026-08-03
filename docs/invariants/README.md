@@ -310,6 +310,16 @@ weaken either (factor > 1) is rejected at write time.
 - **Reeb** — the engagement landscape over the topic-similarity graph
   decomposes into join + split trees (exact for the discretized
   filtration); fragile saddles (few connecting edges) route bridge prompts.
+  **Surfaced as the Civic Map** (SPEC §12.4/§34) on the Steward Console's
+  Integrity tab: `GET /v1/invariants/admin/reeb/landscape` →
+  `apps/api/src/invariants/civic-map.ts` enriches the same `reebGraph` the
+  scheduler runs with story titles, catalog topics, and the thread a bridge
+  request targets, and `apps/web/src/components/moderation/CivicMap/` draws it
+  as the merge tree it is (dependency-free SVG; the sweep scalar positions a
+  stem and is never printed, so the surface cannot read as a ranking). A
+  fragile saddle opens a bridge request through the existing WS-H.4.2d route,
+  which is what finally gives `bridgePrompts` a consumer — until then it was
+  computed every window and read by nothing.
 - **CID** — `CID(x, u) = E_g|R(g.x, g.u) − R(x, u)|` over verified
   permutation groups on protected attributes; the v0 freshness ranking is
   certified attribute-blind (CID = 0); the release-gate decision blocks

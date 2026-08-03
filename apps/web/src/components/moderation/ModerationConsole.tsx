@@ -40,12 +40,14 @@ import {
   fetchAppealQueue,
   fetchAudit,
   fetchCase,
+  fetchCivicMap,
   fetchEvidenceDecisions,
   fetchEvidenceQueue,
   fetchIncidents,
   fetchReportQueue,
   fetchReviewerStatus,
   fetchUrlVerdict,
+  openBridgeRequest,
   resolveIncident,
   revertModerationAction,
   setReviewerStatus,
@@ -61,6 +63,7 @@ import { Select } from '../ui/Select/index.js';
 import { Tabs } from '../ui/Tabs/index.js';
 import { TextArea } from '../ui/TextArea/index.js';
 import { useToast } from '../ui/Toast/index.js';
+import { CivicMap } from './CivicMap/index.js';
 
 const REASON_OPTIONS = [...REPORT_REASONS_BY_CODE.values()].map((r) => ({
   value: r.code,
@@ -1619,6 +1622,77 @@ function AppealReviewDialog({
  *  Clearing lifts the case's enforcement delay; confirming dismisses the case
  *  (the target is protected).  Per-reporter identity never appears — the summary
  *  is aggregate, base-rate-conditioned. */
+/**
+ * WS-H.7.4 — the Civic Map above the incident queue.
+ *
+ * It is a SEPARATE query on purpose: the landscape recomputes the Reeb sweep
+ * server-side, so a slow or failed map must not delay or redden the incident
+ * queue an analyst is actually here to work. A map error therefore renders a
+ * quiet inline note rather than the panel-wide `PanelError` — the queue below
+ * stays fully usable.
+ */
+function CivicMapSection(): React.ReactElement | null {
+  const t = useT();
+  const { toast } = useToast();
+  const [pending, setPending] = useState<string[]>([]);
+  const map = useQuery({
+    queryKey: queryKeys.civicMap(),
+    queryFn: fetchCivicMap,
+    retry: false,
+    // The landscape sweeps a one-hour window, so re-fetching faster than that
+    // only re-renders the same shape.
+    staleTime: 5 * 60_000,
+  });
+  const bridge = useMutation({
+    mutationFn: (input: { threadId: string; title: string }) => openBridgeRequest(input.threadId),
+    onMutate: (input) => setPending((prev) => [...prev, input.threadId]),
+    onSettled: (_data, _error, input) =>
+      setPending((prev) => prev.filter((id) => id !== input.threadId)),
+    onSuccess: (result, input) =>
+      toast({
+        message: t(
+          'civicMap.bridgeOpened',
+          'Bridge request opened on “{title}” — {n} multi-lens participants can answer it.',
+          { title: input.title, n: String(result.candidates.length) },
+        ),
+        tone: 'success',
+      }),
+    onError: (error) =>
+      toast({
+        // A 409 is not a failure: someone already asked for a bridge here.
+        message:
+          error instanceof ApiClientError && error.code === 'already_open'
+            ? t('civicMap.bridgeAlreadyOpen', 'A bridge request is already open on that thread.')
+            : t('civicMap.bridgeFailed', 'Could not open a bridge request on that thread.'),
+        tone: error instanceof ApiClientError && error.code === 'already_open' ? 'info' : 'error',
+      }),
+  });
+
+  if (map.isError) {
+    return (
+      <p className="text-ink-muted text-xs" role="note">
+        {t('civicMap.unavailable', 'The attention landscape could not be loaded right now.')}
+      </p>
+    );
+  }
+  if (!map.data) {
+    // Undefined while loading; null when the window genuinely has nothing to
+    // sweep. Only the latter is worth a sentence.
+    return map.isSuccess ? (
+      <p className="text-ink-muted text-xs">
+        {t('civicMap.empty', 'No stories in this window to map yet.')}
+      </p>
+    ) : null;
+  }
+  return (
+    <CivicMap
+      data={map.data}
+      pendingThreadIds={pending}
+      onOpenBridge={(threadId, title) => bridge.mutate({ threadId, title })}
+    />
+  );
+}
+
 function IncidentsPanel(): React.ReactElement {
   const t = useT();
   const { toast } = useToast();
@@ -1643,71 +1717,79 @@ function IncidentsPanel(): React.ReactElement {
         tone: 'error',
       }),
   });
-  if (incidents.isError) {
-    return <PanelError error={incidents.error} onRetry={() => void incidents.refetch()} />;
-  }
   const items = incidents.data?.pages.flatMap((p) => p.incidents) ?? [];
   return (
-    <div className="flex flex-col gap-2">
-      <p className="text-xs text-ink-muted">
-        {t(
-          'console.integrityHelp',
-          'Coordinated-report incidents delay volume-driven enforcement pending review. Clear (reports legitimate) to resume enforcement, or confirm (a coordinated attack) to dismiss the case.',
-        )}
-      </p>
-      {incidents.data && items.length === 0 ? (
-        <p className="text-ink-muted">
-          {t('console.incidentsEmpty', 'No coordinated-report incidents are open.')}
-        </p>
-      ) : null}
-      <ul className="flex flex-col gap-2">
-        {items.map((inc) => (
-          <li
-            key={inc.incident_id}
-            className="flex items-start justify-between gap-3 rounded-md border border-line bg-canvas p-3"
-          >
-            <span className="flex flex-col text-sm">
-              <span className="font-medium text-ink">
-                {inc.report_count} {t('console.reportsIn', 'reports in')}{' '}
-                {Math.round(inc.window_seconds / 60)}m · {inc.severity}
-              </span>
-              <span className="text-xs text-ink-muted">{inc.summary}</span>
-              <span className="text-xs text-ink-muted">
-                {t('console.coordinationScore', 'Coordination score')}:{' '}
-                {inc.coordination_score.toFixed(2)}
-              </span>
-            </span>
-            <span className="flex shrink-0 gap-2">
-              <Button
-                variant="secondary"
-                onClick={() =>
-                  resolve.mutate({ incidentId: inc.incident_id, resolution: 'cleared' })
-                }
+    <div className="flex flex-col gap-4">
+      {/* The landscape first: it is the wider view an analyst reads the
+          incidents against. The two are INDEPENDENT — a failure in either
+          leaves the other fully usable, which is why the incident error is
+          rendered inline below rather than replacing the whole panel. */}
+      <CivicMapSection />
+      {incidents.isError ? (
+        <PanelError error={incidents.error} onRetry={() => void incidents.refetch()} />
+      ) : (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-ink-muted">
+            {t(
+              'console.integrityHelp',
+              'Coordinated-report incidents delay volume-driven enforcement pending review. Clear (reports legitimate) to resume enforcement, or confirm (a coordinated attack) to dismiss the case.',
+            )}
+          </p>
+          {incidents.data && items.length === 0 ? (
+            <p className="text-ink-muted">
+              {t('console.incidentsEmpty', 'No coordinated-report incidents are open.')}
+            </p>
+          ) : null}
+          <ul className="flex flex-col gap-2">
+            {items.map((inc) => (
+              <li
+                key={inc.incident_id}
+                className="flex items-start justify-between gap-3 rounded-md border border-line bg-canvas p-3"
               >
-                {t('console.clearIncident', 'Clear')}
-              </Button>
-              <Button
-                variant="primary"
-                onClick={() =>
-                  resolve.mutate({ incidentId: inc.incident_id, resolution: 'confirmed' })
-                }
-              >
-                {t('console.confirmIncident', 'Confirm')}
-              </Button>
-            </span>
-          </li>
-        ))}
-      </ul>
-      {incidents.hasNextPage ? (
-        <Button
-          variant="ghost"
-          loading={incidents.isFetchingNextPage}
-          onClick={() => void incidents.fetchNextPage()}
-          className="self-center"
-        >
-          {t('console.loadMore', 'Load more')}
-        </Button>
-      ) : null}
+                <span className="flex flex-col text-sm">
+                  <span className="font-medium text-ink">
+                    {inc.report_count} {t('console.reportsIn', 'reports in')}{' '}
+                    {Math.round(inc.window_seconds / 60)}m · {inc.severity}
+                  </span>
+                  <span className="text-xs text-ink-muted">{inc.summary}</span>
+                  <span className="text-xs text-ink-muted">
+                    {t('console.coordinationScore', 'Coordination score')}:{' '}
+                    {inc.coordination_score.toFixed(2)}
+                  </span>
+                </span>
+                <span className="flex shrink-0 gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() =>
+                      resolve.mutate({ incidentId: inc.incident_id, resolution: 'cleared' })
+                    }
+                  >
+                    {t('console.clearIncident', 'Clear')}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={() =>
+                      resolve.mutate({ incidentId: inc.incident_id, resolution: 'confirmed' })
+                    }
+                  >
+                    {t('console.confirmIncident', 'Confirm')}
+                  </Button>
+                </span>
+              </li>
+            ))}
+          </ul>
+          {incidents.hasNextPage ? (
+            <Button
+              variant="ghost"
+              loading={incidents.isFetchingNextPage}
+              onClick={() => void incidents.fetchNextPage()}
+              className="self-center"
+            >
+              {t('console.loadMore', 'Load more')}
+            </Button>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

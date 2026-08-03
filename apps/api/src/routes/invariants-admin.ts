@@ -14,6 +14,9 @@
 //     observational — there is deliberately NO enforcement action here).
 //   POST /v1/invariants/admin/mfci/cases/:id/resolve — confirm/clear/escalate
 //     (WS-H.3.4b); clearing lifts any safety freeze (WS-H.3.3d); audited.
+//   GET  /v1/invariants/admin/reeb/landscape    — the Civic Map: the Reeb
+//     attention landscape as a drawable merge tree (WS-H.7.4, SPEC §12.4/§34);
+//     observational, with fragile saddles routing into the bridge request below.
 //   GET  /v1/invariants/admin/gwei/dashboard    — cohort comparisons
 //     (k-anonymity enforced at computation; suppressed cells stay withheld).
 //   GET  /v1/invariants/admin/gwei/transparency — the public-safe aggregate
@@ -38,6 +41,7 @@ import { type EventPipelineServices, getEventPipelineServices } from '../events/
 import { type ForumServices, getForumServices } from '../forum/services.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { getIngestionServices, type IngestionServices } from '../ingestion/services.js';
+import { buildCivicMap } from '../invariants/civic-map.js';
 import {
   INVARIANTS_CONFIG_KEYS,
   storeInvariantsConfigValue,
@@ -407,6 +411,21 @@ export function createInvariantsAdminRoutes(
           });
         }
         return c.json({ room_id: roomId, reports: entries });
+      })
+
+      .get('/reeb/landscape', async (c) => {
+        // WS-H.7.4 Civic Map (SPEC §12.4, §34): the Reeb attention landscape
+        // as a drawable merge tree, for the console's Integrity tab. Strictly
+        // OBSERVATIONAL — the only action it enables is the §12.4 bridge
+        // prompt, which goes through the existing SCOI bridge-request route
+        // below with its own room-steward authorization.
+        //
+        // An empty landscape is a real state (a quiet hour, a fresh install),
+        // so it answers 200 with an explicit `null` rather than 404 — the panel
+        // renders "nothing to map yet", and a steward can tell that apart from
+        // a broken endpoint.
+        const map = await buildCivicMap(resolveEvents(), resolveIngestion(), Date.now());
+        return c.json({ landscape: map }, 200);
       })
 
       .post('/scoi/threads/:threadId/bridge-requests', async (c) => {

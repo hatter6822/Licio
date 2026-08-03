@@ -10,6 +10,7 @@ import type {
   AppealReviewResponse,
   AuditListResponse,
   CaseReviewResponse,
+  CivicMapResponse,
   EvidenceDecisionsResponse,
   EvidenceDecisionView,
   EvidenceQueueResponse,
@@ -50,6 +51,8 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchAppeal: vi.fn(),
   fetchAudit: vi.fn(),
   fetchIncidents: vi.fn(),
+  fetchCivicMap: vi.fn(),
+  openBridgeRequest: vi.fn(),
   fetchEvidenceQueue: vi.fn(),
   fetchEvidenceDecisions: vi.fn(),
   applyEvidenceDecision: vi.fn(),
@@ -254,6 +257,48 @@ const incidentView = {
   reviewed_at: null,
   reviewed_by: null,
 };
+/** A minimal landscape with one fragile join, for the Integrity-tab cases. */
+const civicLandscape: CivicMapResponse = {
+  window: { start: '2026-08-02T10:00:00.000Z', end: '2026-08-02T11:00:00.000Z' },
+  summary: {
+    basin_count: 2,
+    merge_count: 1,
+    split_count: 0,
+    fragile_saddle_count: 1,
+    final_basin_count: 1,
+  },
+  basins: [
+    {
+      basin_id: 'aaaaaaaa-1111-4111-8111-111111111111',
+      title: 'Flooding on the ring road',
+      level: 30,
+      thread_id: 'cccccccc-1111-4111-8111-111111111111',
+      topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
+      final: true,
+    },
+    {
+      basin_id: 'bbbbbbbb-2222-4222-8222-222222222222',
+      title: 'Council budget vote',
+      level: 8,
+      thread_id: 'dddddddd-2222-4222-8222-222222222222',
+      topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
+      final: false,
+    },
+  ],
+  merges: [
+    {
+      basin_a: 'aaaaaaaa-1111-4111-8111-111111111111',
+      basin_b: 'bbbbbbbb-2222-4222-8222-222222222222',
+      level: 6,
+      connecting_edges: 1,
+      fragile: true,
+      shared_topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
+    },
+  ],
+  splits: [],
+  coverage: 1,
+};
+
 const incidents: IncidentQueueResponse = {
   incidents: [incidentView],
   count: 1,
@@ -766,8 +811,13 @@ describe('AppealsPanel', () => {
   });
 });
 
+/** The Integrity tab now renders the Civic Map above the incident queue; the
+ *  landscape defaults to "nothing to map" unless a case opts in. */
+const emptyLandscape = () => vi.mocked(api.fetchCivicMap).mockResolvedValue(null);
+
 describe('IncidentsPanel', () => {
   it('lists incidents and confirms one (protecting the target)', async () => {
+    emptyLandscape();
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
     vi.mocked(api.resolveIncident).mockResolvedValue({
@@ -785,6 +835,7 @@ describe('IncidentsPanel', () => {
   });
 
   it('shows the empty + error states', async () => {
+    emptyLandscape();
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockResolvedValue({ incidents: [], count: 0, next_cursor: null });
     const { unmount } = render(<ModerationConsole />, { wrapper: Providers });
@@ -796,6 +847,47 @@ describe('IncidentsPanel', () => {
     render(<ModerationConsole />, { wrapper: Providers });
     tab('Integrity');
     expect(await screen.findByText(/does not have access/i)).toBeInTheDocument();
+  });
+
+  // WS-H.7.4 — the Civic Map and the incident queue are INDEPENDENT reads on one
+  // tab, so neither may take the other down. Both directions are asserted
+  // because only one of them was a pre-existing behaviour.
+  it('renders the Civic Map above the queue and routes a bridge request', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue(civicLandscape);
+    vi.mocked(api.openBridgeRequest).mockResolvedValue({
+      attempt_id: '99999999-9999-4999-8999-999999999999',
+      scoi_baseline: 0.4,
+      candidates: ['00000000-0000-4000-8000-0000000000c1'],
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    expect(await screen.findByText(/Attention landscape/i)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /open a bridge request/i }));
+    await waitFor(() =>
+      expect(api.openBridgeRequest).toHaveBeenCalledWith('cccccccc-1111-4111-8111-111111111111'),
+    );
+  });
+
+  it('keeps the incident queue usable when the landscape read fails', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
+    vi.mocked(api.fetchCivicMap).mockRejectedValue(new ApiClientError('unavailable', 'no', 503));
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    expect(await screen.findByText(/attention landscape could not be loaded/i)).toBeInTheDocument();
+    // The queue below still rendered.
+    expect(screen.getByText(/Volume spike dominated by new accounts/)).toBeInTheDocument();
+  });
+
+  it('keeps the landscape usable when the incident queue fails', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockRejectedValue(new ApiClientError('unavailable', 'no', 503));
+    vi.mocked(api.fetchCivicMap).mockResolvedValue(civicLandscape);
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    expect(await screen.findByText(/Attention landscape/i)).toBeInTheDocument();
   });
 });
 

@@ -104,7 +104,12 @@ apps/api/src/moderation/
   actions.ts       the action palette + reversal-integrity revert (performRevert)
                             + the MFCI-2 enforcement-delay gate
   incidents.ts     the integrity queue: clear/confirm a coordinated-report
-                            incident (reconciles the case's enforcement delay)
+                            incident (reconciles the case's enforcement delay).
+                            The console's Integrity tab renders this BELOW the
+                            WS-H.7.4 Civic Map (the Reeb attention landscape,
+                            `apps/web/src/components/moderation/CivicMap/`) —
+                            the two are independent reads of one question, and
+                            a failure in either leaves the other usable.
   audit.ts         append-only writer + transparency export (small-cell suppressed)
   notices.ts       statement-of-reasons + appeal-outcome inbox
   review.ts        queue + full-context review + appeal review projections
