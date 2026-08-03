@@ -917,18 +917,6 @@ export async function assembleEngagementLandscape(
     '1h',
     LANDSCAPE_SCAN_CEILING,
   );
-  // TWO independent facts, and the answer is the conjunction of both.
-  //
-  // Deriving completeness from the LAST break alone was wrong in the case
-  // between the bounds: a window of 101–199 active stories fills the node cap
-  // inside a batch that is itself short, so the walk ended at the window AND
-  // dropped rows — and reporting the short batch as "complete" suppressed the
-  // partial-scan warning over a map that was missing stories. The window
-  // running out and every candidate being included are different questions.
-  //
-  // The candidate read being CAPPED is the third: a window with more active
-  // rows than the ceiling was never fully offered to this walk.
-  let capped = candidates.length >= LANDSCAPE_SCAN_CEILING;
   for (let at = 0; at < candidates.length; at += LANDSCAPE_HYDRATE_BATCH) {
     const page = candidates.slice(at, at + LANDSCAPE_HYDRATE_BATCH);
     // Hydrate PUBLIC-ONLY, in one query: the restriction lives in the read
@@ -936,14 +924,10 @@ export async function assembleEngagementLandscape(
     // surface whose caller's room authority is unknown.
     const hydrated = await ingestion.stories.getPublicByIds(page.map((row) => row.itemId));
     for (const row of page) {
-      // Checked BEFORE the row is considered, so `capped` means "there was a
-      // candidate this scan did not look at" rather than "the last row happened
-      // to fill the cap" — the latter is a complete scan of a window that fits
-      // exactly.
-      if (nodes.length >= LANDSCAPE_NODES) {
-        capped = true;
-        break;
-      }
+      // Checked BEFORE the row is considered, so a row this walk did not look at
+      // is a row `examined` does not count — which is what completeness is
+      // computed from below.
+      if (nodes.length >= LANDSCAPE_NODES) break;
       examined += 1;
       const story = hydrated.get(row.itemId);
       if (!story) continue;
@@ -953,8 +937,16 @@ export async function assembleEngagementLandscape(
     }
     if (nodes.length >= LANDSCAPE_NODES) break;
   }
-  // The walk covered every candidate the read offered unless a bound stopped it.
-  const complete = !capped;
+  // COMPLETENESS IS COMPUTED FROM WHAT HAPPENED, not from which break fired.
+  //
+  // Tracking it at the exits kept being wrong by one case at a time: a node cap
+  // reached inside a short batch, then a batch that ENDS exactly on the cap with
+  // candidates still behind it — that break never re-entered the check and left
+  // the flag false, so a bounded map reported itself complete and suppressed its
+  // own warning. Both are the same question, and it has a direct answer: every
+  // candidate this walk was offered was examined, and the read that offered them
+  // was not itself truncated.
+  const complete = examined === candidates.length && candidates.length < LANDSCAPE_SCAN_CEILING;
 
   const edges: ReebEdge[] = [];
   for (let i = 0; i < nodes.length; i += 1) {

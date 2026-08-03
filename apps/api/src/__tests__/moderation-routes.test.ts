@@ -1010,6 +1010,50 @@ describe('trust-safety route branches', () => {
     ).toBe(404);
   });
 
+  it('#12b records evidence for a listed room whose listing VANISHED before the capture', async () => {
+    // The most urgent version of this report — filed, then the room delisted or
+    // its record removed before the capture ran — was the one case that carried
+    // no evidence at all, because the append was keyed on the SNAPSHOT
+    // surviving. A reviewer cannot tell that from a report about nothing, so the
+    // trail says which it is.
+    const { getPrivateRoomStubService, PrivateRoomStubService, setPrivateRoomStubService } =
+      await import('../private-rooms/service.js');
+    // RESTORED after this case: the stub service is a process singleton, so a
+    // patched one left installed makes the next test's room report succeed
+    // against a room that does not exist.
+    const previous = getPrivateRoomStubService();
+    const { InMemoryPrivateRoomStubStore } = await import('../private-rooms/stores.js');
+    const service = new PrivateRoomStubService(new InMemoryPrivateRoomStubStore());
+    const roomServerId = randomUUID();
+    // Listed at validation time, gone by the time the snapshot is taken: the
+    // interleaving a single-threaded test cannot produce, stated directly.
+    service.isPubliclyListed = async () => true;
+    service.listingSnapshot = async () => null;
+    setPrivateRoomStubService(service);
+
+    const reporter = await seedUser({ handle: `rv${randomUUID().slice(0, 6)}` });
+    const res = await app().request(
+      post(
+        '/v1/reports',
+        reportBody({ target_type: 'room', target_id: roomServerId, content_kind: undefined }),
+        reporter.cookie,
+      ),
+    );
+    expect(res.status).toBe(201);
+
+    const mod = getModerationServices();
+    const [theCase] = await mod.cases.list({ limit: 1 });
+    const trail = await mod.audit.list({
+      caseId: theCase?.caseId ?? '',
+      action: 'private_room_listing_reported',
+      limit: 5,
+    });
+    expect(trail).toHaveLength(1);
+    expect(trail[0]?.notes).toMatch(/UNAVAILABLE/);
+    expect(trail[0]?.notes).toMatch(/delisted or its record removed/i);
+    setPrivateRoomStubService(previous);
+  });
+
   it('#12 rejects a room report for a nonexistent room (404)', async () => {
     const reporter = await seedUser({ handle: `rr${randomUUID().slice(0, 6)}` });
     const res = await app().request(

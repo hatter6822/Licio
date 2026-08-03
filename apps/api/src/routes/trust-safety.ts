@@ -170,6 +170,11 @@ export function createTrustSafetyRoutes() {
           // The user the case is about — the account itself, or the content's
           // author — stored on the case for the `target_user` queue filter.
           let resolvedSubjectUserId: string | null = null;
+          // Whether the reported target is a publicly LISTED private room — the one
+          // case that carries §21 listing evidence. Hoisted out of the validation
+          // branch because the evidence decision below needs it even when the
+          // listing itself has since vanished.
+          let reportedListedRoom = false;
           if (request.target_type === 'account') {
             const target = await getIdentityServices().store.getUser(request.target_id);
             if (!target) return c.json(deny('target_not_found', 'Target not found'), 404);
@@ -221,10 +226,10 @@ export function createTrustSafetyRoutes() {
             // worked against Postgres and not in the runtime everyone develops
             // in. The listing is the thing being reported, so it decides.
             const forum = getForumServices();
-            const listedRoom = await getPrivateRoomStubService().isPubliclyListed(
+            reportedListedRoom = await getPrivateRoomStubService().isPubliclyListed(
               request.target_id,
             );
-            if (!listedRoom) {
+            if (!reportedListedRoom) {
               const room = await forum.rooms.getById(request.target_id);
               if (!room || !(await roomVisibleToUser(forum, room, auth.userId))) {
                 return c.json(deny('target_not_found', 'Target not found'), 404);
@@ -239,10 +244,9 @@ export function createTrustSafetyRoutes() {
           // without showing what was complained about. The audit trail is where
           // "what was true when this happened" belongs, it is already rendered
           // in the case panel, and it is tamper-evident.
-          const listing =
-            request.target_type === 'room'
-              ? await getPrivateRoomStubService().listingSnapshot(request.target_id)
-              : null;
+          const listing = reportedListedRoom
+            ? await getPrivateRoomStubService().listingSnapshot(request.target_id)
+            : null;
           const outcome = await submitReport(
             mod,
             auth.userId,
@@ -270,7 +274,7 @@ export function createTrustSafetyRoutes() {
           // reported; edited since means the original is gone, and the trail
           // says exactly that rather than presenting the new text as evidence.
           const priorCapture =
-            outcome.ok && listing !== null && outcome.response.idempotent
+            outcome.ok && reportedListedRoom && outcome.response.idempotent
               ? (
                   await mod.audit.list({
                     caseId: outcome.caseId,
@@ -283,7 +287,15 @@ export function createTrustSafetyRoutes() {
             outcome.ok && listing !== null
               ? Date.parse(listing.updated_at) > Date.parse(outcome.response.created_at)
               : false;
-          if (outcome.ok && listing !== null && !priorCapture) {
+          // EVERY accepted listed-room report leaves an evidence row, including
+          // one whose listing is already gone.
+          //
+          // Keying the append on the SNAPSHOT surviving meant the case with the
+          // most urgent story — reported, then delisted or deleted before the
+          // capture ran — was the one case that carried no evidence at all, and
+          // not even the note saying so. A reviewer cannot tell that from a
+          // report about nothing.
+          if (outcome.ok && reportedListedRoom && !priorCapture) {
             // BEST EFFORT: the report has already committed, and losing the
             // capture must not un-take it.
             await writeAudit(mod, {
@@ -311,9 +323,12 @@ export function createTrustSafetyRoutes() {
               // staff could not review. The append clamps as a backstop; the
               // budget here is what keeps the evidence a deliberate excerpt
               // rather than an arbitrary cut mid-word.
-              notes: editedSinceReport
-                ? 'Listing UNAVAILABLE — the published name/description were edited after this report was filed and before this capture could be stored, and the record keeps no history. What is published now is NOT what was reported.'
-                : listingEvidenceNote(listing),
+              notes:
+                listing === null
+                  ? 'Listing UNAVAILABLE — the room was delisted or its record removed between this report being accepted and the capture running, so what was published is gone. The report stands; the text it was about cannot be recovered.'
+                  : editedSinceReport
+                    ? 'Listing UNAVAILABLE — the published name/description were edited after this report was filed and before this capture could be stored, and the record keeps no history. What is published now is NOT what was reported.'
+                    : listingEvidenceNote(listing),
             });
           }
           if (!outcome.ok) {

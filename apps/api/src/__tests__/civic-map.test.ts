@@ -285,6 +285,29 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(reads).toBe(1);
   });
 
+  it('calls a cap reached at a BATCH BOUNDARY incomplete too', async () => {
+    // The exact-boundary case: a hydration batch whose LAST row is the 100th
+    // public node, with candidates still behind it. The inner loop ends
+    // normally — it never re-enters the cap check — so a flag set at the exits
+    // stayed false and the map reported itself complete while a third of the
+    // candidates were never looked at.
+    //
+    // 300 candidates: the first 200 alternate public/restricted (exactly 100
+    // public, the last of them at position 200), then 100 more.
+    const rows: FakeStory[] = Array.from({ length: 300 }, (_, i) =>
+      story(`${i.toString(16).padStart(8, '0')}-1111-4111-8111-111111111111`, 1000 - i, [
+        TOPIC_A?.id ?? '',
+      ]),
+    );
+    const restricted = rows.filter((_row, i) => i < 200 && i % 2 === 0).map((row) => row.storyId);
+    const { events, ingestion } = services(rows, { omitFromList: restricted });
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
+    expect(map?.basins.length).toBeGreaterThan(0);
+    // The whole first batch was walked — and 100 candidates behind it were not.
+    expect(map?.scan.examined).toBe(200);
+    expect(map?.scan.complete).toBe(false);
+  });
+
   it('calls a NODE-CAPPED window incomplete even when the batch was short', async () => {
     // The case between the two bounds: 101–199 active stories fill the 100-node
     // cap inside a batch that is itself shorter than the scan batch, so the walk
