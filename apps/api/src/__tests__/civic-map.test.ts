@@ -51,7 +51,8 @@ function services(stories: FakeStory[], opts: { omitFromList?: string[] } = {}) 
             .filter((s) => !omitted.has(s.storyId))
             .map((s) => ({ storyId: s.storyId, title: s.title, topicIds: s.topicIds })),
         ),
-      getThreadByStoryId: (storyId: string) => Promise.resolve({ threadId: `thread-${storyId}` }),
+      getThreadsByStoryIds: (storyIds: readonly string[]) =>
+        Promise.resolve(new Map(storyIds.map((id) => [id, { threadId: `thread-${id}` }]))),
     },
   } as unknown as Parameters<typeof buildCivicMap>[1];
   return { events, ingestion };
@@ -119,7 +120,8 @@ describe('buildCivicMap (WS-H.7.4)', () => {
           ];
           return Promise.resolve(call === 1 ? rows : rows.slice(1));
         },
-        getThreadByStoryId: (storyId: string) => Promise.resolve({ threadId: `thread-${storyId}` }),
+        getThreadsByStoryIds: (storyIds: readonly string[]) =>
+          Promise.resolve(new Map(storyIds.map((id) => [id, { threadId: `thread-${id}` }]))),
       },
     } as unknown as Parameters<typeof buildCivicMap>[1];
     const map = await buildCivicMap(events, drifting, NOW);

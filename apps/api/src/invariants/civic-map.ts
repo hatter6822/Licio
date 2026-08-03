@@ -71,13 +71,12 @@ export async function buildCivicMap(
   const byId = new Map(stories.filter((s) => storyIds.has(s.storyId)).map((s) => [s.storyId, s]));
   const finalBasins = new Set(graph.finalBasins);
 
-  // Only the basins' peak stories need a thread lookup, not every node.
-  const basinIds = graph.peaks.map((p) => p.basin);
-  const threadByStory = new Map<string, string | null>();
-  for (const storyId of basinIds) {
-    const thread = await ingestion.stories.getThreadByStoryId(storyId);
-    threadByStory.set(storyId, thread?.threadId ?? null);
-  }
+  // Only the basins' peak stories need a thread, not every node — and they are
+  // fetched in ONE query. A per-basin `getThreadByStoryId` would be a round trip
+  // per basin against Postgres on a surface a steward reloads by hand.
+  const threadByStory = await ingestion.stories.getThreadsByStoryIds(
+    graph.peaks.map((peak) => peak.basin),
+  );
 
   const topicsByBasin = new Map<string, CivicMapTopic[]>();
   const basins: CivicMapBasin[] = [];
@@ -92,7 +91,7 @@ export async function buildCivicMap(
       // than dropping a node the tree's edges still reference.
       title: story?.title ?? 'Story unavailable',
       level: peak.level,
-      thread_id: threadByStory.get(peak.basin) ?? null,
+      thread_id: threadByStory.get(peak.basin)?.threadId ?? null,
       topics,
       final: finalBasins.has(peak.basin),
     });
