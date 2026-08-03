@@ -126,12 +126,16 @@ describe('WS-S.1.3 contribution guard (defense in depth)', () => {
 });
 
 describe('WS-S.1.3 room-feed guard', () => {
-  it('returns p2p_room_local_only for a p2p room feed (rendered locally, never served)', async () => {
+  it('answers the UNKNOWN-ROOM 404 for a p2p room feed, not a distinctive code', async () => {
+    // §23.5 allows a 404 or a `p2p_room_local_only` 409, and the distinctive
+    // one is an oracle: anyone holding or guessing an `unlisted`
+    // `room_server_id` could confirm the room exists here — the identical-404
+    // contract of the bootstrap read, undone through another endpoint.
     const roomId = await makeP2pRoom();
     const res = await app().request(`/v1/rooms/${roomId}/feed`);
-    expect(res.status).toBe(409);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe('p2p_room_local_only');
+    const unknown = await app().request('/v1/rooms/00000000-0000-4000-8000-999999999999/feed');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(await unknown.json());
   });
 });
 

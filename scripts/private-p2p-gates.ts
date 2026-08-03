@@ -282,14 +282,29 @@ export function findMissingMarkers(
   return violations;
 }
 
-/** §23.3/§23.4 — the endpoint rejection guards (submission/contribution/feed). */
+/**
+ * §23.3/§23.4 — the endpoint rejection guards (submission/contribution/feed).
+ *
+ * The feed's entry names the SHARED PREDICATE rather than a per-route branch.
+ * It used to require `storageMode === 'p2p'` + `p2p_room_local_only` inline,
+ * which pinned the guard to one route AND to the distinctive status code that
+ * was itself an existence oracle — a caller holding an `unlisted`
+ * `room_server_id` could tell a p2p room from an unknown one by the answer. The
+ * refusal now lives in `roomContentVisibleToUser`, ahead of every visibility
+ * rule, so it covers each content surface that consults it instead of each one
+ * that remembers to branch. The gate follows it there: the predicate's own
+ * marker is checked below, and the route is required to CONSULT it.
+ */
 export const P2P_ENDPOINT_REJECTION_MARKERS: readonly RequiredMarker[] = [
   {
     file: 'ingestion/submission.ts',
     markers: ["storageMode === 'p2p'", 'p2p_room_requires_client_sync'],
   },
   { file: 'forum/contributions.ts', markers: ["storageMode === 'p2p'"] },
-  { file: 'routes/v1.ts', markers: ["storageMode === 'p2p'", 'p2p_room_local_only'] },
+  { file: 'routes/v1.ts', markers: ['roomContentVisibleToUser'] },
+  // The predicate itself: a p2p shell is refused BEFORE the visibility ladder,
+  // so the platform-admin branch cannot reach it either.
+  { file: 'forum/rooms.ts', markers: ["room.storageMode !== 'server'"] },
 ];
 
 /** §23.5 — every retriever predicates server storage (the shared helper + the

@@ -157,6 +157,17 @@ export interface AccountStubExport {
   readonly bootstrap_hints: readonly { kind: string; value: string }[];
   readonly signed_stub: Record<string, unknown>;
   readonly stub_signature: string;
+  /**
+   * The §21.2 capability.
+   *
+   * Never projected to a READER — but this is the account's own archive, and
+   * Art. 15 asks what is held about them, not what a stranger may see. The
+   * purge deletes this field with the row, so an export that omitted it would
+   * break the symmetry the export exists to keep. It is also the field that
+   * makes the archive actionable: with it the account can resolve, and remove,
+   * a record it has otherwise lost the handle to.
+   */
+  readonly bootstrap_blind_id: string;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -463,6 +474,7 @@ export class PrivateRoomStubService {
       bootstrap_hints: stub.bootstrapHints.map((h) => ({ kind: h.kind, value: h.value })),
       signed_stub: stub.signedStub,
       stub_signature: stub.stubSignature,
+      bootstrap_blind_id: stub.bootstrapBlindId,
       created_at: stub.createdAt,
       updated_at: stub.updatedAt,
     }));

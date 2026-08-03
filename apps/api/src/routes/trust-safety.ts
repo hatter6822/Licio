@@ -25,6 +25,7 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { roomVisibleToUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { getIdentityServices } from '../identity/services.js';
 import { zValidator } from '../lib/validate.js';
@@ -165,8 +166,17 @@ export function createTrustSafetyRoutes() {
           } else if (request.target_type === 'room') {
             // A room report must reference a real room — otherwise a user could
             // open a moderation case against an arbitrary/nonexistent UUID.
-            const room = await getForumServices().rooms.getById(request.target_id);
-            if (!room) return c.json(deny('target_not_found', 'Target not found'), 404);
+            //
+            // "Real" means a SERVER room. A Private P2P shell would otherwise
+            // accept a report: server state created against a room the platform
+            // cannot moderate (§11.4), and a 404-vs-201 oracle confirming an
+            // `unlisted` room to anyone holding its id. `roomVisibleToUser` is
+            // the predicate that already says a p2p shell is not a room surface.
+            const forum = getForumServices();
+            const room = await forum.rooms.getById(request.target_id);
+            if (!room || !(await roomVisibleToUser(forum, room, auth.userId))) {
+              return c.json(deny('target_not_found', 'Target not found'), 404);
+            }
           }
           const outcome = await submitReport(
             mod,

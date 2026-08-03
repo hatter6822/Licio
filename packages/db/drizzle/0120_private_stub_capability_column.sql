@@ -41,7 +41,18 @@ UPDATE "private_room_stubs"
 -- never held. Such a row is already unresolvable for its members, so it is
 -- removed rather than blocking the migration with a NOT NULL violation — the
 -- room itself is untouched, since the server never held it.
-DELETE FROM "private_room_stubs" WHERE "bootstrap_blind_id" IS NULL;
+--
+-- The SHELL goes with it, exactly as `remove()` does it. The FK cascades from
+-- `rooms` to `private_room_stubs`, not in reverse, so deleting the stub alone
+-- would leave a room row still asserting "this account created a private room
+-- at time T" — the §8.1 activity trace — and unreachable besides: both the
+-- purge and the DSAR export find shells THROUGH their stub, so nothing would
+-- ever see it again. Deleting the shell cascades the stub, so this one
+-- statement does both.
+DELETE FROM "rooms"
+  WHERE "room_id" IN (
+    SELECT "room_server_id" FROM "private_room_stubs" WHERE "bootstrap_blind_id" IS NULL
+  );
 --> statement-breakpoint
 
 ALTER TABLE "private_room_stubs"

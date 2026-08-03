@@ -7,13 +7,22 @@ import 'fake-indexeddb/auto';
 import { DEFAULT_P2P_DIRECTORY_MODE, PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS } from '@licio/shared';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { PRIVATE_P2P_DB_NAME } from '../../../private-p2p/storage.js';
+import { useAuthStore } from '../../../stores/auth.js';
 import { checkA11y } from '../../../test/axe.js';
 import { CreatePrivateRoomWizard } from './CreatePrivateRoomWizard.js';
 
+beforeEach(() => {
+  // The §4.2 `unlisted` default needs an ACCOUNT — registering a stub is an
+  // authenticated write — so a signed-out visitor defaults to `detached`
+  // instead. Every test below that exercises the directory path signs in.
+  useAuthStore.setState({ status: 'authenticated', user: { id: 'u1' } } as never);
+});
+
 afterEach(async () => {
+  useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
   await new Promise<void>((resolve) => {
     const req = indexedDB.deleteDatabase(PRIVATE_P2P_DB_NAME);
     req.onsuccess = () => resolve();
@@ -269,6 +278,41 @@ describe('CreatePrivateRoomWizard', () => {
       ).toBeInTheDocument();
     } finally {
       attachSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('offers a signed-out visitor only the mode that needs no account', async () => {
+    // Registering a stub is an authenticated write, so defaulting a signed-out
+    // visitor to `unlisted` promised a bootstrap record in the copy and then
+    // produced a 401 and a silently detached room.
+    useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
+    const user = userEvent.setup();
+    render(<CreatePrivateRoomWizard />);
+    expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(/Nobody/i);
+    expect(screen.getByText(/Sign in to have Licio store a bootstrap record/i)).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText(/who can find this room/i));
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+  });
+
+  it('creates a signed-out visitor’s room with NO directory request at all', async () => {
+    useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    try {
+      const user = userEvent.setup();
+      const onCreated = vi.fn();
+      render(<CreatePrivateRoomWizard onCreated={onCreated} />);
+      await user.type(screen.getByLabelText(/room name/i), 'Local Room');
+      for (const ack of PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS) {
+        await user.click(screen.getByLabelText(ack.label));
+      }
+      await user.click(screen.getByRole('button', { name: /create private room/i }));
+      await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+      // No 401, no warning, no silently-detached surprise: the room IS detached
+      // and the copy said so before it was made.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
       fetchSpy.mockRestore();
     }
   });

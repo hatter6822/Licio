@@ -1997,8 +1997,6 @@ type PrivateRoomCreateStubRequest = {
   display_name?: string;
   display_description?: string;
   display_avatar_public_cid?: string;
-  room_public_key: string;
-  manifest_key_commitment: string;
   rendezvous_policy: 'licio_blind' | 'member_rendezvous' | 'manual_only';
   bootstrap_hints?: unknown[];
   // A CLOSED set of PUBLIC commitments — see the validation notes below.
@@ -2256,7 +2254,7 @@ Existing endpoints MUST reject P2P rooms:
 ```text
 POST /v1/stories with p2p room_id -> 409 p2p_room_requires_client_sync
 POST /v1/contributions with p2p thread_id -> 409 p2p_room_requires_client_sync
-GET /v1/rooms/:id/feed for p2p room -> 404 or p2p_room_local_only response
+GET /v1/rooms/:id/feed for p2p room -> the unknown-room 404 (identical body)
 GET /v1/search -> never returns p2p content
 admin APIs -> cannot expose p2p content
 ```

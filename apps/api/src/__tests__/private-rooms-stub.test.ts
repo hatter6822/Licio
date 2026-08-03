@@ -532,6 +532,11 @@ describe('Art. 15 — the export discloses exactly what the purge removes', () =
     // The account's own signed body IS its own data — this is the one place it
     // belongs, because the account's device authored it.
     expect(mine[0]?.signed_stub).toEqual(SIGNED_STUB);
+    // …and so is the capability, which the purge deletes with the row. Never
+    // projected to a READER; Art. 15 asks what is HELD about the account, and
+    // it is also what makes the archive actionable — with it they can resolve
+    // and remove a record they have lost the local handle to.
+    expect(mine[0]?.bootstrap_blind_id).toBe(TOKEN);
   });
 
   it('exports nothing once the purge has run — the two agree by construction', async () => {

@@ -376,19 +376,16 @@ export function createV1Routes() {
           const room = await forum.rooms.getById(roomId);
           if (room === null) return c.json(notFound, 404);
           // WS-S.1.3 — a Private P2P room's feed is rendered from LOCAL decrypted
-          // reducer state, never the server (the §8 non-storage contract): the
-          // server has no content to serve. Return the local-only guidance.
-          if (room.storageMode === 'p2p') {
-            return c.json(
-              {
-                error: {
-                  code: 'p2p_room_local_only',
-                  message: 'This Private P2P room is synced and read on your device.',
-                },
-              },
-              409,
-            );
-          }
+          // reducer state, never the server (the §8 non-storage contract).
+          //
+          // It answers the UNKNOWN-ROOM 404, not a distinctive 409. §23.5 allows
+          // either, and the distinctive one is an oracle: anyone holding or
+          // guessing an `unlisted` `room_server_id` could confirm the room exists
+          // here, which is the identical-404 contract of
+          // `GET /v1/private-rooms/:id/bootstrap` undone through another
+          // endpoint. `roomContentVisibleToUser` refuses a p2p shell before any
+          // visibility rule, so this is the shared predicate's answer rather than
+          // a branch this route has to remember.
           if (!(await roomContentVisibleToUser(forum, room, userId))) {
             return c.json(notFound, 404);
           }

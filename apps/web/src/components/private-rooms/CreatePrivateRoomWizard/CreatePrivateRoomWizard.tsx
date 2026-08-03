@@ -26,6 +26,7 @@ import {
   listMyPrivateRoomStubs,
 } from '../../../lib/private-rooms-api.js';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
+import { useAuthStore } from '../../../stores/auth.js';
 import { Button } from '../../ui/Button/index.js';
 import { Checkbox } from '../../ui/Checkbox/index.js';
 import { Input } from '../../ui/Input/index.js';
@@ -51,6 +52,26 @@ export interface CreatePrivateRoomWizardProps {
 const DIRECTORY_CHOICES = ['detached', 'unlisted', 'listed'] as const;
 type DirectoryChoice = (typeof DIRECTORY_CHOICES)[number];
 
+/** The one-line label for each mode, keyed so the option list can be built from
+ *  whichever subset the caller is actually able to choose from. */
+const DIRECTORY_LABELS: Record<DirectoryChoice, (t: ReturnType<typeof useT>) => string> = {
+  detached: (t) =>
+    t(
+      'privateRoom.create.directory.detached',
+      'Nobody — Licio keeps no record of it (invite only)',
+    ),
+  unlisted: (t) =>
+    t(
+      'privateRoom.create.directory.unlisted',
+      'People you invite — Licio stores a bootstrap record, no name',
+    ),
+  listed: (t) =>
+    t(
+      'privateRoom.create.directory.listed',
+      'Anyone browsing Licio — the room is named in the public directory',
+    ),
+};
+
 export function CreatePrivateRoomWizard({
   onCreated,
 }: CreatePrivateRoomWizardProps): React.ReactElement {
@@ -58,7 +79,19 @@ export function CreatePrivateRoomWizard({
   const headingId = useId();
   const [name, setName] = useState('');
   const [roomType, setRoomType] = useState<RoomType>('global_topic');
-  const [directory, setDirectory] = useState<DirectoryChoice>(DEFAULT_P2P_DIRECTORY_MODE);
+  // The §4.2 default needs an ACCOUNT to be honest.
+  //
+  // `/private` is deliberately reachable signed out — a P2P room is hosted on
+  // this device and needs no Licio identity — but registering a directory stub
+  // is an authenticated write. Defaulting a signed-out visitor to `unlisted`
+  // promised a bootstrap record in the copy, then produced a 401 and a silently
+  // detached room. §4.2's default governs what a room CAN be, and for a caller
+  // who cannot register one, `detached` is not a weaker choice, it is the only
+  // true one.
+  const signedIn = useAuthStore((state) => state.status === 'authenticated');
+  const [directory, setDirectory] = useState<DirectoryChoice>(
+    signedIn ? DEFAULT_P2P_DIRECTORY_MODE : 'detached',
+  );
   const [acked, setAcked] = useState<Record<string, boolean>>({});
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -222,30 +255,21 @@ export function CreatePrivateRoomWizard({
         label={t('privateRoom.create.directory', 'Who can find this room')}
         value={directory}
         onValueChange={(v) => setDirectory(v as DirectoryChoice)}
-        options={[
-          {
-            value: 'detached',
-            label: t(
-              'privateRoom.create.directory.detached',
-              'Nobody — Licio keeps no record of it (invite only)',
-            ),
-          },
-          {
-            value: 'unlisted',
-            label: t(
-              'privateRoom.create.directory.unlisted',
-              'People you invite — Licio stores a bootstrap record, no name',
-            ),
-          },
-          {
-            value: 'listed',
-            label: t(
-              'privateRoom.create.directory.listed',
-              'Anyone browsing Licio — the room is named in the public directory',
-            ),
-          },
-        ]}
+        // A signed-out visitor cannot register a stub at all, so the two modes
+        // that need one are not offered rather than offered-and-failing.
+        options={(signedIn ? DIRECTORY_CHOICES : (['detached'] as const)).map((value) => ({
+          value,
+          label: DIRECTORY_LABELS[value](t),
+        }))}
       />
+      {signedIn ? null : (
+        <p className="text-ink-muted text-xs" role="note">
+          {t(
+            'privateRoom.create.directorySignedOut',
+            'Sign in to have Licio store a bootstrap record for this room. Without one the room still works — you share access yourself, by QR, file or message.',
+          )}
+        </p>
+      )}
       {/* The honest limit of each choice, stated where the choice is made.  The
           room's CONTENT is end-to-end encrypted either way; what varies is how
           much the server knows the room EXISTS. */}
