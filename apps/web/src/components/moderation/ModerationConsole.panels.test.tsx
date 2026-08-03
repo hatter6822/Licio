@@ -876,6 +876,29 @@ describe('IncidentsPanel', () => {
     );
   });
 
+  it('re-reads the landscape after opening a bridge request', async () => {
+    // The server withholds a target that already has an open request, so the
+    // map AFTER this action no longer offers this one. Without the re-read the
+    // button stayed live on a stale payload and every later click answered
+    // `409 already_open`.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue(civicLandscape);
+    vi.mocked(api.openBridgeRequest).mockResolvedValue({
+      attempt_id: '99999999-9999-4999-8999-999999999999',
+      scoi_baseline: 0.4,
+      candidates: [],
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    await screen.findByText(/Attention landscape/i);
+    const before = vi.mocked(api.fetchCivicMap).mock.calls.length;
+    fireEvent.click(await screen.findByRole('button', { name: /bridge request on this join/i }));
+    await waitFor(() =>
+      expect(vi.mocked(api.fetchCivicMap).mock.calls.length).toBeGreaterThan(before),
+    );
+  });
+
   it('keeps the incident queue usable when the landscape read fails', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);

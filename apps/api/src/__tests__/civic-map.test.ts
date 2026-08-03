@@ -30,6 +30,11 @@ interface FakeStory {
   title: string;
   topicIds: string[];
   events: number;
+  /** The room the STORY row names — where it was submitted. */
+  roomId?: string;
+  /** The room the CONVERSATION sits in, which a thread move separates from the
+   *  story's room (WS-Q). The bridge endpoint authorizes against THIS one. */
+  threadRoomId?: string;
 }
 
 /** Minimal stand-ins for the two service surfaces `buildCivicMap` reads. */
@@ -58,12 +63,27 @@ function services(stories: FakeStory[], opts: { omitFromList?: string[] } = {}) 
               .filter((s) => ids.includes(s.storyId) && !omitted.has(s.storyId))
               .map((s) => [
                 s.storyId,
-                { storyId: s.storyId, title: s.title, topicIds: s.topicIds },
+                {
+                  storyId: s.storyId,
+                  title: s.title,
+                  topicIds: s.topicIds,
+                  roomId: s.roomId ?? null,
+                },
               ]),
           ),
         ),
       getThreadsByStoryIds: (storyIds: readonly string[]) =>
-        Promise.resolve(new Map(storyIds.map((id) => [id, { threadId: `thread-${id}` }]))),
+        Promise.resolve(
+          new Map(
+            storyIds.map((id) => [
+              id,
+              {
+                threadId: `thread-${id}`,
+                roomId: stories.find((s) => s.storyId === id)?.threadRoomId ?? null,
+              },
+            ]),
+          ),
+        ),
     },
   } as unknown as Parameters<typeof buildCivicMap>[1];
   return { events, ingestion };
@@ -198,6 +218,41 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     });
     expect(seen.length).toBeGreaterThan(0);
     for (const call of seen) expect(call.threadId).toBe(`thread-${call.storyId}`);
+  });
+
+  it('authorizes against the room the CONVERSATION is in, not the story\u2019s', async () => {
+    // The bridge endpoint reads the THREAD's room to find its stewards, and a
+    // thread moves between rooms (WS-Q) while the story row keeps the room it
+    // was submitted to. Resolving authority from the story's room offers a
+    // target to the stewards of the room the conversation LEFT, and withholds
+    // it from the ones who actually run it \u2014 in a fixture where the two
+    // differ, the map published nothing a steward could act on at all.
+    const seen: (string | null)[] = [];
+    const rows: FakeStory[] = [
+      {
+        storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
+        title: 'A',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 9,
+        roomId: 'origin-room',
+        threadRoomId: 'current-room',
+      },
+      {
+        storyId: 'bbbbbbbb-2222-4222-8222-222222222222',
+        title: 'B',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 4,
+        roomId: 'origin-room',
+        threadRoomId: 'current-room',
+      },
+    ];
+    const { events, ingestion } = services(rows);
+    await buildCivicMap(events, ingestion, NOW, async (_threadId, roomId) => {
+      seen.push(roomId);
+      return true;
+    });
+    expect(seen.length).toBeGreaterThan(0);
+    for (const roomId of seen) expect(roomId).toBe('current-room');
   });
 
   it('bridges on a CONNECTING story, not on a basin peak', async () => {

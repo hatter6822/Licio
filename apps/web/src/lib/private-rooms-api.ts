@@ -49,9 +49,17 @@ export const bootstrapStubSchema = z.object({
   rendezvous_policy: z.string(),
   bootstrap_hints: z.array(bootstrapHintSchema),
   bootstrap_endpoints: z.array(z.string()),
-  /** PUBLIC commitments only — the §21.2 capability is never projected. */
-  signed_stub: z.record(z.string(), z.unknown()),
-  stub_signature: z.string(),
+  /**
+   * The room-signed body and its signature — NULL as a PAIR when withheld.
+   *
+   * A record written before the capability moved to its own column keeps that
+   * body byte-for-byte (the server cannot re-sign), and such a body still
+   * contains the capability — so it is served only to a reader who presented
+   * one, and omitted otherwise. Requiring them non-null made every open read of
+   * a preserved record throw on a successful 200.
+   */
+  signed_stub: z.record(z.string(), z.unknown()).nullable(),
+  stub_signature: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 });

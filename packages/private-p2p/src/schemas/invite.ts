@@ -36,7 +36,19 @@ export const inviteSecretSchema = z
     granted_role: invitedRoleSchema,
     requires_admin_approval: z.boolean(),
   })
-  .strict();
+  .strict()
+  // BOTH directory fields or NEITHER. A ref without a capability cannot open the
+  // record, and a capability without a ref has nothing to open — either way the
+  // join path silently treats the room as detached, so the member is admitted
+  // and then cannot resolve an unlisted record or pass a working reference on.
+  // Half a handle is not a weaker handle.
+  .refine(
+    (invite) => (invite.room_stub_ref === undefined) === (invite.bootstrap_blind_id === undefined),
+    {
+      message: 'room_stub_ref and bootstrap_blind_id must be supplied together',
+      path: ['bootstrap_blind_id'],
+    },
+  );
 export type InviteSecret = z.infer<typeof inviteSecretSchema>;
 
 /** §12.3 — `JoinRequestV1`: the recipient proves invite knowledge + offers an

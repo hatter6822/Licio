@@ -1469,7 +1469,14 @@ export class PrivateRoomSession {
       grantedRole: params.grantedRole ?? 'member',
       expiresAt,
       ...(params.maxUses === undefined ? {} : { maxUses: params.maxUses }),
-      ...(stub ? { roomStubRef: stub.roomServerId, bootstrapBlindId: stub.bootstrapBlindId } : {}),
+      ...(stub
+        ? {
+            directory: {
+              roomStubRef: stub.roomServerId,
+              bootstrapBlindId: stub.bootstrapBlindId,
+            },
+          }
+        : {}),
     });
     const sealed = await this.p2p.sealInvite(
       this.p2p.fromBase64Url(params.inviteePublicKey),

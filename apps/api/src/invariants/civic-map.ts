@@ -131,11 +131,18 @@ export async function buildCivicMap(
     const cached = authorized.get(storyId);
     if (cached !== undefined) return cached;
     const pending = (async () => {
-      const threadId = threadByStory.get(storyId)?.threadId;
-      if (threadId === undefined) return null;
-      return (await canBridge(threadId, byId.get(storyId)?.roomId ?? null, storyId))
-        ? threadId
-        : null;
+      const thread = threadByStory.get(storyId);
+      if (thread === undefined) return null;
+      // The THREAD's room, not the story's.
+      //
+      // A bridge request is authorized against the room the CONVERSATION sits
+      // in — that is the room whose stewards the endpoint asks about, and a
+      // thread moves between rooms (WS-Q) while the story row keeps the room it
+      // was submitted to. Asking about the story's room answers a different
+      // question in both directions: a steward of the thread's room was offered
+      // no target on a conversation they run, and a steward of the origin room
+      // was offered one on a conversation that has since moved out of it.
+      return (await canBridge(thread.threadId, thread.roomId, storyId)) ? thread.threadId : null;
     })();
     authorized.set(storyId, pending);
     return pending;

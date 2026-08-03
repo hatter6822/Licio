@@ -110,6 +110,16 @@ export interface ModerationServices {
    * the private-rooms domain. Absent ⇒ never offered, which is fail-closed.
    */
   isPubliclyListedRoom?: (roomServerId: string) => Promise<boolean>;
+  /**
+   * Add a store from another domain to the in-memory unit's rollback boundary.
+   *
+   * A method rather than a constructor option because the participant may not
+   * exist yet: the private-room stub store is built after these services in both
+   * composition roots. The list is read per run, so registering later is
+   * enough — and getting it wrong now shows up as a demotion surviving a failed
+   * audit in dev and test, which is the failure the unit exists to prevent.
+   */
+  registerRollback(store: InMemoryRollback): void;
   /** The audit trail's tamper-evidence key + identifier ref (WS-J.2.5, migration 0118).
    *
    *  Present by DEFAULT — in dev and test as well as production — because a chain that
@@ -197,7 +207,12 @@ export function createInMemoryModerationServices(
   const noticeStore = new InMemoryModerationNoticeStore(now);
   const appealStore = new InMemoryModerationAppealStore(now);
   const incidentStore = new InMemoryCoordinatedReportIncidentStore(now);
+  /** Participants registered after construction — see `registerRollback`. */
+  const extraRollbacks: InMemoryRollback[] = [];
   const services: ModerationServices = {
+    registerRollback: (store) => {
+      if (!extraRollbacks.includes(store)) extraRollbacks.push(store);
+    },
     cases: caseStore,
     reports: new InMemoryModerationReportStore(now),
     actions: actionStore,
@@ -235,7 +250,11 @@ export function createInMemoryModerationServices(
       // reproduced only where nobody looks for it. It is supplied by the boot
       // wiring alongside `delistListedRoom`, so moderation still never
       // constructs another domain's store.
-      [
+      // Read at RUN time: a participant from another domain (the private-room
+      // stub store) is built after these services, so a list fixed here would
+      // silently exclude it — which is how the guarantee ends up holding in one
+      // composition root and not another.
+      () => [
         caseStore,
         actionStore,
         noticeStore,
@@ -243,6 +262,7 @@ export function createInMemoryModerationServices(
         incidentStore,
         auditStore,
         ...(options.extraRollbacks ?? []),
+        ...extraRollbacks,
       ],
     ),
     auditChain: {

@@ -1687,6 +1687,7 @@ function AppealReviewDialog({
 function CivicMapSection(): React.ReactElement | null {
   const t = useT();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [pending, setPending] = useState<string[]>([]);
   const map = useQuery({
     queryKey: queryKeys.civicMap(),
@@ -1701,7 +1702,7 @@ function CivicMapSection(): React.ReactElement | null {
     onMutate: (input) => setPending((prev) => [...prev, input.threadId]),
     onSettled: (_data, _error, input) =>
       setPending((prev) => prev.filter((id) => id !== input.threadId)),
-    onSuccess: (result, input) =>
+    onSuccess: (result, input) => {
       toast({
         message: t(
           'civicMap.bridgeOpened',
@@ -1709,7 +1710,13 @@ function CivicMapSection(): React.ReactElement | null {
           { title: input.title, n: String(result.candidates.length) },
         ),
         tone: 'success',
-      }),
+      });
+      // RE-FETCH the landscape. The server withholds a target that already has
+      // an open request, so the map after this action no longer offers this one
+      // — without the invalidation the button stays live on a stale payload and
+      // every later click answers `409 already_open`.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.civicMap() });
+    },
     onError: (error) =>
       toast({
         // A 409 is not a failure: someone already asked for a bridge here.

@@ -480,10 +480,16 @@ export function createInvariantsAdminRoutes(
             // than two lenses, so a target published without one is a control
             // that fails every time it is used. `void threadId` — the baseline
             // is a property of the STORY the thread belongs to.
-            void threadId;
+            // …and no request may already be OPEN on it. The POST answers
+            // `409 already_open`, and the map is not re-fetched after a
+            // successful bridge, so the button stayed live and every later click
+            // failed the same way. Checked first: it is a single indexed read,
+            // and a baseline recompute is not.
+            const invariants = resolveInvariants();
+            if (await invariants.bridgeAttempts.openForThread(threadId)) return false;
             const baseline =
               (await latestScoiFor(resolveEvents(), storyId)) ??
-              (await recomputeScoiFor(resolveInvariants(), resolveEvents(), storyId));
+              (await recomputeScoiFor(invariants, resolveEvents(), storyId));
             return baseline !== null;
           },
         );

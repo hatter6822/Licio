@@ -163,6 +163,10 @@ describe('invite seal / open (§10.3, §12.2)', () => {
     return {
       schema: 'licio.private.invite_secret.v1',
       room_stub_ref: 'stub-123',
+      // §21.2's capability travels WITH the handle it opens: an invite carrying
+      // one without the other names a record the recipient cannot read, so the
+      // schema requires the pair and this fixture is a whole invite.
+      bootstrap_blind_id: 'Ym9vdHN0cmFwLWJsaW5kLWlkLXZhbHVl',
       room_public_key: 'cm9vbS1wdWJsaWMta2V5',
       invite_id: 'invite-abc',
       invite_secret: 'aW52aXRlLXNlY3JldA',

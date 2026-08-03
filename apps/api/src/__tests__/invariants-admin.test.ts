@@ -7,6 +7,7 @@
 // the version-comparison query, the GWEI transparency export shape, and
 // the public SCOI/MERI read surfaces (404-over-403 on hidden stories).
 import { randomUUID } from 'node:crypto';
+import { COMMONS_ROOM_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 import { hourWindow } from '../invariants/runner.js';
@@ -594,7 +595,11 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
   /** A room with two lenses reading the SAME story divergently, plus a
    * multi-lens participant (the bridge candidate), with the acting user as
    * the room's steward. */
-  async function seedSplitRoom(fixture: InvariantServicesFixture, stewardUserId: string) {
+  async function seedSplitRoom(
+    fixture: InvariantServicesFixture,
+    stewardUserId: string,
+    topicIds?: string[],
+  ) {
     const roomId = randomUUID();
     const inserted = await fixture.forum.rooms.insert({
       roomId,
@@ -629,7 +634,10 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
       });
       if (lens.ok) lensIds.push(lens.lens.lensId);
     }
-    const { storyId, threadId } = await seedStory(fixture);
+    const { storyId, threadId } = await seedStory(
+      fixture,
+      topicIds === undefined ? {} : { topicIds },
+    );
     await fixture.ingestion.stories.updateThread(threadId, { roomId });
     const bridgeUser = await seedUserWithSession(fixture.identity);
     const bodies: Record<string, string> = {
@@ -750,6 +758,93 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
       { method: 'POST', body: JSON.stringify({}) },
     );
     expect(orphanBridge.status).toBe(404);
+  });
+
+  it('withdraws a bridge target once a request is OPEN on it', async () => {
+    // The map published a target the POST beside it answers `409 already_open`
+    // for: eligibility asked "may this caller act here?" and never "is there
+    // anything left to do here?". The steward clicked, got a 409, and the
+    // button stayed live because nothing re-read the map.
+    const fixture = freshInvariantServices();
+    const analyst = await seedUserWithSession(fixture.identity, {
+      steward: true,
+      stewardRoles: ['ROLE_INTEGRITY'],
+    });
+    // The landscape hydrates PUBLIC stories only, and `seedStory` files them in
+    // the commons — which has to exist as a public server room for any of them
+    // to appear at all.
+    await fixture.forum.rooms.insert({
+      roomId: COMMONS_ROOM_ID,
+      name: 'Commons',
+      slug: 'commons',
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    // Two peaks on DIFFERENT topics joined through one lower story that shares
+    // both: that join is the fragile merge a bridge request targets. (Two
+    // same-topic stories are one basin with a shoulder, not a merge.)
+    const peakA = await seedSplitRoom(fixture, analyst.userId, ['topic-a']);
+    const peakB = await seedSplitRoom(fixture, analyst.userId, ['topic-b']);
+    const connector = await seedSplitRoom(fixture, analyst.userId, ['topic-a', 'topic-b']);
+    const hourMs = 3_600_000;
+    const windowStart = new Date(Math.floor(Date.now() / hourMs) * hourMs - hourMs).toISOString();
+    for (const [storyId, count] of [
+      [peakA.storyId, 20],
+      [peakB.storyId, 18],
+      [connector.storyId, 2],
+    ] as const) {
+      await fixture.events.windowStore.upsert({
+        itemId: storyId,
+        windowStart,
+        windowSize: '1h',
+        uniqueActiveUsers: count,
+        sourceOpens: 0,
+        contextOpens: 0,
+        returnVisits: 0,
+        contributionCounts: {},
+        antiSignalCounts: {},
+        eventCount: count,
+        computedAt: new Date().toISOString(),
+      });
+    }
+
+    const read = async (): Promise<Array<string | null>> => {
+      const response = await adminRequest(fixture, analyst.cookie, '/reeb/landscape');
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        landscape: { merges: Array<{ bridge_thread_id: string | null }> } | null;
+      };
+      return (body.landscape?.merges ?? []).map((saddle) => saddle.bridge_thread_id);
+    };
+
+    const offered = (await read()).filter((id): id is string => id !== null);
+    expect(offered.length).toBeGreaterThan(0);
+    const target = offered[0] ?? '';
+    const opened = await adminRequest(
+      fixture,
+      analyst.cookie,
+      `/scoi/threads/${target}/bridge-requests`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    expect(opened.status).toBe(200);
+    // The SAME request now 409s…
+    const again = await adminRequest(
+      fixture,
+      analyst.cookie,
+      `/scoi/threads/${target}/bridge-requests`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    expect(again.status).toBe(409);
+    // …so the map must stop pointing at it.
+    expect(await read()).not.toContain(target);
   });
 
   it('bridge requests route multi-lens candidates; a reducing contribution credits (SCOI-2)', async () => {

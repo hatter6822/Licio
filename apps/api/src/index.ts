@@ -1110,10 +1110,6 @@ const moderationEnforcementWrites = moderationEnforcementWritesOver({
 });
 
 const moderationServices = createInMemoryModerationServices({
-  // §21.4's staff demotion runs inside the moderation unit, so the unit must be
-  // able to put the stub store back when its audit throws. Null under Postgres,
-  // where the transaction rolls it back.
-  extraRollbacks: [inMemoryStubStore()].filter((store) => store !== null),
   content: createProductionContentPort({
     ...moderationContentReads,
     ...moderationEnforcementWrites,
@@ -1302,6 +1298,12 @@ moderationServices.delistListedRoom = async (roomServerId: string) =>
 // …and the read that decides whether the console offers it at all.
 moderationServices.isPubliclyListedRoom = async (roomServerId: string) =>
   await getPrivateRoomStubService().isPubliclyListed(roomServerId);
+// §21.4's staff demotion runs inside the moderation unit, so the unit must be
+// able to put the stub store back when its audit throws. Registered rather than
+// constructed-with, because the store is built after these services — under
+// Postgres there is nothing to register and the transaction does the job.
+const stubRollback = inMemoryStubStore();
+if (stubRollback !== null) moderationServices.registerRollback(stubRollback);
 setModerationServices(moderationServices);
 // WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing
 // filters read this (ranking reads it via `services.forum`).  One wiring point.

@@ -273,6 +273,13 @@ export function createPrivateRoomsRoutes() {
   // param is a uuid), which is the point: the ordering makes that independent
   // of the schema staying that way.
   app.get('/directory', rateLimit({ limit: 300, windowMs: 60_000 }), async (c) => {
+    // NOT CACHEABLE. Delisting is the remedy for an abusive published name, and
+    // a cached page keeps serving that name after the action taken to stop it —
+    // for staff delists especially, where the whole point is that the room stops
+    // advertising itself NOW. A directory listing has no revalidation token to
+    // hang a conditional request on, so `no-store` is the honest policy rather
+    // than a max-age nobody can invalidate.
+    c.header('Cache-Control', 'no-store');
     const query = directoryQuerySchema.safeParse({
       limit: c.req.query('limit'),
       cursor: c.req.query('cursor'),

@@ -70,9 +70,16 @@ export interface CreateRoomInviteParams {
   readonly expiresAt: string;
   readonly maxUses?: number;
   readonly requiresAdminApproval?: boolean;
-  readonly roomStubRef?: string;
-  /** The §21.2 bootstrap capability for `roomStubRef` (see the schema's note). */
-  readonly bootstrapBlindId?: string;
+  /**
+   * The §21 directory handle — BOTH or NEITHER.
+   *
+   * Modelled as one optional object rather than two optional fields, so a
+   * half-supplied handle cannot be constructed: a ref without a capability
+   * cannot open the record, and a capability without a ref has nothing to open,
+   * and either way the join path treats the room as detached while admitting the
+   * member.
+   */
+  readonly directory?: { readonly roomStubRef: string; readonly bootstrapBlindId: string };
   /** The invite id (default: a fresh random id). */
   readonly inviteId?: string;
   /** The raw invite secret (default: 32 fresh random bytes). */
@@ -94,10 +101,12 @@ export function createRoomInvite(params: CreateRoomInviteParams): InviteSecret {
     max_uses: params.maxUses ?? 1,
     granted_role: params.grantedRole,
     requires_admin_approval: params.requiresAdminApproval ?? false,
-    ...(params.roomStubRef === undefined ? {} : { room_stub_ref: params.roomStubRef }),
-    ...(params.bootstrapBlindId === undefined
+    ...(params.directory === undefined
       ? {}
-      : { bootstrap_blind_id: params.bootstrapBlindId }),
+      : {
+          room_stub_ref: params.directory.roomStubRef,
+          bootstrap_blind_id: params.directory.bootstrapBlindId,
+        }),
   } satisfies InviteSecret);
 }
 

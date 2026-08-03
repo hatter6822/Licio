@@ -32,13 +32,24 @@ import type { InMemoryRollback } from './in-memory-rollback.js';
 
 export class InMemoryUnitOfWork<S> {
   readonly #stores: S;
-  readonly #rollbacks: readonly InMemoryRollback[];
+  readonly #rollbacks: () => readonly InMemoryRollback[];
   readonly #ambient = new AsyncLocalStorage<S>();
   #queue: Promise<unknown> = Promise.resolve();
 
-  constructor(stores: S, rollbacks: readonly InMemoryRollback[]) {
+  /**
+   * @param rollbacks the participants, read at RUN time rather than captured.
+   *
+   * A composition root cannot always construct every participant before the unit
+   * — the private-room stub store is built after the moderation services — and a
+   * list fixed at construction silently excludes whatever came later. Reading it
+   * per run removes the ordering constraint instead of documenting it.
+   */
+  constructor(
+    stores: S,
+    rollbacks: readonly InMemoryRollback[] | (() => readonly InMemoryRollback[]),
+  ) {
     this.#stores = stores;
-    this.#rollbacks = rollbacks;
+    this.#rollbacks = typeof rollbacks === 'function' ? rollbacks : () => rollbacks;
   }
 
   async run<T>(work: (stores: S) => Promise<T>): Promise<T> {
@@ -46,7 +57,7 @@ export class InMemoryUnitOfWork<S> {
     if (ambient !== undefined) return work(ambient); // genuinely nested — join it
     const running = this.#queue.then(() =>
       this.#ambient.run(this.#stores, async () => {
-        const undo = this.#rollbacks.map((store) => store.beginRollback());
+        const undo = this.#rollbacks().map((store) => store.beginRollback());
         try {
           return await work(this.#stores);
         } catch (error) {

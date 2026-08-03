@@ -81,9 +81,14 @@ import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { notFoundHandler } from './middleware/error-handler.js';
+import { getModerationServices } from './moderation/services.js';
 import { RendezvousService, setRendezvousService } from './private-rendezvous/service.js';
 import { InMemoryRendezvousStore } from './private-rendezvous/stores.js';
-import { PrivateRoomStubService, setPrivateRoomStubService } from './private-rooms/service.js';
+import {
+  getPrivateRoomStubService,
+  PrivateRoomStubService,
+  setPrivateRoomStubService,
+} from './private-rooms/service.js';
 import { InMemoryPrivateRoomStubStore } from './private-rooms/stores.js';
 import {
   createInMemoryRankingServices,
@@ -264,7 +269,21 @@ setRendezvousService(new RendezvousService(new InMemoryRendezvousStore()));
 // binds the Drizzle store whenever `DATABASE_URL` is set, and this harness always sets a dummy
 // one, so the first directory GET or registration POST would 500 against a database that does
 // not exist.  Force the in-memory adapter, like every other harness service.
-setPrivateRoomStubService(new PrivateRoomStubService(new InMemoryPrivateRoomStubStore()));
+const e2eStubStore = new InMemoryPrivateRoomStubStore();
+setPrivateRoomStubService(new PrivateRoomStubService(e2eStubStore));
+
+// …and the SAME moderation bindings `index.ts` installs, or the harness accepts a
+// listed-room report and can do nothing with it: `directory_delistable` would
+// always be false and a staff delist would reach the fail-closed default and
+// 404. The rollback participant matters too — §21.4's demotion runs inside the
+// moderation unit, and a unit that cannot restore this store would leave a
+// listing demoted when its audit throws.
+const e2eModeration = getModerationServices();
+e2eModeration.delistListedRoom = async (roomServerId: string) =>
+  (await getPrivateRoomStubService().delistListed(roomServerId)) !== null;
+e2eModeration.isPubliclyListedRoom = async (roomServerId: string) =>
+  await getPrivateRoomStubService().isPubliclyListed(roomServerId);
+e2eModeration.registerRollback(e2eStubStore);
 
 // WS-R.12 — same dummy-DATABASE_URL hazard for the LCAP ingestion server: `getLcapIngestServer()`
 // would otherwise bind the Drizzle store and 500 on the service worker's background C0-sync `/pulse`.
