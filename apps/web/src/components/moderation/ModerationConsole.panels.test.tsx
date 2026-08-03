@@ -293,6 +293,7 @@ const civicLandscape: CivicMapResponse = {
       connecting_edges: 1,
       fragile: true,
       survivor: 'aaaaaaaa-1111-4111-8111-111111111111',
+      bridge_thread_id: 'cccccccc-1111-4111-8111-111111111111',
       shared_topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
     },
   ],
@@ -865,7 +866,7 @@ describe('IncidentsPanel', () => {
     render(<ModerationConsole />, { wrapper: Providers });
     tab('Integrity');
     expect(await screen.findByText(/Attention landscape/i)).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: /Flooding on the ring road/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /bridge request on this join/i }));
     await waitFor(() =>
       expect(api.openBridgeRequest).toHaveBeenCalledWith('cccccccc-1111-4111-8111-111111111111'),
     );

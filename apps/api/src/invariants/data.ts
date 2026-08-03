@@ -867,11 +867,18 @@ export async function assembleEngagementLandscape(
   // to them. Excluding it entirely is the same rule the all-zero guard applies,
   // held per node instead of per landscape, so a single active story cannot
   // drag ninety-nine silent ones into the map with it.
+  // ONE window read for the whole landscape, not one per story: this assembly
+  // is on the interactive Civic Map's request path, and a round trip per story
+  // put up to a hundred of them ahead of every analyst's page load.
+  const windows = await events.windowStore.getManyForWindow(
+    recent.map((story) => story.storyId),
+    windowStart,
+    '1h',
+  );
   const nodes: ReebNode[] = [];
   const active = new Set<string>();
   for (const story of recent) {
-    const window = await events.windowStore.get(story.storyId, windowStart, '1h');
-    const value = window?.eventCount ?? 0;
+    const value = windows.get(story.storyId)?.eventCount ?? 0;
     if (value <= 0) continue;
     active.add(story.storyId);
     nodes.push({ id: story.storyId, value });

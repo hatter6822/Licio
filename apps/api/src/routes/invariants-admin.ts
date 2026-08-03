@@ -437,7 +437,25 @@ export function createInvariantsAdminRoutes(
         // so it answers 200 with an explicit `null` rather than 404 — the panel
         // renders "nothing to map yet", and a steward can tell that apart from
         // a broken endpoint.
-        const map = await buildCivicMap(resolveEvents(), resolveIngestion(), Date.now());
+        // The bridge target is resolved AGAINST THIS CALLER, mirroring the
+        // POST below exactly: a room-hosted server thread whose room this
+        // analyst stewards, or platform admin. Reading the landscape is a
+        // ROLE_INTEGRITY power; ACTING on a room's conversation is not, so a
+        // thread id published here without that check would render a control
+        // that deterministically 404s.
+        const forum = resolveForum();
+        const map = await buildCivicMap(
+          resolveEvents(),
+          resolveIngestion(),
+          Date.now(),
+          async (_threadId, roomId) => {
+            if (roomId === null) return false;
+            const room = await forum.rooms.getById(roomId);
+            if (room === null || room.storageMode !== 'server') return false;
+            if (auth.roles.includes('admin')) return true;
+            return (await forum.rooms.stewardRolesFor(roomId, auth.userId)).length > 0;
+          },
+        );
         return c.json({ landscape: map }, 200);
       })
 

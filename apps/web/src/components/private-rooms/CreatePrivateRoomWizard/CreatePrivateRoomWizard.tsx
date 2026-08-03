@@ -17,7 +17,7 @@ import {
   ROOM_TYPES,
   type RoomType,
 } from '@licio/shared';
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError } from '../../../lib/api.js';
 import {
@@ -92,6 +92,14 @@ export function CreatePrivateRoomWizard({
   const [directory, setDirectory] = useState<DirectoryChoice>(
     signedIn ? DEFAULT_P2P_DIRECTORY_MODE : 'detached',
   );
+  // …and FOLLOW the session, not just sample it at mount. A session can expire
+  // or another tab can sign out between choosing `listed` and submitting, and
+  // the select then showed one option while holding a different, stale value —
+  // so the room was created and the stub POST 401'd, which is the bug the
+  // account-aware default was meant to remove.
+  useEffect(() => {
+    if (!signedIn) setDirectory('detached');
+  }, [signedIn]);
   const [acked, setAcked] = useState<Record<string, boolean>>({});
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -178,10 +186,17 @@ export function CreatePrivateRoomWizard({
           // one connection that cannot check, is noise.
           //
           // A response-bearing 4xx is the server REFUSING: nothing committed,
-          // nothing to reconcile.
+          // nothing to reconcile. EVERYTHING ELSE reconciles — including the
+          // bare transport failure, which is the ambiguous case the owner
+          // lookup was added for: the request may have committed and its
+          // response been lost, and skipping the check there left exactly the
+          // orphan this whole path exists to prevent.
           const status = error instanceof ApiClientError ? error.status : undefined;
-          const mayHaveCommitted = created !== null || (status !== undefined && status >= 500);
-          if (mayHaveCommitted) {
+          const serverRefused = status !== undefined && status >= 400 && status < 500;
+          // Whether we KNOW something is out there, which decides how loudly a
+          // failed reconciliation speaks (see the catch below).
+          const knownCommitted = created !== null || (status !== undefined && status >= 500);
+          if (!serverRefused) {
             try {
               // The room's founder signing key identifies OUR record among the
               // account's: the local session knows it, and it is what the room
@@ -191,12 +206,20 @@ export function CreatePrivateRoomWizard({
               const ours = mine.filter((stub) => stub.room_public_key === payload.roomPublicKey);
               for (const stub of ours) await deletePrivateRoomStub(stub.room_server_id);
             } catch {
-              setDirectoryWarning(
-                t(
-                  'privateRoom.create.directoryUnreconciled',
-                  'The room was created on this device, but Licio could not confirm whether a directory record was saved for it. Open this room’s settings later to check and remove it if one is there.',
-                ),
-              );
+              // The reconcile read failed too. Escalate the copy only when a
+              // record is KNOWN to exist: if the create was a bare transport
+              // failure and this read is also unreachable, the device is simply
+              // offline and the POST most likely never landed — warning about a
+              // record that probably does not exist, on the one connection that
+              // cannot check, teaches people to ignore the warning.
+              if (knownCommitted) {
+                setDirectoryWarning(
+                  t(
+                    'privateRoom.create.directoryUnreconciled',
+                    'The room was created on this device, but Licio could not confirm whether a directory record was saved for it. Open this room’s settings later to check and remove it if one is there.',
+                  ),
+                );
+              }
             }
           }
         }

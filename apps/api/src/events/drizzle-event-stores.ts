@@ -585,6 +585,29 @@ export class DrizzleAggregationWindowStore implements AggregationWindowStore {
     return row ? this.#toRecord(row) : null;
   }
 
+  async getManyForWindow(
+    itemIds: readonly string[],
+    windowStart: string,
+    windowSize: AggregationWindowSize,
+  ): Promise<Map<string, AggregationWindowRecord>> {
+    const out = new Map<string, AggregationWindowRecord>();
+    if (itemIds.length === 0) return out;
+    // ONE query for the whole landscape. Per-item `get` calls meant a round trip
+    // per story ahead of every Civic Map load, multiplied by concurrent viewers.
+    const rows = await this.#db
+      .select()
+      .from(aggregationWindows)
+      .where(
+        and(
+          inArray(aggregationWindows.itemId, [...itemIds]),
+          eq(aggregationWindows.windowStart, new Date(windowStart)),
+          eq(aggregationWindows.windowSize, windowSize),
+        ),
+      );
+    for (const row of rows) out.set(row.itemId, this.#toRecord(row));
+    return out;
+  }
+
   async listForItemBefore(
     itemId: string,
     windowSize: AggregationWindowSize,

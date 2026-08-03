@@ -5,7 +5,7 @@
 // and creates a real local room on submit (real crypto in jsdom + fake-indexeddb).
 import 'fake-indexeddb/auto';
 import { DEFAULT_P2P_DIRECTORY_MODE, PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS } from '@licio/shared';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
@@ -315,6 +315,22 @@ describe('CreatePrivateRoomWizard', () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+
+  it('resets a directory choice the session no longer supports', async () => {
+    const user = userEvent.setup();
+    render(<CreatePrivateRoomWizard />);
+    await user.click(screen.getByLabelText(/who can find this room/i));
+    await user.click(screen.getByRole('option', { name: /public directory/i }));
+    expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(/public directory/i);
+
+    // The session expires, or another tab signs out. Leaving `listed` selected
+    // would show one option while holding another, then 401 on submit — the bug
+    // the account-aware default was meant to remove.
+    act(() => {
+      useAuthStore.setState({ status: 'session-expired', user: null } as never);
+    });
+    expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(/Nobody/i);
   });
 
   it('has no accessibility violations', async () => {

@@ -89,6 +89,16 @@ export const civicMapBasinSchema = z.object({
    *  axis, never a score: see the header. */
   level: z.number().int().min(0),
   /** The peak story's thread, when it has one — the bridge-request target. */
+  /**
+   * The thread a bridge request would target — null when there is none the
+   * CALLER can act on.
+   *
+   * Null covers two different facts on purpose, because the surface should
+   * distinguish neither: the basin has no thread, or this analyst holds no
+   * steward role in its room. Offering a control that deterministically 404s is
+   * the worse of the two, and reporting WHICH it is would tell an analyst
+   * without authority that a room exists and who stewards it.
+   */
   thread_id: uuidSchema.nullable(),
   /** Catalog topics on the peak story (the sentinel is never included). */
   topics: z.array(civicMapTopicSchema).max(8),
@@ -111,6 +121,17 @@ export const civicMapSaddleSchema = z.object({
    *  losing branch ends here; a renderer that draws both onward is drawing
    *  something else. */
   survivor: uuidSchema,
+  /**
+   * The thread a bridge request on this join should open on — null when there
+   * is none this caller can act on.
+   *
+   * Preferred over either basin's peak, because the peaks are not where the join
+   * lives: two basins meet through their lower-level members, so the
+   * conversation carrying the shared subject is usually a connecting story's,
+   * not a peak's. Opening on a peak sends the request to a thread about a
+   * different topic, and the endpoint computes its SCOI baseline there.
+   */
+  bridge_thread_id: uuidSchema.nullable(),
   /**
    * What the join is ABOUT — the topics carried by the edges that actually
    * connect the two basins.

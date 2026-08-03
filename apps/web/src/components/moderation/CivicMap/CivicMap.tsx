@@ -150,6 +150,17 @@ function layout(data: CivicMapResponse): { stems: Stem[]; joins: Join[]; drawn: 
   return { stems, joins, drawn: basins.length };
 }
 
+/** How a join is named back to the caller of `onOpenBridge` — the two basins,
+ *  since the bridge target is a connecting conversation rather than either. */
+function joinLabel(
+  t: ReturnType<typeof useT>,
+  a: CivicMapBasin | undefined,
+  b: CivicMapBasin | undefined,
+): string {
+  const unknown = t('civicMap.unknownBasin', 'an unavailable story');
+  return `${a?.title ?? unknown} ⇄ ${b?.title ?? unknown}`;
+}
+
 /** The saddles worth acting on, strongest signal first (fewest connecting
  *  edges = most fragile). */
 function fragileFirst(saddles: readonly CivicMapSaddle[]): CivicMapSaddle[] {
@@ -278,16 +289,19 @@ export function CivicMap({
             {fragile.map((saddle) => {
               const a = basinById.get(saddle.basin_a);
               const b = basinById.get(saddle.basin_b);
-              // BOTH sides are offered when both have a thread, rather than
-              // always picking basin A. The bridge endpoint authorizes against
-              // the room of the thread you name, so an analyst who stewards
-              // only the other side would otherwise be shown one button that
-              // always 404s while an authorized target sat on the far side of
-              // the same join. Which room a given analyst stewards is not
-              // knowable here, so the choice belongs to them.
-              const targets = [a, b].filter(
-                (basin): basin is CivicMapBasin => basin?.thread_id != null,
-              );
+              // ONE target, chosen by the SERVER: `bridge_thread_id`.
+              //
+              // Two things this component cannot know decide it. Which
+              // conversation carries the join — basins meet through their
+              // lower-level members, so the thread is usually a connecting
+              // story's rather than either peak's, and opening on a peak would
+              // point the endpoint's SCOI baseline at a different subject. And
+              // which threads THIS analyst may act on — reading the landscape is
+              // a platform-integrity power, acting on a room's conversation is a
+              // room-steward one, so offering every thread rendered controls
+              // that deterministically 404. Null means "nothing here you can
+              // act on", and the two reasons are deliberately indistinguishable.
+              const target = saddle.bridge_thread_id;
               const shared = saddle.shared_topics.map((topic) => topic.name).join(', ');
               return (
                 <li
@@ -312,25 +326,17 @@ export function CivicMap({
                       {t('civicMap.sharedTopics', 'Shared topics: {topics}', { topics: shared })}
                     </span>
                   ) : null}
-                  {onOpenBridge && targets.length > 0 ? (
+                  {onOpenBridge && target !== null ? (
                     <span className="flex flex-wrap gap-2 ps-6">
-                      {targets.map((basin) => {
-                        const threadId = basin.thread_id as string;
-                        return (
-                          <Button
-                            key={basin.basin_id}
-                            variant="ghost"
-                            onClick={() => onOpenBridge(threadId, basin.title)}
-                            disabled={pending.has(threadId)}
-                          >
-                            {pending.has(threadId)
-                              ? t('civicMap.bridgeOpening', 'Opening…')
-                              : t('civicMap.openBridgeOn', 'Bridge on “{title}”', {
-                                  title: basin.title,
-                                })}
-                          </Button>
-                        );
-                      })}
+                      <Button
+                        variant="ghost"
+                        onClick={() => onOpenBridge(target, joinLabel(t, a, b))}
+                        disabled={pending.has(target)}
+                      >
+                        {pending.has(target)
+                          ? t('civicMap.bridgeOpening', 'Opening…')
+                          : t('civicMap.openBridgeOnJoin', 'Open a bridge request on this join')}
+                      </Button>
                     </span>
                   ) : null}
                 </li>

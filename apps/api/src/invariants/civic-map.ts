@@ -78,6 +78,16 @@ export async function buildCivicMap(
   events: EventPipelineServices,
   ingestion: IngestionServices,
   nowMs: number,
+  /**
+   * Decides whether THIS caller could open a bridge request on a given thread.
+   *
+   * The map is readable by any platform integrity steward, while the bridge
+   * endpoint requires a steward role in the thread's own room (or platform
+   * admin) — so publishing every thread id offered controls that
+   * deterministically 404. Absent ⇒ no thread is actionable, which is the
+   * fail-closed answer for a caller whose authority cannot be resolved.
+   */
+  canBridge: (threadId: string, roomId: string | null) => Promise<boolean> = async () => false,
 ): Promise<CivicMapResponse | null> {
   const { nodes, edges } = await assembleEngagementLandscape(events, ingestion, nowMs);
   // An ALL-ZERO landscape is a quiet hour, not a landscape.
@@ -114,14 +124,27 @@ export async function buildCivicMap(
   // Only the basins' peak stories need a thread, not every node — and they are
   // fetched in ONE query. A per-basin `getThreadByStoryId` would be a round trip
   // per basin against Postgres on a surface a steward reloads by hand.
+  // Threads for every PUBLIC landscape node, not only the peaks.
+  //
+  // A bridge request should open on a conversation that actually carries the
+  // join. Basins meet through their lower-level members — the X/Y and Y/Z case
+  // `saddleTopics` documents — so targeting a peak sends the request to a thread
+  // about X while the saddle is about Y, and the endpoint then computes its
+  // SCOI baseline and candidate participants for the wrong conversation.
   const threadByStory = await ingestion.stories.getThreadsByStoryIds(
-    // Only for peaks whose story is STILL PUBLIC. A thread id is a handle to a
-    // conversation, so fetching one for a story that left the public set
-    // between the two reads would publish exactly what the public-only
-    // enrichment above just withheld — and it is also the bridge-request
-    // target, so an analyst could act on it.
-    graph.peaks.map((peak) => peak.basin).filter((basin) => byId.has(basin)),
+    // …and only for stories STILL PUBLIC: a thread id is a handle to a
+    // conversation, so fetching one for a story that left the public set between
+    // the two reads would publish exactly what the public-only enrichment
+    // withheld.
+    nodes.map((node) => node.id).filter((id) => byId.has(id)),
   );
+
+  /** The thread this caller may actually act on, or null. */
+  const actionableThread = async (storyId: string): Promise<string | null> => {
+    const threadId = threadByStory.get(storyId)?.threadId;
+    if (threadId === undefined) return null;
+    return (await canBridge(threadId, byId.get(storyId)?.roomId ?? null)) ? threadId : null;
+  };
 
   // Topics for EVERY landscape node, not only the peaks: a saddle's subject
   // usually lives on the lower-level stories that form the connecting edge.
@@ -141,13 +164,44 @@ export async function buildCivicMap(
       // than dropping a node the tree's edges still reference.
       title: story?.title ?? 'Story unavailable',
       level: peak.level,
-      thread_id: threadByStory.get(peak.basin)?.threadId ?? null,
+      thread_id: await actionableThread(peak.basin),
       topics,
       final: finalBasins.has(peak.basin),
     });
   }
 
-  const toSaddle = (event: {
+  /**
+   * A thread that carries the JOIN, preferred over a basin peak.
+   *
+   * The connecting edges are the stories that actually make the two basins
+   * adjacent, so their conversation is where a bridging comment belongs. Falls
+   * back to the surviving peak when none of them has a thread this caller can
+   * act on — a bridge on the right room beats no bridge at all.
+   */
+  const saddleThread = async (
+    sample: readonly { a: string; b: string }[],
+    basins: readonly string[],
+    survivor: string,
+  ): Promise<string | null> => {
+    // A connecting edge usually has a PEAK on one end — that is what makes it
+    // cross between the basins — so the peaks are excluded on the first pass.
+    // Otherwise the "prefer a connecting story" rule would return a peak
+    // whenever one happened to sit on the left of the first edge, which is
+    // exactly the target this is meant to move away from.
+    const peaks = new Set(basins);
+    for (const pass of [0, 1]) {
+      for (const edge of sample) {
+        for (const storyId of [edge.a, edge.b]) {
+          if (pass === 0 && peaks.has(storyId)) continue;
+          const thread = await actionableThread(storyId);
+          if (thread !== null) return thread;
+        }
+      }
+    }
+    return await actionableThread(survivor);
+  };
+
+  const toSaddle = async (event: {
     basinA: string;
     basinB: string;
     survivor: string;
@@ -155,7 +209,7 @@ export async function buildCivicMap(
     connectingEdges: number;
     connectingEdgeSample: readonly { a: string; b: string }[];
     fragile: boolean;
-  }): CivicMapSaddle => ({
+  }): Promise<CivicMapSaddle> => ({
     basin_a: event.basinA,
     basin_b: event.basinB,
     level: event.level,
@@ -163,6 +217,11 @@ export async function buildCivicMap(
     fragile: event.fragile,
     survivor: event.survivor,
     shared_topics: saddleTopics(event.connectingEdgeSample, topicsByStory),
+    bridge_thread_id: await saddleThread(
+      event.connectingEdgeSample,
+      [event.basinA, event.basinB],
+      event.survivor,
+    ),
   });
 
   const connected = new Set(edges.flatMap((e) => [e.a, e.b]));
@@ -182,8 +241,8 @@ export async function buildCivicMap(
       final_basin_count: graph.finalBasins.length,
     },
     basins: basins.slice(0, 120),
-    merges: graph.merges.map(toSaddle).slice(0, 240),
-    splits: graph.splits.map(toSaddle).slice(0, 240),
+    merges: await Promise.all(graph.merges.slice(0, 240).map(toSaddle)),
+    splits: await Promise.all(graph.splits.slice(0, 240).map(toSaddle)),
     coverage: nodes.length === 0 ? 0 : connected.size / nodes.length,
   };
 }

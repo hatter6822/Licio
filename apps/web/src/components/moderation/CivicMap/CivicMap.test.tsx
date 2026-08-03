@@ -69,6 +69,7 @@ function landscape(over: Partial<CivicMapResponse> = {}): CivicMapResponse {
         connecting_edges: 2,
         fragile: true,
         survivor: BASIN_A,
+        bridge_thread_id: null,
         shared_topics: [TOPIC],
       },
     ],
@@ -113,48 +114,50 @@ describe('CivicMap', () => {
     expect(screen.getByText(/Shared topics: Climate/i)).toBeInTheDocument();
   });
 
-  it('routes the bridge action to the thread the server expects', async () => {
+  it('routes the bridge action to the thread the SERVER chose for the join', async () => {
     const onOpenBridge = vi.fn();
-    render(<CivicMap data={landscape()} onOpenBridge={onOpenBridge} />);
-    // BOTH sides are offered: the bridge endpoint authorizes against the room of
-    // the thread you name, so an analyst who stewards only the far side must be
-    // able to pick it rather than be shown one button that always 404s.
-    const buttons = screen.getAllByRole('button', { name: /^Bridge on/i });
-    expect(buttons).toHaveLength(2);
-    await userEvent.click(screen.getByRole('button', { name: /Flooding on the ring road/i }));
+    const data = landscape({
+      merges: landscape().merges.map((saddle) => ({
+        ...saddle,
+        bridge_thread_id: 'cccccccc-3333-4333-8333-333333333333',
+      })),
+    });
+    render(<CivicMap data={data} onOpenBridge={onOpenBridge} />);
+    // ONE target, not one per basin. Two facts decide it and neither is
+    // knowable here: which conversation actually carries the join (usually a
+    // connecting story's, not a peak's), and which threads this analyst may act
+    // on at all.
+    const buttons = screen.getAllByRole('button', { name: /bridge request on this join/i });
+    expect(buttons).toHaveLength(1);
+    await userEvent.click(buttons[0] as HTMLElement);
     expect(onOpenBridge).toHaveBeenCalledWith(
-      'aaaaaaaa-1111-4111-8111-111111111111',
-      'Flooding on the ring road',
-    );
-    await userEvent.click(screen.getByRole('button', { name: /Council budget vote/i }));
-    expect(onOpenBridge).toHaveBeenCalledWith(
-      'bbbbbbbb-2222-4222-8222-222222222222',
-      'Council budget vote',
+      'cccccccc-3333-4333-8333-333333333333',
+      'Flooding on the ring road ⇄ Council budget vote',
     );
   });
 
-  it('offers no bridge action when neither basin has a thread', () => {
-    const data = landscape({
-      basins: landscape().basins.map((b) => ({ ...b, thread_id: null })),
-    });
-    render(<CivicMap data={data} onOpenBridge={vi.fn()} />);
-    expect(screen.queryByRole('button', { name: /^Bridge on/i })).toBeNull();
+  it('offers no bridge action when the server named no actionable thread', () => {
+    // Null covers "no thread" and "not yours to act on" alike — the surface
+    // must not distinguish them, and must not render a control either way.
+    render(<CivicMap data={landscape()} onOpenBridge={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /bridge request on this join/i })).toBeNull();
   });
 
   it('disables the action while its request is in flight', () => {
+    const data = landscape({
+      merges: landscape().merges.map((saddle) => ({
+        ...saddle,
+        bridge_thread_id: 'cccccccc-3333-4333-8333-333333333333',
+      })),
+    });
     render(
       <CivicMap
-        data={landscape()}
+        data={data}
         onOpenBridge={vi.fn()}
-        pendingThreadIds={['aaaaaaaa-1111-4111-8111-111111111111']}
+        pendingThreadIds={['cccccccc-3333-4333-8333-333333333333']}
       />,
     );
     expect(screen.getByRole('button', { name: /opening/i })).toHaveAttribute(
-      'aria-disabled',
-      'true',
-    );
-    // …and only THAT target is disabled; the other side stays actionable.
-    expect(screen.getByRole('button', { name: /Council budget vote/i })).not.toHaveAttribute(
       'aria-disabled',
       'true',
     );
@@ -235,6 +238,7 @@ describe('CivicMap', () => {
           connecting_edges: 9,
           fragile: false,
           survivor: BASIN_A,
+          bridge_thread_id: null,
           shared_topics: [],
         },
       ],

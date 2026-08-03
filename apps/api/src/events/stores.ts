@@ -489,6 +489,19 @@ export interface AggregationWindowStore {
     windowStart: string,
     windowSize: AggregationWindowSize,
   ): Promise<AggregationWindowRecord | null>;
+  /**
+   * One window row for MANY items — one query, not one per item.
+   *
+   * The WS-H.7.4 landscape reads the same window for every recent story, and
+   * doing that through `get` meant up to 100 sequential indexed queries ahead of
+   * the response, multiplied by every concurrent viewer of an interactive
+   * surface. Absent items simply have no entry.
+   */
+  getManyForWindow(
+    itemIds: readonly string[],
+    windowStart: string,
+    windowSize: AggregationWindowSize,
+  ): Promise<Map<string, AggregationWindowRecord>>;
   /** Trailing windows for an item strictly before `beforeIso`, newest first. */
   listForItemBefore(
     itemId: string,
@@ -523,6 +536,19 @@ export class InMemoryAggregationWindowStore implements AggregationWindowStore {
     windowSize: AggregationWindowSize,
   ): Promise<AggregationWindowRecord | null> {
     return this.#rows.get(this.#key(itemId, windowStart, windowSize)) ?? null;
+  }
+
+  async getManyForWindow(
+    itemIds: readonly string[],
+    windowStart: string,
+    windowSize: AggregationWindowSize,
+  ): Promise<Map<string, AggregationWindowRecord>> {
+    const out = new Map<string, AggregationWindowRecord>();
+    for (const itemId of itemIds) {
+      const row = this.#rows.get(this.#key(itemId, windowStart, windowSize));
+      if (row) out.set(itemId, row);
+    }
+    return out;
   }
 
   async listForItemBefore(

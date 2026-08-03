@@ -241,18 +241,27 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
     // Delete the SHELLS; the stubs cascade with them (`room_server_id` is
     // `onDelete: cascade`). Deleting the stub alone would leave an orphan shell
     // that still says an account created a private room at time T.
-    const targets = await this.db
-      .select({ roomServerId: privateRoomStubs.roomServerId })
-      .from(privateRoomStubs)
-      .where(eq(privateRoomStubs.createdByAccountId, accountId));
-    if (targets.length === 0) return 0;
-    await this.db.delete(rooms).where(
-      inArray(
-        rooms.roomId,
-        targets.map((row) => row.roomServerId),
-      ),
-    );
-    return targets.length;
+    //
+    // Through a SUBQUERY, not an id list. Materialising every room id and
+    // expanding it through `inArray` binds one parameter per stub, so a
+    // sufficiently prolific account exceeds the driver's parameter limit — and
+    // this runs inside `runDeletionPurge`, BEFORE the tombstone, so the throw
+    // would abandon a hard deletion and do so identically on every retry. A
+    // deletion that cannot complete is the one kind that must not depend on how
+    // much the account did.
+    const deleted = await this.db
+      .delete(rooms)
+      .where(
+        inArray(
+          rooms.roomId,
+          this.db
+            .select({ roomServerId: privateRoomStubs.roomServerId })
+            .from(privateRoomStubs)
+            .where(eq(privateRoomStubs.createdByAccountId, accountId)),
+        ),
+      )
+      .returning({ roomId: rooms.roomId });
+    return deleted.length;
   }
 
   async listForAccount(accountId: string): Promise<StoredPrivateRoomStub[]> {

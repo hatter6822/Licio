@@ -37,10 +37,16 @@ function services(stories: FakeStory[], opts: { omitFromList?: string[] } = {}) 
   const omitted = new Set(opts.omitFromList ?? []);
   const events = {
     windowStore: {
-      get: (storyId: string) => {
-        const story = stories.find((s) => s.storyId === storyId);
-        return Promise.resolve(story ? { eventCount: story.events } : null);
-      },
+      // ONE read for the whole landscape — see `assembleEngagementLandscape`:
+      // a per-story `get` put a round trip per story ahead of every map load.
+      getManyForWindow: (ids: readonly string[]) =>
+        Promise.resolve(
+          new Map(
+            stories
+              .filter((s) => ids.includes(s.storyId))
+              .map((s) => [s.storyId, { eventCount: s.events }]),
+          ),
+        ),
     },
   } as unknown as Parameters<typeof buildCivicMap>[0];
   const ingestion = {
@@ -87,7 +93,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
       story('11111111-1111-4111-8111-111111111111', 10, [TOPIC_A?.id ?? '']),
       story('22222222-2222-4222-8222-222222222222', 4, [TOPIC_A?.id ?? '']),
     ]);
-    const map = await buildCivicMap(events, ingestion, NOW);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
     expect(map).not.toBe(null);
     if (!map) return;
     const basin = map.basins[0];
@@ -138,7 +144,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
       },
     ];
     const { events, ingestion } = services(mixed);
-    const map = await buildCivicMap(events, ingestion, NOW);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
     expect(map).not.toBeNull();
     expect(map?.basins.map((basin) => basin.title)).toEqual(['Busy']);
     // …and no merge, because the edge to a node outside the landscape is not an
@@ -146,12 +152,66 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(map?.merges).toEqual([]);
   });
 
+  it('offers a bridge target only where THIS caller could act', async () => {
+    // Reading the landscape is a platform-integrity power; opening a bridge
+    // request on a room's conversation is a room-steward one. Publishing every
+    // thread id rendered controls that deterministically 404.
+    const rows = [
+      {
+        storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
+        title: 'A',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 9,
+      },
+      {
+        storyId: 'bbbbbbbb-2222-4222-8222-222222222222',
+        title: 'B',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 4,
+      },
+    ];
+    const { events, ingestion } = services(rows);
+    const unauthorized = await buildCivicMap(events, ingestion, NOW, async () => false);
+    expect(unauthorized?.basins.every((basin) => basin.thread_id === null)).toBe(true);
+    expect(unauthorized?.merges.every((saddle) => saddle.bridge_thread_id === null)).toBe(true);
+
+    // …and the DEFAULT is that same closed answer, so a caller that forgets to
+    // pass an authority resolver cannot publish targets by omission.
+    const byDefault = await buildCivicMap(events, ingestion, NOW);
+    expect(byDefault?.basins.every((basin) => basin.thread_id === null)).toBe(true);
+  });
+
+  it('bridges on a CONNECTING story, not on a basin peak', async () => {
+    // Basins meet through their lower-level members: a peak about X joins a
+    // peak about Z through an X/Y story, and the join is about Y. Opening on a
+    // peak points the endpoint's SCOI baseline at a different conversation.
+    const peakX = 'aaaaaaaa-1111-4111-8111-111111111111';
+    const peakZ = 'bbbbbbbb-2222-4222-8222-222222222222';
+    const bridgeXY = 'cccccccc-3333-4333-8333-333333333333';
+    const rows = [
+      { storyId: peakX, title: 'X peak', topicIds: [TOPIC_A?.id ?? ''], events: 20 },
+      { storyId: peakZ, title: 'Z peak', topicIds: [TOPIC_B?.id ?? ''], events: 18 },
+      {
+        storyId: bridgeXY,
+        title: 'The connector',
+        topicIds: [TOPIC_A?.id ?? '', TOPIC_B?.id ?? ''],
+        events: 2,
+      },
+    ];
+    const { events, ingestion } = services(rows);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
+    const saddle = map?.merges[0];
+    expect(saddle).toBeDefined();
+    // The connector's thread, not either peak's.
+    expect(saddle?.bridge_thread_id).toBe(`thread-${bridgeXY}`);
+  });
+
   it('never surfaces the UNCLASSIFIED sentinel as a topic', async () => {
     const { events, ingestion } = services([
       story('11111111-1111-4111-8111-111111111111', 10, [UNCLASSIFIED_TOPIC_ID]),
       story('22222222-2222-4222-8222-222222222222', 4, [UNCLASSIFIED_TOPIC_ID]),
     ]);
-    const map = await buildCivicMap(events, ingestion, NOW);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
     expect(map).not.toBe(null);
     if (!map) return;
     for (const basin of map.basins) {
@@ -172,7 +232,10 @@ describe('buildCivicMap (WS-H.7.4)', () => {
       { storyId: b, title: 'Original B', topicIds: [TOPIC_A?.id ?? ''] },
     ];
     const events = {
-      windowStore: { get: () => Promise.resolve({ eventCount: 5 }) },
+      windowStore: {
+        getManyForWindow: (ids: readonly string[]) =>
+          Promise.resolve(new Map(ids.map((id) => [id, { eventCount: 5 }]))),
+      },
     } as unknown as Parameters<typeof buildCivicMap>[0];
     const busy = {
       stories: {
@@ -188,7 +251,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
           Promise.resolve(new Map(ids.map((id) => [id, { threadId: `thread-${id}` }]))),
       },
     } as unknown as Parameters<typeof buildCivicMap>[1];
-    const map = await buildCivicMap(events, busy, NOW);
+    const map = await buildCivicMap(events, busy, NOW, async () => true);
     expect(map).not.toBe(null);
     if (!map) return;
     for (const basin of map.basins) {
@@ -211,7 +274,8 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     // its peak, and with equal values the smaller id would win instead.
     const events = {
       windowStore: {
-        get: (storyId: string) => Promise.resolve({ eventCount: storyId === gone ? 20 : 3 }),
+        getManyForWindow: (ids: readonly string[]) =>
+          Promise.resolve(new Map(ids.map((id) => [id, { eventCount: id === gone ? 20 : 3 }]))),
       },
     } as unknown as Parameters<typeof buildCivicMap>[0];
     const deleting = {
@@ -231,7 +295,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
           Promise.resolve(new Map(ids.map((id) => [id, { threadId: `thread-${id}` }]))),
       },
     } as unknown as Parameters<typeof buildCivicMap>[1];
-    const map = await buildCivicMap(events, deleting, NOW);
+    const map = await buildCivicMap(events, deleting, NOW, async () => true);
     expect(map).not.toBe(null);
     if (!map) return;
     const vanished = map.basins.find((basin) => basin.basin_id === gone);
@@ -246,7 +310,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
       // Topic-isolated: it drags coverage below 1.
       story('44444444-4444-4444-8444-444444444444', 2, [TOPIC_B?.id ?? '']),
     ]);
-    const map = await buildCivicMap(events, ingestion, NOW);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
     expect(map).not.toBe(null);
     if (!map) return;
     const windowEnd = Math.floor(NOW / HOUR) * HOUR;
@@ -261,7 +325,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
       story('11111111-1111-4111-8111-111111111111', 10, [TOPIC_A?.id ?? '']),
       story('22222222-2222-4222-8222-222222222222', 4, [TOPIC_A?.id ?? '']),
     ]);
-    const map = await buildCivicMap(events, ingestion, NOW);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
     expect(map).not.toBe(null);
     if (!map) return;
     // basin_count is the peak count, and every basin is published.
