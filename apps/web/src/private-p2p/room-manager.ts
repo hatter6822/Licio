@@ -24,6 +24,7 @@ import type {
   RoomReducerState,
   SafetyNumber,
 } from '@licio/private-p2p';
+import type { StoredDirectoryStub } from './session-store.js';
 
 /**
  * The §12.3 join GRANT an admin returns from `admitJoinRequest` and the joiner feeds to
@@ -45,28 +46,23 @@ export interface JoinGrant {
     readonly signingPublicKey: string;
   }[];
   readonly archive: Uint8Array;
-  /**
-   * The §21 directory CAPABILITY, when the room registered a stub.
-   *
-   * Without it a joined device has the room and no way to reach its directory
-   * record: `room_server_id` is server-minted (nothing in the room's own state
-   * carries it), and `bootstrap_blind_id` is derived from the EPOCH-0 rendezvous
-   * key, which a device admitted at epoch N does not hold and cannot derive.  So
-   * the record could be read only by the founder — every other member would see
-   * `not_found` for a room they are in.  Absent ⇒ a `detached` room, or one
-   * whose registration never succeeded.
-   *
-   * It is a capability over commitments and bootstrap policy, not over content:
-   * it resolves a record the member is entitled to precisely because they are in
-   * the room.
-   */
-  readonly directory?: {
-    readonly roomServerId: string;
-    readonly stubId: string;
-    readonly directoryMode: 'listed' | 'unlisted';
-    readonly bootstrapBlindId: string;
-  };
 }
+
+/*
+ * The §21 directory capability is DELIBERATELY not a grant field.
+ *
+ * It rode here for one round and that was wrong. A grant is copy-pasted over an
+ * out-of-band channel and only the Welcome and the archive are cryptographically
+ * protected — everything else in the blob is plaintext to anyone who sees the
+ * message. `bootstrap_blind_id` does not rotate, so an observer would keep a
+ * capability that resolves an `unlisted` record forever, including after it is
+ * delisted, which is the state delisting exists to produce.
+ *
+ * The joiner does not need it there. It rides the HPKE-SEALED invite (§10.3),
+ * which the joiner has already opened by the time a grant exists, so
+ * `prepareJoinRequest` retains it from that invite and hands it to `finishJoin`
+ * directly. One sealed delivery, no plaintext copy.
+ */
 
 /** The result of `admitJoinRequest`: the verify verdict, plus (on success) the GRANT the
  *  admin delivers to the joiner so it can `completeJoin`. */
@@ -103,7 +99,6 @@ export function serializeJoinGrant(grant: JoinGrant): string {
     assignedDeviceId: grant.assignedDeviceId,
     bootstrapDevices: grant.bootstrapDevices,
     archive: grantBytesToB64Url(grant.archive),
-    ...(grant.directory ? { directory: grant.directory } : {}),
   });
 }
 
@@ -153,12 +148,6 @@ export function parseJoinGrant(json: string): JoinGrant | null {
     const dev = d as { deviceId: string; signingPublicKey: string };
     bootstrapDevices.push({ deviceId: dev.deviceId, signingPublicKey: dev.signingPublicKey });
   }
-  // The directory capability is OPTIONAL but not lax: a present-and-malformed
-  // one fails the whole parse. Half a capability is not a weaker capability, it
-  // is a handle that resolves nothing, and accepting it would persist a stub
-  // record whose first use is an unexplained `not_found`.
-  const directory = parseGrantDirectory(g['directory']);
-  if (directory === INVALID_DIRECTORY) return null;
   try {
     return {
       welcome: grantB64UrlToBytes(welcome),
@@ -170,38 +159,10 @@ export function parseJoinGrant(json: string): JoinGrant | null {
       assignedDeviceId,
       bootstrapDevices,
       archive: grantB64UrlToBytes(archive),
-      ...(directory ? { directory } : {}),
     };
   } catch {
     return null;
   }
-}
-
-/** Distinguishes "no directory capability" from "a malformed one". */
-const INVALID_DIRECTORY = Symbol('invalid_directory');
-
-function parseGrantDirectory(
-  value: unknown,
-): NonNullable<JoinGrant['directory']> | undefined | typeof INVALID_DIRECTORY {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'object') return INVALID_DIRECTORY;
-  const d = value as Record<string, unknown>;
-  const roomServerId = d['roomServerId'];
-  const stubId = d['stubId'];
-  const directoryMode = d['directoryMode'];
-  const bootstrapBlindId = d['bootstrapBlindId'];
-  if (
-    typeof roomServerId !== 'string' ||
-    roomServerId.length === 0 ||
-    typeof stubId !== 'string' ||
-    stubId.length === 0 ||
-    (directoryMode !== 'listed' && directoryMode !== 'unlisted') ||
-    typeof bootstrapBlindId !== 'string' ||
-    bootstrapBlindId.length === 0
-  ) {
-    return INVALID_DIRECTORY;
-  }
-  return { roomServerId, stubId, directoryMode, bootstrapBlindId };
 }
 
 import { isUpdateChannelConfigured } from '../update/config.js';
@@ -437,6 +398,18 @@ export class PrivateRoomSession {
   }
   get deviceId(): string {
     return this.session.deviceId;
+  }
+  /**
+   * This device's Ed25519 signing public key — what the §8.2 stub publishes as
+   * `room_public_key`, and therefore how a client identifies its OWN directory
+   * record among the ones its account owns.
+   *
+   * Exposed separately from `directoryStubPayload()` because reading it cannot
+   * fail: the recovery path needs it precisely when deriving the full payload
+   * did fail.
+   */
+  get signingPublicKey(): string {
+    return this.session.signingPublicKey;
   }
   /** The room's display name (from the persisted manifest). */
   get name(): string {
@@ -767,8 +740,6 @@ export class PrivateRoomSession {
    */
   async attachDirectoryStub(stub: {
     readonly roomServerId: string;
-    readonly stubId: string;
-    readonly directoryMode: 'listed' | 'unlisted';
     /** Derived from the room's EPOCH-0 rendezvous key — see the field's note on
      *  `StoredRoomSession`. Stored because later members cannot re-derive it. */
     readonly bootstrapBlindId: string;
@@ -1423,10 +1394,23 @@ export class PrivateRoomSession {
     const keyPackage = await p2p.generateMemberKeyPackage(p2p.utf8(deviceId));
     const inviteePublicKey = p2p.toBase64Url(hpke.publicKey);
     const requestedAtBucket = params.requestedAtBucket ?? coarseBucket();
+    /** Set by `complete` from the opened invite; read by `completeJoin`. */
+    let directory: StoredDirectoryStub['capability'] | undefined;
     return {
       inviteePublicKey,
       async complete(sealedInvite: string) {
         const invite = await p2p.openInvite(hpke.privateKey, hpke.publicKey, sealedInvite);
+        // RETAIN the §21 capability from the sealed invite. It is the only
+        // delivery of it this device gets, and the only one that is encrypted to
+        // this device — the grant that follows is plaintext on an out-of-band
+        // channel.
+        directory =
+          invite.room_stub_ref !== undefined && invite.bootstrap_blind_id !== undefined
+            ? {
+                roomServerId: invite.room_stub_ref,
+                bootstrapBlindId: invite.bootstrap_blind_id,
+              }
+            : undefined;
         const request = await p2p.buildJoinRequest({
           invite,
           keyPackage: keyPackage.publicPackage,
@@ -1444,6 +1428,7 @@ export class PrivateRoomSession {
           hpkePrivateKey: hpke.privateKey,
           hpkePublicKey: hpke.publicKey,
           ...(params.createStorage ? { createStorage: params.createStorage } : {}),
+          ...(directory ? { directory } : {}),
         });
       },
     };
@@ -1602,15 +1587,6 @@ export class PrivateRoomSession {
         .filter((d) => !d.removed)
         .map((d) => ({ deviceId: d.deviceId, signingPublicKey: d.signingPublicKey })),
       archive,
-      // Hand the directory capability ON. A member who cannot resolve the room's
-      // directory record cannot bootstrap from it, update it, or even see that
-      // it exists — and the founder is not always the one who is around later.
-      // The CAPABILITY only, named field by field rather than spread: a spread
-      // would carry whatever local bookkeeping the stored handle grows next,
-      // and this blob goes to somebody else's account.
-      ...(this.session.directoryStub
-        ? { directory: { ...this.session.directoryStub.capability } }
-        : {}),
     };
     // The admit fully succeeded — charge this join against the invite so a
     // single-use invite cannot be replayed for a second member (persisted AFTER
@@ -1636,6 +1612,9 @@ export class PrivateRoomSession {
       readonly hpkePrivateKey: CryptoKey;
       readonly hpkePublicKey: Uint8Array;
       readonly createStorage?: (roomId: string) => PrivateRoomStorage;
+      /** The §21 capability, from the HPKE-SEALED invite this joiner opened —
+       *  never from the plaintext grant. */
+      readonly directory?: StoredDirectoryStub['capability'];
     },
   ): Promise<PrivateRoomSession> {
     await ensurePrivateBundleTrusted();
@@ -1698,7 +1677,7 @@ export class PrivateRoomSession {
       bootstrapDevices: grant.bootstrapDevices,
       ...(base ? { snapshotBase: base } : {}),
       createdAtBucket: coarseBucket(),
-      ...(grant.directory ? { directoryStub: { capability: grant.directory } } : {}),
+      ...(joiner.directory ? { directoryStub: { capability: joiner.directory } } : {}),
     };
     await putRoomSession(session);
     return new PrivateRoomSession(p2p, engine, session, DEFAULT_COMPACT_EVERY_OPS);

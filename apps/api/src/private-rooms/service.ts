@@ -138,6 +138,9 @@ export interface DirectoryPage {
   readonly next_cursor: string | null;
 }
 
+/** How many stubs one owner-scoped read fetches at a time. */
+export const ACCOUNT_STUB_PAGE = 50;
+
 /** The largest page the directory will serve, and its default. */
 export const DIRECTORY_MAX_LIMIT = 50;
 export const DIRECTORY_DEFAULT_LIMIT = 20;
@@ -392,17 +395,21 @@ export class PrivateRoomStubService {
     // targeting an already-unlisted stub gets the same `not_found` an unknown
     // room does — no oracle, no projection.
     if (!owner && stub.directoryMode !== 'listed') return { ok: false, reason: 'not_found' };
-    const next = await this.store.delist(roomServerId);
+    // The staff arm's write is CONDITIONAL on the record still being listed, so
+    // the write itself decides whether staff authority was used.
+    //
+    // Reading the mode and then writing are two moments: the owner can delist in
+    // between, and the idempotent write would still succeed — attributing to
+    // staff a demotion the owner had already performed, in a tamper-evident
+    // trail. A conditional write that matches nothing answers `not_found`, which
+    // is what a non-owner already gets for a record that is not listed.
+    const next = await this.store.delist(roomServerId, { requireListed: !owner });
     if (!next) return { ok: false, reason: 'not_found' };
     this.#metrics.delisted += 1;
     // Whether STAFF AUTHORITY was actually used — not whether the caller holds
     // it. A creator who is also an admin takes the owner arm, and an audit
-    // saying staff acted against somebody else's record would be false. Nor was
-    // anything demoted if the record was already `unlisted`: an idempotent owner
-    // delist is a no-op, and recording `listed → unlisted` for it would put a
-    // transition that did not happen into a tamper-evident trail.
-    const staffAction = !owner && stub.directoryMode === 'listed';
-    return { ok: true, value: { ...this.#project(next), staff_action: staffAction } };
+    // saying staff acted against somebody else's record would be false.
+    return { ok: true, value: { ...this.#project(next), staff_action: !owner } };
   }
 
   /**
@@ -478,8 +485,27 @@ export class PrivateRoomStubService {
    * including `signed_stub`, which the account's own device authored.
    */
   async exportForAccount(accountId: string): Promise<AccountStubExport[]> {
-    const stubs = await this.store.listForAccount(accountId);
-    return stubs.map((stub) => ({
+    // COMPLETE, by iterating bounded pages — an Art. 15 archive that truncates
+    // is not an archive, and a single unpaged read of an unbounded set is the
+    // amplification path `/mine` pages away from.
+    const stubs: StoredPrivateRoomStub[] = [];
+    let cursor: { createdAt: string; stubId: string } | undefined;
+    for (;;) {
+      const page = await this.store.listForAccount(accountId, {
+        limit: ACCOUNT_STUB_PAGE,
+        ...(cursor ? { cursor } : {}),
+      });
+      stubs.push(...page);
+      const last = page.at(-1);
+      if (page.length < ACCOUNT_STUB_PAGE || !last) break;
+      cursor = { createdAt: last.createdAt, stubId: last.stubId };
+    }
+    return stubs.map((stub) => this.#exportRow(stub));
+  }
+
+  /** The owner projection, shared by the export and the paged `/mine` read. */
+  #exportRow(stub: StoredPrivateRoomStub): AccountStubExport {
+    return {
       room_server_id: stub.roomServerId,
       stub_id: stub.stubId,
       directory_mode: stub.directoryMode,
@@ -496,7 +522,36 @@ export class PrivateRoomStubService {
       bootstrap_blind_id: stub.bootstrapBlindId,
       created_at: stub.createdAt,
       updated_at: stub.updatedAt,
-    }));
+    };
+  }
+
+  /**
+   * One PAGE of the stubs this account created — the `/mine` read.
+   *
+   * Paged for the reason the export is not: `/mine` is a client-polled endpoint
+   * and an account's stub count has no lifetime bound, so serving the whole set
+   * per request is a response-amplification path. The export iterates these
+   * pages to completion instead.
+   */
+  async listForAccountPage(
+    accountId: string,
+    options: { readonly limit?: number; readonly cursor?: string } = {},
+  ): Promise<{ stubs: AccountStubExport[]; next_cursor: string | null }> {
+    const limit = Math.min(
+      Math.max(1, Math.trunc(options.limit ?? ACCOUNT_STUB_PAGE)),
+      ACCOUNT_STUB_PAGE,
+    );
+    const cursor = parseDirectoryCursor(options.cursor);
+    const rows = await this.store.listForAccount(accountId, {
+      limit: limit + 1,
+      ...(cursor ? { cursor } : {}),
+    });
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      stubs: page.map((stub) => this.#exportRow(stub)),
+      next_cursor: rows.length > limit && last ? `${last.createdAt}|${last.stubId}` : null,
+    };
   }
 
   /** A snapshot of the aggregate-only counters (no room identity). */

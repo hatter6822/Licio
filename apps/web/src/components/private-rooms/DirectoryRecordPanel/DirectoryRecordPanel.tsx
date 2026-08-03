@@ -3,11 +3,15 @@
 // WS-S.7.4 / PRIVATE_SPEC §21.2–§21.4 — what Licio publishes about this room,
 // and the controls for changing it.
 //
-// This is the surface the §21.3/§21.4 client calls existed for.  Without it the
-// directory record was write-once at creation: a member could see the room was
-// registered and had no way to read what the server actually serves, refresh the
-// manifest commitment a bootstrapping peer verifies against, stop advertising a
-// listed name, or remove the record.
+// This is the surface the §21.1/§21.3/§21.4 client calls existed for.  Without
+// it the directory record was write-once at creation: a member could see the
+// room was registered and had no way to read what the server actually serves,
+// refresh the manifest commitment a bootstrapping peer verifies against, stop
+// advertising a listed name, remove the record — or, once it was gone, ever have
+// another, since REGISTRATION lived only inside the creation wizard.  That last
+// gap is why the panel renders for a room with no record at all rather than
+// returning null: a `detached` room, or one whose record was removed, is exactly
+// the case with something to offer.
 //
 // It resolves the record through the STORED capability (`room_server_id` +
 // `bootstrap_blind_id`, carried through the §12.3 join grant), which is the only
@@ -25,8 +29,10 @@
 
 import { useCallback, useEffect, useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { ApiClientError } from '../../../lib/api.js';
 import {
   type BootstrapStub,
+  createPrivateRoomStub,
   deletePrivateRoomStub,
   delistPrivateRoomStub,
   fetchPrivateRoomBootstrap,
@@ -34,6 +40,7 @@ import {
   updatePrivateRoomStub,
 } from '../../../lib/private-rooms-api.js';
 import type { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
+import { useAuthStore } from '../../../stores/auth.js';
 import { Button } from '../../ui/Button/index.js';
 import { Card } from '../../ui/Card/index.js';
 
@@ -41,7 +48,16 @@ export interface DirectoryRecordPanelProps {
   session: PrivateRoomSession;
 }
 
-type Action = 'refresh' | 'push' | 'delist' | 'remove' | null;
+type Action = 'refresh' | 'push' | 'delist' | 'remove' | 'register' | null;
+
+/** What the server currently holds for this room, as far as this panel knows. */
+type RecordState =
+  | { kind: 'reading' }
+  | { kind: 'present'; record: BootstrapStub }
+  /** No record — never registered, or one this device's handle outlived. */
+  | { kind: 'absent' }
+  /** The read failed for a reason that is NOT "there is nothing there". */
+  | { kind: 'unreadable' };
 
 export function DirectoryRecordPanel({
   session,
@@ -59,7 +75,7 @@ export function DirectoryRecordPanel({
   // the owning account opening the room through a grant on a second device does
   // not. Only the server knows, and it now says: `GET /v1/private-rooms/mine`.
   const [owned, setOwned] = useState(false);
-  const [record, setRecord] = useState<BootstrapStub | null>(null);
+  const [state, setState] = useState<RecordState>({ kind: 'reading' });
   const [removed, setRemoved] = useState<string | null>(null);
   const [busy, setBusy] = useState<Action>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,31 +83,53 @@ export function DirectoryRecordPanel({
 
   const roomServerId = stub?.roomServerId;
   const token = stub?.bootstrapBlindId;
+  /** Ownership is per ACCOUNT, so the lookup is keyed to the signed-in one. */
+  const accountId = useAuthStore((auth) => auth.user?.id ?? null);
 
   const read = useCallback(async (): Promise<void> => {
-    if (roomServerId === undefined || token === undefined) return;
+    if (roomServerId === undefined || token === undefined) {
+      setState({ kind: 'absent' });
+      return;
+    }
     setBusy('refresh');
     setError(null);
     try {
-      setRecord(await fetchPrivateRoomBootstrap(roomServerId, token));
-    } catch {
-      setError(
-        t(
-          'privateRoom.record.readError',
-          'Could not read Licio’s record for this room. It may have been removed.',
-        ),
-      );
+      setState({ kind: 'present', record: await fetchPrivateRoomBootstrap(roomServerId, token) });
+    } catch (err) {
+      // A 404 is DECISIVE: §21.2 collapses unknown-room, wrong-token and
+      // malformed-id into it, so with a capability in hand it means the record
+      // is gone. That is the state a re-registration answers — and it is also
+      // permission to drop the local handle, which is otherwise unrepairable
+      // (a retry of DELETE stops at the same 404 before reaching the cleanup).
+      const status = err instanceof ApiClientError ? err.status : undefined;
+      if (status === 404) {
+        setState({ kind: 'absent' });
+        await session.clearDirectoryStub();
+      } else {
+        setState({ kind: 'unreadable' });
+        setError(
+          t(
+            'privateRoom.record.readError',
+            'Could not read Licio’s record for this room right now. That is about the connection, not the record.',
+          ),
+        );
+      }
     } finally {
       setBusy(null);
     }
-  }, [roomServerId, token, t]);
+  }, [roomServerId, token, t, session]);
 
   useEffect(() => {
     void read();
   }, [read]);
 
   useEffect(() => {
-    if (roomServerId === undefined) return;
+    // RESET first, then ask. The answer belongs to `accountId`, so a sign-out or
+    // an account switch must not leave the previous account's verdict standing —
+    // a private-room session outlives a session, so both directions happen:
+    // B inheriting A's controls, and the owner losing their own.
+    setOwned(false);
+    if (roomServerId === undefined || accountId === null) return;
     let live = true;
     // Fail CLOSED: an unanswerable ownership question hides the controls rather
     // than offering ones that would 403.
@@ -105,12 +143,9 @@ export function DirectoryRecordPanel({
     return () => {
       live = false;
     };
-  }, [roomServerId]);
+  }, [roomServerId, accountId]);
 
-  // A `detached` room, or one whose registration never succeeded, has no record
-  // to show — and inventing an empty one would suggest there is something here
-  // to manage.
-  if (stub === undefined) return null;
+  const record = state.kind === 'present' ? state.record : null;
 
   async function run(action: Exclude<Action, null>, work: () => Promise<void>): Promise<void> {
     setBusy(action);
@@ -142,6 +177,61 @@ export function DirectoryRecordPanel({
           <p className="text-ink-muted text-sm" role="status">
             {removed}
           </p>
+        ) : state.kind === 'absent' ? (
+          <div className="flex flex-col gap-2">
+            <p className="text-ink-muted text-sm">
+              {t(
+                'privateRoom.record.none',
+                'Licio holds no record of this room. Members can only join through an invite you deliver yourself.',
+              )}
+            </p>
+            {/* THE RE-REGISTRATION PATH.
+                Without it a room whose record is gone — deleted, or dropped by
+                the §21.2 capability migration — could never have another, since
+                registration existed only inside the creation wizard. It also
+                closes a gap that predates all of that: a `detached` room had no
+                way to become reachable by id.
+
+                UNLISTED only. Publishing a public name is a create-time decision
+                by §21.3 (mode is not patchable, so a listed record cannot be
+                demoted-then-restored by accident), and a bootstrap pointer is
+                what makes an invite resolve — which is the thing that was
+                lost. */}
+            <div>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={busy !== null}
+                onClick={() =>
+                  void run('register', async () => {
+                    const payload = await session.directoryStubPayload();
+                    const created = await createPrivateRoomStub({
+                      directoryMode: 'unlisted',
+                      rendezvousPolicy: 'licio_blind',
+                      signedStub: payload.signedStub,
+                      stubSignature: payload.stubSignature,
+                      bootstrapBlindId: payload.bootstrapBlindId,
+                    });
+                    await session.attachDirectoryStub({
+                      roomServerId: created.room_server_id,
+                      bootstrapBlindId: payload.bootstrapBlindId,
+                    });
+                    setStatus(
+                      t(
+                        'privateRoom.record.registered',
+                        'Licio now holds a bootstrap record for this room. New invites can use it.',
+                      ),
+                    );
+                    await read();
+                  })
+                }
+              >
+                {busy === 'register'
+                  ? t('privateRoom.record.registering', 'Registering…')
+                  : t('privateRoom.record.register', 'Let Licio store a bootstrap record')}
+              </Button>
+            </div>
+          </div>
         ) : (
           <>
             <dl className="flex flex-col gap-1 text-xs">
@@ -167,11 +257,11 @@ export function DirectoryRecordPanel({
               ) : null}
               <div className="flex gap-2">
                 <dt className="text-ink-muted">{t('privateRoom.record.id', 'Room record id')}</dt>
-                <dd className="break-all font-mono">{stub.roomServerId}</dd>
+                <dd className="break-all font-mono">{roomServerId}</dd>
               </div>
             </dl>
 
-            {owned ? (
+            {owned && record !== null ? (
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
@@ -183,12 +273,12 @@ export function DirectoryRecordPanel({
                       // manifest against. It goes stale on every manifest change,
                       // and a stale one makes an honest peer look wrong.
                       const payload = await session.directoryStubPayload();
-                      const next = await updatePrivateRoomStub(stub.roomServerId, {
+                      const next = await updatePrivateRoomStub(roomServerId ?? '', {
                         latestManifestCommitment: payload.manifestKeyCommitment,
                         signedStub: payload.signedStub,
                         stubSignature: payload.stubSignature,
                       });
-                      setRecord(next);
+                      setState({ kind: 'present', record: next });
                       setStatus(
                         t('privateRoom.record.pushed', 'Updated the record’s manifest commitment.'),
                       );
@@ -207,8 +297,8 @@ export function DirectoryRecordPanel({
                     disabled={busy !== null}
                     onClick={() =>
                       void run('delist', async () => {
-                        const next = await delistPrivateRoomStub(stub.roomServerId);
-                        setRecord(next);
+                        const next = await delistPrivateRoomStub(roomServerId ?? '');
+                        setState({ kind: 'present', record: next });
                         setStatus(
                           t(
                             'privateRoom.record.delisted',
@@ -230,11 +320,17 @@ export function DirectoryRecordPanel({
                   disabled={busy !== null}
                   onClick={() =>
                     void run('remove', async () => {
-                      const result = await deletePrivateRoomStub(stub.roomServerId);
+                      const result = await deletePrivateRoomStub(roomServerId ?? '');
                       // FORGET the handle with the record. Left behind it would
                       // survive a reload as a pointer to nothing — and the next
-                      // admit would copy it into a joiner's grant, handing a new
-                      // member a capability whose first use is an unexplained 404.
+                      // invite would carry it, handing a new member a capability
+                      // whose first use is an unexplained 404.
+                      //
+                      // If THIS write fails the action reports failure, and a
+                      // retry cannot repair it: the second DELETE stops at the
+                      // server's 404 first. The read path handles that — a 404
+                      // with a capability in hand is decisive, so it clears the
+                      // handle itself. The repair is a reload, not a dead end.
                       await session.clearDirectoryStub();
                       // The SERVER's own wording, not ours: it is the sentence
                       // §21.4 requires, and rephrasing it here is how "removed

@@ -150,6 +150,22 @@ function layout(data: CivicMapResponse): { stems: Stem[]; joins: Join[]; drawn: 
   return { stems, joins, drawn: basins.length };
 }
 
+/**
+ * The window's own bounds, rendered.
+ *
+ * The sweep reads the LAST COMPLETED hour — `floor(now/1h) - 1h` — so at 12:30
+ * the response describes 11:00–12:00 while the copy said "this hour". An
+ * analyst attributing a previous-window cluster to current activity is the kind
+ * of error a live surface must not invite, and the response already carries the
+ * exact interval, so it is rendered rather than described.
+ */
+function hourLabel(iso: string): string {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime())
+    ? iso
+    : at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
 /** How a join is named back to the caller of `onOpenBridge` — the two basins,
  *  since the bridge target is a connecting conversation rather than either. */
 function joinLabel(
@@ -190,7 +206,8 @@ export function CivicMap({
         <p className="text-ink-muted text-xs">
           {t(
             'civicMap.help',
-            'How attention is grouping across topic-adjacent stories this hour. Basins are clusters; a fragile join means two clusters are held together by very little, and a bridging comment would help.',
+            'How attention grouped across topic-adjacent stories between {from} and {to}. Basins are clusters; a fragile join means two clusters are held together by very little, and a bridging comment would help.',
+            { from: hourLabel(data.window.start), to: hourLabel(data.window.end) },
           )}
         </p>
       </div>

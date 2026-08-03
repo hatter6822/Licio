@@ -116,8 +116,6 @@ describe('JoinPanel — the §21.2 pre-join directory check', () => {
     const payload = await admin.directoryStubPayload();
     await admin.attachDirectoryStub({
       roomServerId: '11111111-1111-4111-8111-111111111111',
-      stubId: '22222222-2222-4222-8222-222222222222',
-      directoryMode: 'listed',
       bootstrapBlindId: payload.bootstrapBlindId,
     });
     return payload.roomPublicKey;

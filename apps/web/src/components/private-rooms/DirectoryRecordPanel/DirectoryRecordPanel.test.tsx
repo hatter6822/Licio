@@ -13,8 +13,9 @@
 import 'fake-indexeddb/auto';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
+import { useAuthStore } from '../../../stores/auth.js';
 import { checkA11y } from '../../../test/axe.js';
 import { DirectoryRecordPanel } from './DirectoryRecordPanel.js';
 
@@ -51,7 +52,17 @@ function sessionDouble(
     | undefined,
 ): PrivateRoomSession {
   return {
-    directoryStub: stub === undefined ? undefined : { capability: stub },
+    directoryStub:
+      stub === undefined
+        ? undefined
+        : {
+            capability: {
+              roomServerId: stub.roomServerId,
+              bootstrapBlindId: stub.bootstrapBlindId,
+            },
+          },
+    attachDirectoryStub: async () => {},
+    name: 'Neighbourhood watch',
     clearDirectoryStub: async () => {},
     directoryStubPayload: async () => ({
       roomPublicKey: 'cm9vbS1rZXk',
@@ -91,6 +102,7 @@ function mockApi(handler: (url: string, init?: RequestInit) => unknown): void {
                   },
                 ]
               : [],
+            next_cursor: null,
           }
         : handler(url, init);
     return new Response(JSON.stringify(body), {
@@ -100,8 +112,14 @@ function mockApi(handler: (url: string, init?: RequestInit) => unknown): void {
   });
 }
 
+beforeEach(() => {
+  // Ownership is per ACCOUNT now, so the panel's controls need a signed-in one.
+  useAuthStore.setState({ status: 'authenticated', user: { id: 'u1' } } as never);
+});
+
 afterEach(() => {
   ownsRecord = true;
+  useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
   vi.restoreAllMocks();
 });
 
@@ -120,10 +138,38 @@ describe('DirectoryRecordPanel', () => {
     expect(seen.some((url) => url.includes(`token=${TOKEN}`))).toBe(true);
   });
 
-  it('renders nothing for a room with no directory record', () => {
-    mockApi(() => bootstrapBody());
-    const { container } = render(<DirectoryRecordPanel session={sessionDouble(undefined)} />);
-    expect(container).toBeEmptyDOMElement();
+  it('offers REGISTRATION for a room with no directory record', async () => {
+    // Registration used to live only in the creation wizard, so a room whose
+    // record was removed — or a `detached` room that never had one — could
+    // never get one again.
+    mockApi(() => ({
+      room_server_id: ROOM_SERVER_ID,
+      stub_id: STUB.stubId,
+      bootstrap_endpoints: [],
+      created_at: '2026-08-02T00:00:00.000Z',
+    }));
+    render(<DirectoryRecordPanel session={sessionDouble(undefined)} />);
+    expect(await screen.findByText(/Licio holds no record of this room/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /store a bootstrap record/i }));
+    expect(await screen.findByRole('status')).toHaveTextContent(/now holds a bootstrap record/i);
+  });
+
+  it('clears a handle whose record is GONE, so a failed cleanup is repairable', async () => {
+    // If DELETE commits and the local clear fails, a retry cannot repair it —
+    // the second DELETE stops at the server's 404 first. The read path treats a
+    // 404 with a capability in hand as decisive and clears the handle itself.
+    const cleared = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'not_found', message: 'gone' } }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const session = sessionDouble(STUB);
+    (session as unknown as { clearDirectoryStub: unknown }).clearDirectoryStub = cleared;
+    render(<DirectoryRecordPanel session={session} />);
+    await waitFor(() => expect(cleared).toHaveBeenCalled());
+    expect(await screen.findByText(/Licio holds no record of this room/i)).toBeInTheDocument();
   });
 
   it('says delisting KEEPS the record resolvable', async () => {

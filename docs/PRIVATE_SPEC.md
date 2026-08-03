@@ -667,12 +667,23 @@ type InviteSecretV1 = {
 ```
 
 The two directory fields travel together and only for a room that registered a
-stub. They ride the SEALED invite rather than the §12.3 grant because the
-recipient needs them BEFORE being admitted: an `unlisted` record answers
+stub. They ride the SEALED invite rather than the §12.3 grant for two reasons.
+
+The recipient needs them BEFORE being admitted: an `unlisted` record answers
 `not_found` to any reader without the token, so an invitee who received the
 capability only after admission could not check what Licio publishes about the
 room they were being asked to enter, and a `listed` room's public name would
 reach them last rather than first.
+
+And a grant is the wrong CARRIER. It is copy-pasted over an out-of-band channel
+and only its Welcome and archive are cryptographically protected — every other
+field is plaintext to whoever sees the message. `bootstrap_blind_id` does not
+rotate, so an observer of that channel would hold a capability resolving an
+`unlisted` record forever, including after a delist. The invite is HPKE-sealed
+to one recipient and lives only in a URL fragment, so it is the one delivery
+that keeps the capability to the member it was issued to. A joiner therefore
+retains the fields from the invite it has already opened, and the grant carries
+none.
 
 What resolving the record establishes, and what it does not, is worth stating
 because a client's copy must not overclaim. It establishes that the record

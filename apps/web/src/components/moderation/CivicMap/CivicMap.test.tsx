@@ -255,6 +255,19 @@ describe('CivicMap', () => {
     expect(screen.getByText(/join by 2 connections.*fragile/)).toBeInTheDocument();
   });
 
+  it('names the window it swept instead of calling it “this hour”', () => {
+    // The sweep reads the LAST COMPLETED hour, so at 12:30 the response
+    // describes 11:00–12:00. Saying "this hour" invites an analyst to attribute
+    // a previous-window cluster to current activity.
+    render(<CivicMap data={landscape()} />);
+    expect(screen.queryByText(/this hour/i)).toBeNull();
+    const from = new Date('2026-08-02T10:00:00.000Z').toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    expect(screen.getByText(new RegExp(from.replace(/\s/g, '\\s')))).toBeInTheDocument();
+  });
+
   it('has no accessibility violations', async () => {
     const { container } = render(<CivicMap data={landscape()} onOpenBridge={vi.fn()} />);
     await checkA11y(container);

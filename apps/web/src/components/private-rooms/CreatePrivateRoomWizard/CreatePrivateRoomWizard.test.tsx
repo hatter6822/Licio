@@ -192,6 +192,7 @@ describe('CreatePrivateRoomWizard', () => {
                   signed_stub: {},
                 },
               ],
+              next_cursor: null,
             }
           : init?.method === 'DELETE'
             ? { removed: true, removed_what: 'licio_directory_record', message: 'Removed.' }
@@ -331,6 +332,36 @@ describe('CreatePrivateRoomWizard', () => {
       useAuthStore.setState({ status: 'session-expired', user: null } as never);
     });
     expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(/Nobody/i);
+  });
+
+  it('keeps a payload failure on the DIRECTORY path, not the creation path', async () => {
+    // The room is already persisted by the time the stub body is derived, so a
+    // signing failure reported as "could not create the room" leaves the form
+    // retryable and the user makes a SECOND local room.
+    const payloadSpy = vi
+      .spyOn(PrivateRoomSession.prototype, 'directoryStubPayload')
+      .mockRejectedValue(new Error('key derivation failed'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    try {
+      const user = userEvent.setup();
+      const onCreated = vi.fn();
+      render(<CreatePrivateRoomWizard onCreated={onCreated} />);
+      await user.type(screen.getByLabelText(/room name/i), 'Signing Fails');
+      for (const ack of PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS) {
+        await user.click(screen.getByLabelText(ack.label));
+      }
+      await user.click(screen.getByRole('button', { name: /create private room/i }));
+
+      expect(await screen.findByText(/could not save its directory record/i)).toBeInTheDocument();
+      // …NOT the creation error, and the room stays reachable.
+      expect(screen.queryByText(/Could not create the room on this device/i)).toBeNull();
+      expect(screen.getByRole('button', { name: /open the room anyway/i })).toBeInTheDocument();
+      // Nothing was POSTed, so there is nothing to reconcile either.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      payloadSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
   });
 
   it('has no accessibility violations', async () => {

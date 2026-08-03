@@ -208,14 +208,21 @@ room view's "Manage members & verify devices" toggle, all jsdom + axe tested):
   admin admit side (`admitJoinRequest`: `verifyJoinRequest` → `inviteDevice` (MLS
   Add) → `buildMemberAddOp` carrying `proposed_display_name`, persisting the
   advanced group + new epoch keys), surfacing every rejection
-  (expired/exhausted/invite-id/proof/key-package) honestly.  The §12.3 grant also
-  CARRIES the §21 directory capability (`room_server_id` + the epoch-0-derived
-  `bootstrap_blind_id`), which is the only way a member admitted at a later epoch
-  can resolve the room's directory record at all — it cannot re-derive a token
-  bound to an epoch key it never held.
-- `DirectoryRecordPanel` (§21.2–§21.4) reads that record with the stored
-  capability and, for an admin, refreshes its manifest commitment, delists it, or
-  removes it — the §21.3/§21.4 client calls' first production caller.  It renders
+  (expired/exhausted/invite-id/proof/key-package) honestly.  The §10.3 SEALED
+  invite also CARRIES the §21 directory capability (`room_stub_ref` + the
+  epoch-0-derived `bootstrap_blind_id`), which is the only way a member admitted
+  at a later epoch can resolve the room's directory record at all — it cannot
+  re-derive a token bound to an epoch key it never held.  It rides the invite
+  and NOT the §12.3 grant: a grant is copy-pasted plaintext apart from its
+  Welcome and archive, and this token does not rotate, so an observer of that
+  channel would keep a handle resolving an `unlisted` record forever.  The
+  joiner retains it from the invite it opened.
+- `DirectoryRecordPanel` (§21.1–§21.4) reads that record with the stored
+  capability and, for the OWNING ACCOUNT (resolved through
+  `GET /v1/private-rooms/mine`, never from a room role or a device-local flag),
+  refreshes its manifest commitment, delists it, removes it — or REGISTERS one
+  where there is none, which is what makes a `detached` room reachable by id and
+  what gives a removed record a way back.  It renders
   NOTHING for a room with no stub (a `detached` room has nothing to manage), and
   the removal confirmation reads back the server's own wording, because
   "removed Licio's record" quietly becoming "deleted the room" is exactly the

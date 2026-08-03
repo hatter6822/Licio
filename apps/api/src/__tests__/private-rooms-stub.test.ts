@@ -446,6 +446,21 @@ describe('delist — what the audit trail is told', () => {
     expect(again.ok && again.value.staff_action).toBe(false);
   });
 
+  it('does not attribute to staff a delist the owner performed first', async () => {
+    // The staff arm's write is conditional on the record still being LISTED, so
+    // the write decides — a read moments earlier can observe `listed` while the
+    // owner delists in between, and an idempotent write would then succeed and
+    // be recorded as staff moderation of a transition somebody else made.
+    const svc = freshService();
+    const listed = await svc.create(listedRequest(), ACCOUNT);
+    if (!listed.ok) throw new Error('create failed');
+    await svc.delist(listed.value.room_server_id, ACCOUNT);
+    const staff = await svc.delist(listed.value.room_server_id, OTHER_ACCOUNT, { staff: true });
+    // Same `not_found` a non-owner already gets for a record that is not listed.
+    expect(staff.ok).toBe(false);
+    expect(staff.ok === false && staff.reason).toBe('not_found');
+  });
+
   it('reports staff_action for a non-owner acting on a listed record', async () => {
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);
@@ -563,6 +578,30 @@ describe('§4.2 directory — a listed room is one that can actually be found', 
     setPrivateRoomStubService(freshService());
     const res = await createApp().request('/v1/private-rooms/directory?limit=5000');
     expect(res.status).toBe(400);
+  });
+});
+
+describe('owner reads — paged, and complete where completeness is the point', () => {
+  it('pages `/mine` while the EXPORT still returns everything', async () => {
+    const svc = freshService();
+    for (let i = 0; i < 3; i += 1) await svc.create(listedRequest(), ACCOUNT);
+
+    const first = await svc.listForAccountPage(ACCOUNT, { limit: 2 });
+    expect(first.stubs).toHaveLength(2);
+    expect(first.next_cursor).not.toBeNull();
+
+    const seen = first.stubs.map((stub) => stub.room_server_id);
+    let cursor = first.next_cursor;
+    while (cursor !== null) {
+      const page = await svc.listForAccountPage(ACCOUNT, { limit: 2, cursor });
+      seen.push(...page.stubs.map((stub) => stub.room_server_id));
+      cursor = page.next_cursor;
+    }
+    expect(new Set(seen).size).toBe(3);
+
+    // The Art. 15 archive iterates those pages to completion: an export that
+    // truncates is not an export.
+    expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(3);
   });
 });
 

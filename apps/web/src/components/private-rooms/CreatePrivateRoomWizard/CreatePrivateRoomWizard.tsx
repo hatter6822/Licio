@@ -137,11 +137,24 @@ export function CreatePrivateRoomWizard({
         // could never address — publicly enumerable, if it was listed. The
         // catch reconciles against the server instead of rolling back from what
         // this client happens to be holding.
-        // Hoisted so the failure path can identify OUR record on the server by
-        // the room's own signing key, whatever stage the failure happened at.
-        const payload = await session.directoryStubPayload();
+        // INSIDE the try, because the room already exists by now.
+        //
+        // Deriving and signing the stub body can fail — key derivation, a
+        // signature — and hoisting it out to give the catch a `roomPublicKey`
+        // put that failure in the OUTER handler, which reports "could not create
+        // the room on this device" and leaves the form retryable. The room WAS
+        // created; a user retrying makes a second one. The directory step is
+        // best-effort by design, and every part of it belongs on that path.
+        //
+        // The signing key is read separately, before the try, so the catch can
+        // still identify OUR record on the server — that read cannot fail.
+        const roomPublicKey = session.signingPublicKey;
         let created: Awaited<ReturnType<typeof createPrivateRoomStub>> | null = null;
+        /** Did a request actually go out? Nothing to reconcile if it did not. */
+        let posted = false;
         try {
+          const payload = await session.directoryStubPayload();
+          posted = true;
           created = await createPrivateRoomStub({
             directoryMode: directory,
             // Display metadata is `listed`-only — the server REFUSES it on an
@@ -159,11 +172,9 @@ export function CreatePrivateRoomWizard({
           // could ever reach or remove.
           await session.attachDirectoryStub({
             roomServerId: created.room_server_id,
-            stubId: created.stub_id,
-            directoryMode: directory,
             // Stored, not re-derived later: it comes from the EPOCH-0 rendezvous
             // key, so a member admitted at a later epoch could never compute it —
-            // this copy is what the join grant hands on.
+            // this copy is what a sealed invite hands on.
             bootstrapBlindId: payload.bootstrapBlindId,
           });
         } catch (error) {
@@ -196,14 +207,16 @@ export function CreatePrivateRoomWizard({
           // Whether we KNOW something is out there, which decides how loudly a
           // failed reconciliation speaks (see the catch below).
           const knownCommitted = created !== null || (status !== undefined && status >= 500);
-          if (!serverRefused) {
+          // Nothing was sent if the body could not be built, so there is no
+          // record anywhere to reconcile against.
+          if (posted && !serverRefused) {
             try {
               // The room's founder signing key identifies OUR record among the
               // account's: the local session knows it, and it is what the room
               // signed. This is why the owner lookup exists — without it, a lost
               // response left a record nobody could ever address.
               const mine = await listMyPrivateRoomStubs();
-              const ours = mine.filter((stub) => stub.room_public_key === payload.roomPublicKey);
+              const ours = mine.filter((stub) => stub.room_public_key === roomPublicKey);
               for (const stub of ours) await deletePrivateRoomStub(stub.room_server_id);
             } catch {
               // The reconcile read failed too. Escalate the copy only when a

@@ -253,7 +253,7 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
   });
 });
 
-describe('§21 directory capability carried through the join (WS-S.1.2b)', () => {
+describe('§21 directory capability carried through the SEALED invite (WS-S.1.2b)', () => {
   it('hands the joiner a working directory handle it could never derive itself', async () => {
     const mkStore = await storeFactory();
     const founder = await PrivateRoomSession.create({
@@ -263,15 +263,12 @@ describe('§21 directory capability carried through the join (WS-S.1.2b)', () =>
       founderDeviceId: 'my-dev',
       createStorage: mkStore as (roomId: string) => never,
     });
-    // The founder registers the room's directory stub. `bootstrapBlindId` comes
-    // from the EPOCH-0 rendezvous key — the joiner is admitted at epoch 1 and
-    // never holds epoch 0, so without this being carried it cannot be re-derived
-    // on the other side at all.
+    // `bootstrapBlindId` comes from the room's EPOCH-0 rendezvous key, and the
+    // joiner is admitted at epoch 1 — it never holds epoch 0 and cannot derive
+    // this on the other side at all.
     const payload = await founder.directoryStubPayload();
     await founder.attachDirectoryStub({
       roomServerId: '11111111-1111-4111-8111-111111111111',
-      stubId: '22222222-2222-4222-8222-222222222222',
-      directoryMode: 'listed',
       bootstrapBlindId: payload.bootstrapBlindId,
     });
 
@@ -288,82 +285,18 @@ describe('§21 directory capability carried through the join (WS-S.1.2b)', () =>
     const { grant } = await founder.admitJoinRequest(invite, request);
     if (!grant) throw new Error('expected a grant');
 
-    // It survives the JSON round trip the admin actually uses to deliver it.
-    const roundTripped = parseJoinGrant(serializeJoinGrant(grant));
-    if (!roundTripped) throw new Error('grant did not round-trip');
-    expect(roundTripped.directory).toEqual({
+    // The GRANT carries no capability at all — it is copy-pasted plaintext, and
+    // the token does not rotate, so an observer of that channel would keep a
+    // handle that resolves an unlisted record forever.
+    expect(JSON.stringify(grant)).not.toContain(payload.bootstrapBlindId);
+    expect(serializeJoinGrant(grant)).not.toContain(payload.bootstrapBlindId);
+
+    // The joiner has it anyway: it came from the HPKE-sealed invite it opened.
+    const joiner = await prep.completeJoin(parseJoinGrant(serializeJoinGrant(grant)) as never);
+    expect(joiner.directoryStub?.capability).toEqual({
       roomServerId: '11111111-1111-4111-8111-111111111111',
-      stubId: '22222222-2222-4222-8222-222222222222',
-      directoryMode: 'listed',
       bootstrapBlindId: payload.bootstrapBlindId,
     });
-
-    const joiner = await prep.completeJoin(roundTripped);
-    expect(joiner.directoryStub?.capability.roomServerId).toBe(
-      '11111111-1111-4111-8111-111111111111',
-    );
-    expect(joiner.directoryStub?.capability.bootstrapBlindId).toBe(payload.bootstrapBlindId);
-    // The handle carries the CAPABILITY and nothing else — no local notion of
-    // ownership, which the §21.3/§21.4 endpoints answer per ACCOUNT anyway.
-    expect(Object.keys(joiner.directoryStub ?? {})).toEqual(['capability']);
-  });
-
-  it('puts the capability in the SEALED INVITE, not only the post-admission grant', async () => {
-    const mkStore = await storeFactory();
-    const founder = await PrivateRoomSession.create({
-      roomName: 'Listed Room',
-      roomType: 'global_topic',
-      founderMemberId: 'me',
-      founderDeviceId: 'my-dev',
-      createStorage: mkStore as (roomId: string) => never,
-    });
-    const payload = await founder.directoryStubPayload();
-    await founder.attachDirectoryStub({
-      roomServerId: '11111111-1111-4111-8111-111111111111',
-      stubId: '22222222-2222-4222-8222-222222222222',
-      directoryMode: 'unlisted',
-      bootstrapBlindId: payload.bootstrapBlindId,
-    });
-
-    const prep = await PrivateRoomSession.prepareJoinRequest({
-      proposedDisplayName: 'Bob',
-      createStorage: mkStore as (roomId: string) => never,
-    });
-    const { inviteUrl } = await founder.createInvite({
-      inviteePublicKey: prep.inviteePublicKey,
-      expiresAt: FUTURE,
-    });
-    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
-    // The INVITEE opens the sealed invite — before any admin has seen a join
-    // request. An unlisted record answers `not_found` to a reader without the
-    // token, so this is the only point at which they can check what Licio
-    // publishes about the room they are being asked to enter.
-    const { invite } = await prep.complete(fragment);
-    expect(invite.room_stub_ref).toBe('11111111-1111-4111-8111-111111111111');
-    expect(invite.bootstrap_blind_id).toBe(payload.bootstrapBlindId);
-  });
-
-  it('omits the capability from an invite to a room with no stub', async () => {
-    const mkStore = await storeFactory();
-    const founder = await PrivateRoomSession.create({
-      roomName: 'Detached Room',
-      roomType: 'global_topic',
-      founderMemberId: 'me',
-      founderDeviceId: 'my-dev',
-      createStorage: mkStore as (roomId: string) => never,
-    });
-    const prep = await PrivateRoomSession.prepareJoinRequest({
-      proposedDisplayName: 'Bob',
-      createStorage: mkStore as (roomId: string) => never,
-    });
-    const { inviteUrl } = await founder.createInvite({
-      inviteePublicKey: prep.inviteePublicKey,
-      expiresAt: FUTURE,
-    });
-    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
-    const { invite } = await prep.complete(fragment);
-    expect(invite.room_stub_ref).toBeUndefined();
-    expect(invite.bootstrap_blind_id).toBeUndefined();
   });
 
   it('omits the handle for a room that registered no stub', async () => {
@@ -385,37 +318,11 @@ describe('§21 directory capability carried through the join (WS-S.1.2b)', () =>
     });
     const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
     const { request } = await prep.complete(fragment);
+    expect(invite.room_stub_ref).toBeUndefined();
+    expect(invite.bootstrap_blind_id).toBeUndefined();
     const { grant } = await founder.admitJoinRequest(invite, request);
     if (!grant) throw new Error('expected a grant');
-    expect(grant.directory).toBeUndefined();
-    expect(parseJoinGrant(serializeJoinGrant(grant))?.directory).toBeUndefined();
-  });
-
-  it('rejects a grant whose directory handle is present but incomplete', () => {
-    // Half a capability is not a weaker capability — it is a handle that
-    // resolves nothing, and persisting it would surface as an unexplained
-    // `not_found` the first time the member used it.
-    const base = JSON.parse(
-      serializeJoinGrant({
-        welcome: new Uint8Array([1]),
-        roomId: 'r',
-        roomIdCommitment: new Uint8Array([2]),
-        manifest: {},
-        manifestCommitment: new Uint8Array([3]),
-        assignedMemberId: 'm',
-        assignedDeviceId: 'd',
-        bootstrapDevices: [],
-        archive: new Uint8Array([4]),
-      }),
-    ) as Record<string, unknown>;
-    expect(parseJoinGrant(JSON.stringify(base))).not.toBeNull();
-    expect(
-      parseJoinGrant(
-        JSON.stringify({
-          ...base,
-          directory: { roomServerId: 'r', stubId: 's', directoryMode: 'listed' },
-        }),
-      ),
-    ).toBeNull();
+    const joiner = await prep.completeJoin(grant);
+    expect(joiner.directoryStub).toBeUndefined();
   });
 });

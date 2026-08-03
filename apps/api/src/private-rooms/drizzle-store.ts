@@ -189,7 +189,10 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
     return row ? toStub(row) : null;
   }
 
-  async delist(roomServerId: string): Promise<StoredPrivateRoomStub | null> {
+  async delist(
+    roomServerId: string,
+    options: { readonly requireListed?: boolean } = {},
+  ): Promise<StoredPrivateRoomStub | null> {
     return await this.db.transaction(async (tx) => {
       const updated = await tx
         .update(privateRoomStubs)
@@ -203,7 +206,21 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
           displayAvatarPublicCid: null,
           updatedAt: new Date(),
         })
-        .where(eq(privateRoomStubs.roomServerId, roomServerId))
+        .where(
+          options.requireListed === true
+            ? and(
+                eq(privateRoomStubs.roomServerId, roomServerId),
+                // ATOMIC: the staff arm's authority is over a PUBLIC LISTING, so
+                // the write must be the thing that establishes there was one. A
+                // separate read moments earlier can observe `listed` while the
+                // owner delists in between, and the idempotent write then
+                // succeeds against an already-unlisted record — producing a
+                // staff-moderation audit entry for a transition the owner
+                // performed.
+                eq(privateRoomStubs.directoryMode, 'listed'),
+              )
+            : eq(privateRoomStubs.roomServerId, roomServerId),
+        )
         .returning();
       const row = updated[0];
       if (!row) return null;
@@ -264,12 +281,34 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
     return deleted.length;
   }
 
-  async listForAccount(accountId: string): Promise<StoredPrivateRoomStub[]> {
-    const rowsFound = await this.db
+  async listForAccount(
+    accountId: string,
+    options?: {
+      readonly limit: number;
+      readonly cursor?: { readonly createdAt: string; readonly stubId: string };
+    },
+  ): Promise<StoredPrivateRoomStub[]> {
+    const owned = eq(privateRoomStubs.createdByAccountId, accountId);
+    const cursor = options?.cursor;
+    const where =
+      cursor === undefined
+        ? owned
+        : and(
+            owned,
+            or(
+              lt(privateRoomStubs.createdAt, new Date(cursor.createdAt)),
+              and(
+                eq(privateRoomStubs.createdAt, new Date(cursor.createdAt)),
+                lt(privateRoomStubs.stubId, cursor.stubId),
+              ),
+            ),
+          );
+    const query = this.db
       .select()
       .from(privateRoomStubs)
-      .where(eq(privateRoomStubs.createdByAccountId, accountId))
+      .where(where)
       .orderBy(desc(privateRoomStubs.createdAt), desc(privateRoomStubs.stubId));
+    const rowsFound = options === undefined ? await query : await query.limit(options.limit);
     return rowsFound.map(toStub);
   }
 

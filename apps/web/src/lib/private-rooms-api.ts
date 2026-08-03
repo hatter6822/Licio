@@ -220,7 +220,10 @@ const myStubSchema = z.object({
 });
 export type MyStub = z.infer<typeof myStubSchema>;
 
-const myStubsSchema = z.object({ stubs: z.array(myStubSchema) });
+const myStubsSchema = z.object({
+  stubs: z.array(myStubSchema),
+  next_cursor: z.string().nullable(),
+});
 
 /**
  * §21.1 — the directory records this account created.
@@ -233,8 +236,19 @@ const myStubsSchema = z.object({ stubs: z.array(myStubSchema) });
  * among them.
  */
 export async function listMyPrivateRoomStubs(): Promise<MyStub[]> {
-  const response = await apiFetch(`${API_BASE}/v1/private-rooms/mine`);
-  return (await parseResponse(response, myStubsSchema)).stubs;
+  // Every page, not the first one: both callers ask a yes/no question about a
+  // SPECIFIC room ("do I own this record", "is my orphan out there"), and a
+  // first-page answer would be wrong for an account whose room sits deeper.
+  const stubs: MyStub[] = [];
+  let cursor: string | null = null;
+  do {
+    const query = cursor === null ? '' : `?cursor=${encodeURIComponent(cursor)}`;
+    const response = await apiFetch(`${API_BASE}/v1/private-rooms/mine${query}`);
+    const page = await parseResponse(response, myStubsSchema);
+    stubs.push(...page.stubs);
+    cursor = page.next_cursor;
+  } while (cursor !== null);
+  return stubs;
 }
 
 /** §21.4 — stop advertising a listed room (it stays resolvable for members). */

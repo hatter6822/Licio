@@ -276,8 +276,22 @@ export function createPrivateRoomsRoutes() {
       const auth = c.get('auth');
       if (!auth)
         return c.json({ error: { code: 'unauthenticated', message: 'Sign in required' } }, 401);
-      const stubs = await getPrivateRoomStubService().exportForAccount(auth.userId);
-      return c.json({ stubs }, 200);
+      const query = directoryQuerySchema.safeParse({
+        limit: c.req.query('limit'),
+        cursor: c.req.query('cursor'),
+      });
+      if (!query.success) {
+        return c.json({ error: { code: 'invalid_request', message: 'Invalid page query' } }, 400);
+      }
+      // PAGED: an account's stub count has no lifetime bound (the creation
+      // limit is per hour), and each row carries bounded-but-large display and
+      // hint fields, so serving the whole set per request is an amplification
+      // path on an endpoint a client polls.
+      const page = await getPrivateRoomStubService().listForAccountPage(auth.userId, {
+        ...(query.data.limit !== undefined ? { limit: query.data.limit } : {}),
+        ...(query.data.cursor !== undefined ? { cursor: query.data.cursor } : {}),
+      });
+      return c.json(page, 200);
     },
   );
 

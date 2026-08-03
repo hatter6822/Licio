@@ -369,7 +369,10 @@ export interface PrivateRoomStubStore {
    * keeping the bootstrap record itself so existing members can still resolve
    * it.  Idempotent on an already-`unlisted` stub.  Null when there is no stub.
    */
-  delist(roomServerId: string): Promise<StoredPrivateRoomStub | null>;
+  delist(
+    roomServerId: string,
+    options?: { readonly requireListed?: boolean },
+  ): Promise<StoredPrivateRoomStub | null>;
   /**
    * Drop the stub AND the room shell it points at.  Member-held content is
    * untouched — the server never had any (§21.4) — and removing the shell is
@@ -391,15 +394,29 @@ export interface PrivateRoomStubStore {
    */
   purgeForAccount(accountId: string): Promise<number>;
   /**
-   * Every stub an account created — the DSAR (Art. 15) READ counterpart of
-   * `purgeForAccount`.
+   * The stubs an account created — the DSAR (Art. 15) READ counterpart of
+   * `purgeForAccount`, and the recovery lookup behind `GET /mine`.
+   *
+   * PAGED, on the same `(createdAt, stubId)` keyset the directory uses. An
+   * account's stub count grows without bound (the creation limit is per hour,
+   * not per lifetime), and each row carries bounded-but-large display fields and
+   * bootstrap hints — so an unpaged read is a database, heap and response
+   * amplification path on an endpoint a client may poll. Omitting `options`
+   * returns everything, which the export uses by iterating pages to completion:
+   * an Art. 15 archive that truncates is not an archive.
    *
    * Deletion and disclosure are the same obligation seen from two sides: a
    * record the purge knows how to remove is a record the export must know how
    * to disclose. Without this the archive silently omitted the one durable
    * server row a private-room creator has.
    */
-  listForAccount(accountId: string): Promise<StoredPrivateRoomStub[]>;
+  listForAccount(
+    accountId: string,
+    options?: {
+      readonly limit: number;
+      readonly cursor?: { readonly createdAt: string; readonly stubId: string };
+    },
+  ): Promise<StoredPrivateRoomStub[]>;
   /**
    * §4.2 — one page of `listed` stubs for the public room directory, newest
    * first.
@@ -486,9 +503,15 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
     return Promise.resolve(next);
   }
 
-  delist(roomServerId: string): Promise<StoredPrivateRoomStub | null> {
+  delist(
+    roomServerId: string,
+    options: { readonly requireListed?: boolean } = {},
+  ): Promise<StoredPrivateRoomStub | null> {
     const current = this.#stubs.get(roomServerId);
     if (!current) return Promise.resolve(null);
+    if (options.requireListed === true && current.directoryMode !== 'listed') {
+      return Promise.resolve(null);
+    }
     const next: StoredPrivateRoomStub = {
       ...current,
       directoryMode: 'unlisted',
@@ -520,11 +543,22 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
     return Promise.resolve(removed);
   }
 
-  listForAccount(accountId: string): Promise<StoredPrivateRoomStub[]> {
+  listForAccount(
+    accountId: string,
+    options?: {
+      readonly limit: number;
+      readonly cursor?: { readonly createdAt: string; readonly stubId: string };
+    },
+  ): Promise<StoredPrivateRoomStub[]> {
+    const all = [...this.#stubs.values()]
+      .filter((stub) => stub.createdByAccountId === accountId)
+      .sort(byNewestFirst);
+    if (options === undefined) return Promise.resolve(all);
+    const { cursor } = options;
     return Promise.resolve(
-      [...this.#stubs.values()]
-        .filter((stub) => stub.createdByAccountId === accountId)
-        .sort(byNewestFirst),
+      all
+        .filter((stub) => cursor === undefined || isAfterCursor(stub, cursor))
+        .slice(0, options.limit),
     );
   }
 

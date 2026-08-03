@@ -62,8 +62,6 @@ const storedRoomSessionSchema = z
       .object({
         capability: z.object({
           roomServerId: z.string().min(1),
-          stubId: z.string().min(1),
-          directoryMode: z.enum(['listed', 'unlisted']),
           bootstrapBlindId: z.string().min(1),
         }),
       })
@@ -133,12 +131,26 @@ function normalizeSession(raw: StoredRoomSession): StoredRoomSession {
  */
 export interface StoredDirectoryStub {
   readonly capability: {
+    /** The server-minted handle every §21 call takes. */
     readonly roomServerId: string;
-    readonly stubId: string;
-    readonly directoryMode: 'listed' | 'unlisted';
+    /** The §21.2 token that opens the record. Epoch-0 derived, never rotates. */
     readonly bootstrapBlindId: string;
   };
 }
+
+/*
+ * TWO fields, and the two that were dropped are worth naming.
+ *
+ * `stubId` had no consumer: every §21 endpoint is keyed by `room_server_id`.
+ * `directoryMode` had one and it was WRONG — a delist changes the mode on the
+ * server, so a copy stored at registration is stale from the first delist
+ * onward. The panel reads the live mode from the bootstrap record it fetches
+ * anyway, which is the only place the answer is true.
+ *
+ * Both mattered because this record now arrives through an INVITE, which knows
+ * neither: it carries the room's stub reference and its capability, and would
+ * have had to invent the other two.
+ */
 
 /** One persisted epoch's key material (mirrors the engine's `HeldEpochKeys`). */
 export interface StoredEpochKeys {

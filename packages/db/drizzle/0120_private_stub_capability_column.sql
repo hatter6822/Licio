@@ -37,8 +37,15 @@
 -- An unverifiable directory record is worse than an absent one: a member who
 -- checks the signature concludes their own room's entry was forged. So the
 -- pre-existing stubs are REMOVED, shell and all, and a member re-registers from
--- the room's settings — which re-signs the v2 body with the room's own key,
--- the only place that can.
+-- the room's settings — which re-signs the v2 body with the room's own key, the
+-- only place that can.
+--
+-- "Re-registers from the room's settings" is a claim about shipped code, not a
+-- hope: `DirectoryRecordPanel` renders a registration action for a room with no
+-- record, and the panel treats the 404 these deletions produce as exactly that
+-- state. It was not true when this migration was first written — registration
+-- lived only inside the creation wizard — which would have made this a deletion
+-- with no recovery path. The path shipped first.
 --
 -- The ROOM is untouched. It lives on member devices and the server never held
 -- it; what goes is Licio's bootstrap record, which is what §21.4 says a delete
