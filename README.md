@@ -65,8 +65,10 @@ accusations downweighted. Anti-signals (burst and cascade detectors,
 coordinated-behavior dampening) can only
 *subtract*; nothing can buy rank. The pay-to-rank firewall is structural:
 a financial denylist inside the ranking feature space, database-level
-wallet↔ranking isolation, and ten ranking-neutrality tests that run as a
-named CI gate (`check:neutrality`) on every PR. A runtime kill switch
+wallet↔ranking isolation, and fourteen ranking-neutrality tests that run as a
+named CI gate (`check:neutrality`) on every PR — the ten SPEC §30.6
+pay-to-rank properties plus four that keep the WS-Q visibility tiers and the
+WS-T comment remodel outside ranking inputs. A runtime kill switch
 restores a score-blind chronological feed at any moment.
 
 ### Ranking is constrained by mathematical invariants
@@ -192,7 +194,12 @@ never share keys**:
   bundle digest) that locks the private surface rather than run untrusted
   code. The server stores **no** private-room content — a column denylist, a
   database trigger, endpoint rejections, and seven dedicated CI gates make
-  that a structural property, not a promise.
+  that a structural property, not a promise. The only server record a private
+  room may have is an optional **directory stub**: cryptographic commitments
+  and a rendezvous policy, with a public name only if the room chose to be
+  listed. Delisting it is the single power platform staff hold over a private
+  room, and deleting it removes Licio's bootstrap record — never the room,
+  which the server never had.
 
 ## Platform foundations
 

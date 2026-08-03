@@ -427,6 +427,25 @@ private_room.<room_id>.cid_requests
 
 ## 9. IPFS, Helia, and libp2p design
 
+> **Superseded implementation, preserved requirement (maintainer decision).**
+> The shipped plane does **not** run Helia or libp2p. It takes the
+> *lighter-transport path*: a dependency-free CIDv1-over-ciphertext profile
+> (`packages/private-p2p/src/crypto/cid.ts`, pinned byte-for-byte against
+> `multiformats`), plain `RTCPeerConnection` data channels driven by
+> `apps/web/src/private-p2p/connect-peer.ts`, and the §15.9 encrypted archive
+> (`sync/archive.ts`) as the CAR-equivalent. The §6.12.12 dependency budget and
+> the private-chunk bundle budget are what made a full IPFS stack in the initial
+> payload untenable.
+>
+> **§9.1 is unchanged and still binding**: the CID identifies ciphertext, and a
+> plaintext CID for private-room content must never exist. So are the §9.3
+> forbidden-behaviour rules — with no public DHT, gateway, delegated router,
+> IPNI, or reprovide loop in the tree, there is simply nothing left to disable,
+> which is why the §29 checklist marks that item not-applicable rather than
+> done. §9.2's package list and the libp2p configuration below describe the
+> *considered* stack; read them as design rationale for what the requirements
+> are, not as a description of what is imported.
+
 ### 9.1 Design stance
 
 IPFS-compatible content addressing is useful for integrity, deduplication within encrypted datasets, offline transfer, and member-operated pinning. It is not a privacy layer. Therefore:
@@ -1980,13 +1999,55 @@ Validation:
 - Display fields allowed only for `listed` rooms.
 - Rate limit by non-reversible account reference, not IP in app logic.
 
+The first four are enforced by SHAPE, not by a handler check: the request
+schema is `.strict()`, so a forbidden key is rejected because no such field
+exists. The fifth is an explicit REFUSAL rather than a silent strip — an
+`unlisted` request carrying a display name is rejected, because dropping it
+quietly would leave the client believing the directory serves a name it can
+see locally. `signed_stub` gets its own treatment: it is one free-form jsonb
+column, invisible to the §8.2 column allowlist, so its keys are scanned at
+every depth for the §8.1 classes and the request is refused on a hit.
+
+`detached` is absent from the create enum on purpose — a detached room stores
+no stub at all, which the `private_room_stubs_not_detached` CHECK also pins.
+
+The endpoint mints the P2P room SHELL and its stub in one transaction, with
+all four §4.1 axes (`storage_mode='p2p'`, `authority_model='room_keys'`,
+`visibility='private'`, `join_model='invite'`) written together so the §23.2
+coherence CHECKs decide validity rather than the call site. The shell's
+`name`/`slug` are OPAQUE in both directory modes: they are NOT NULL columns
+feeding a generated `search_vector`, so a real title there would put a private
+room's name into the server's full-text index. A `listed` room's display
+metadata lives only on the stub.
+
 ### 21.2 Fetch bootstrap stub
 
 ```http
 GET /v1/private-rooms/:roomServerId/bootstrap
 ```
 
-For listed rooms, returns public stub fields. For unlisted rooms, requires invite-derived blind token.
+For listed rooms, returns public stub fields. For unlisted rooms, requires an
+invite-derived blind token.
+
+The token is a **commitment the room publishes in its own signed stub**, so the
+server can check it while holding no room key: at create time the client places
+`bootstrap_blind_id` — derived from the room's rendezvous key, exactly as the
+§15.3 blind ids are — inside `signed_stub`, and the reader presents the same
+value as `?token=`. The server compares the two in constant time. It learns
+nothing from either: the value is an HMAC output over material it does not
+hold, and it rotates with the room's key schedule.
+
+**A wrong token, a missing token, an unknown room id, and a MALFORMED room id
+all return the identical 404.** This is §15.3.1's no-existence-oracle property
+applied to the directory: distinguishing them would turn the endpoint into a
+probe for which private rooms exist, which is precisely what `unlisted` mode is
+for. A `detached` room has no stub, so it 404s too — correctly, since it never
+asked to be reachable this way.
+
+P2P rooms are also absent from `GET /v1/rooms`. Listing the shell would publish
+the existence of every `unlisted` room, and would render a `listed` one through
+a server room summary whose join/steward/lens affordances do not apply to it.
+This endpoint is the only directory read.
 
 ### 21.3 Update stub
 
@@ -2017,7 +2078,21 @@ DELETE /v1/private-rooms/:roomServerId
 POST /v1/private-rooms/:roomServerId/delist
 ```
 
-Deleting a stub does not delete member-held content. UI must say “remove Licio directory/bootstrap record,” not “delete private room for everyone.”
+**Delist** demotes `listed → unlisted` and drops the display metadata in one
+statement (the `private_room_stubs_listed_display_only` CHECK requires those
+columns NULL once the mode is no longer `listed`, so a two-step would violate
+it midway). The bootstrap record survives, so existing members still resolve
+the room; it simply stops advertising itself. Together with delete, this is the
+ONLY power platform staff hold over a P2P room — §11.4 holds verbatim.
+
+**Delete** removes the stub AND the room shell. Deleting a stub does not delete
+member-held content: the UI must say “remove Licio directory/bootstrap record,”
+not “delete private room for everyone,” and the response says so in those
+words. The shell goes too rather than surviving as `detached`, because a
+lingering shell row still asserts *“this account created a private room at time
+T”* — a §8.1 activity trace outliving the very action taken to erase the
+server's record. Nothing else ever referenced the id (§8.3 guarantees it), so
+the stub is the only dependent row.
 
 ### 21.5 Blind rendezvous endpoints
 
@@ -2076,73 +2151,75 @@ Response example:
 
 ### 22.1 New shared package
 
+`packages/private-p2p` is the browser-safe protocol core: schemas, crypto,
+the reducer, and the transport-independent sync decision plane. It depends on
+`@licio/shared` and `zod` only, never on `@licio/db` and never on
+`@licio/lcap` (§1 — the two planes share no keys and no code). The shipped
+layout:
+
 ```text
-packages/private-p2p/
-  src/schemas/
-    manifest.ts
-    envelope.ts
-    operations.ts
-    invites.ts
-    reports.ts
-    local-index.ts
-  src/crypto/
-    aead.ts
-    hpke.ts
-    mls.ts
-    kdf.ts
-    signatures.ts
-    canonical.ts
-  src/ipld/
-    cid-profile.ts
-    block-codecs.ts
-    car.ts
-  src/reducer/
-    validate-op.ts
-    reduce-room.ts
-    conflicts.ts
-    snapshots.ts
-  src/sync/
-    protocol.ts
-    head-exchange.ts
-    reconciliation.ts
-  src/testing/
-    vectors.ts
-    generators.ts
+packages/private-p2p/src/
+  schemas/       common · envelope · manifest · ops · invite · attachment
+                 · report · search        (the §3 NORMATIVE zod surface)
+  crypto/        canonical (DAG-CBOR) · cid · hkdf · aead · hpke · ecdh
+                 · signatures · mls (the ONLY ts-mls importer, §10.7)
+                 · epoch · key-store (the four §10.8 tiers) · recovery
+                 · safety-number · attachment · device-blind
+                 · record-encoding · runtime
+    bbs/         suite · signature · blind · proof · pseudonym
+  reducer/       validate-op · validate · reduce · state · order · op-id
+                 · capabilities · conflicts-by-policy (in `reduce`)
+                 · snapshot · snapshot-seal · snapshot-state · overlay
+                 · search · recovery-threshold · intake-context
+  sync/          rendezvous · signaling · secure-channel · handshake
+                 · head-sync · op-exchange · fragment · archive (the §15.9
+                 offline encrypted-archive exchange)
+  rendezvous-cap/ credential · announcement · poll-filter · session
+                 · coordinator
+  engine/        room-engine · room-lifecycle · invite · migration
 ```
+
+Two deviations from the original sketch are deliberate. There is **no
+`src/ipld/` directory**: the maintainer-chosen lighter-transport path drops
+Helia, so content addressing is the dependency-free CIDv1-over-ciphertext
+profile in `crypto/cid.ts` (pinned byte-for-byte against `multiformats`), and
+the CAR-equivalent is `sync/archive.ts`. There is **no `src/testing/`
+directory**: vectors and generators live beside the code they pin, under
+`src/**/__tests__/` (including the RFC-vector fixtures in
+`crypto/bbs/__tests__/fixtures/`).
 
 ### 22.2 Web integration
 
+The web side holds only what needs the browser — IndexedDB persistence, the
+WebRTC carrier, and the HTTP rendezvous transport — so the protocol core stays
+environment-free and testable in Node. It is a flat module directory, not a
+mirror of §22.1:
+
 ```text
 apps/web/src/private-p2p/
-  node/
-    helia-node.ts
-    libp2p-config.ts
-    private-blockstore.ts
-  crypto/
-    key-store.ts
-    key-agent-client.ts
-    recovery-kit.ts
-  sync/
-    sync-engine.ts
-    rendezvous-client.ts
-    peer-session.ts
-    block-exchange.ts
-    offline-car.ts
-  state/
-    room-db.ts
-    reducer-worker.ts
-    local-search.ts
-    replication-health.ts
-  ui/
-    PrivateRoomShell.tsx
-    PrivateRoomCreate.tsx
-    PrivateInvitePanel.tsx
-    PrivateMemberPanel.tsx
-    PrivateThreadView.tsx
-    PrivateComposer.tsx
-    PrivateReplicationHealth.tsx
-    PrivateBackupPanel.tsx
+  storage.ts               the `licio_private_p2p` IndexedDB adapter
+  room-manager.ts          PrivateRoomSession: create / load / connect
+  session-store.ts         in-tab session state
+  connect-peer.ts          the live WebRTC carrier (rendezvous → sealed
+                           signaling → membership handshake → PeerChannel)
+  sync-session.ts          drives the §15.7 op exchange over a PeerChannel
+  rendezvous-client.ts     zod-validated fetch transport for
+                           POST /v1/private-rendezvous/*
+  rendezvous-cap-manager.ts  peer-side Tier-2 cap enrolment
+  ice-config.ts            VITE_ICE_SERVERS parsing (fails closed to none)
+  migrate.ts               re-authoring a frozen server room into a P2P room
+  e2e-room-harness.ts      Playwright entry points (real-browser convergence)
+  e2e-carrier-harness.ts
+
+apps/web/src/components/private-rooms/
+  CreatePrivateRoomWizard   PrivateRoomView   InvitePanel
+  JoinPanel                 SafetyNumberPanel
 ```
+
+Everything under `apps/web/src/private-p2p/` is reached by **dynamic import
+only** — `check:private-p2p-split` forbids a static value import, and the
+measured initial-payload budget in `check-bundle-size.ts` keeps the plane
+chunk out of first paint.
 
 ### 22.3 Worker architecture
 
@@ -2755,73 +2832,111 @@ Controls:
 
 ## 29. Launch checklist
 
-P2P private rooms are launch-ready only if every item is true:
+P2P private rooms are launch-ready only if every item is true. A checked box
+means the property is enforced in the tree AND covered by a test or CI gate —
+not that someone believes it holds. The unchecked items are the honest residue;
+`docs/private-p2p/README.md` carries the per-card mapping.
 
 ### Product and UX
 
-- [ ] Current server-private rooms are no longer labeled simply “private.”
-- [ ] P2P private creation includes mandatory disclosures.
-- [ ] Removal disclosure explains no retroactive deletion.
-- [ ] Recovery UX is clear and tested.
-- [ ] Replication health is visible.
-- [ ] Invite risks are clear.
+- [x] Current server-private rooms are no longer labeled simply “private.” (The §20.1 "Members-only server room" labels are BLOCKING copy in `packages/shared/src/constants/private-rooms.ts`, pinned by the prohibited-language copy-lint.)
+- [x] P2P private creation includes mandatory disclosures. (`CreatePrivateRoomWizard` — the five §20.2 acknowledgments, each blocking.)
+- [x] Removal disclosure explains no retroactive deletion. (§10.9 copy in the same SSOT; `DELETE /v1/private-rooms/:id` says it removes Licio's directory record, not the room.)
+- [x] Recovery UX is clear and tested. (`crypto/recovery.ts` portable kit + `reducer/recovery-threshold.ts`; the §12.7 terminality copy states that losing every member key is unrecoverable.)
+- [x] Replication health is visible. (`PrivateRoomView` surfaces peer/sync state from `sync-session.ts`.)
+- [x] Invite risks are clear. (`InvitePanel`/`JoinPanel` carry the §12 disclosures.)
 
 ### Server non-storage
 
-- [ ] P2P rooms cannot create server stories.
-- [ ] P2P rooms cannot create server contributions.
-- [ ] P2P rooms never enter ranking/search.
-- [ ] P2P content events cannot be emitted.
-- [ ] Server logs exclude private CIDs/op IDs/invite fragments.
-- [ ] DB tests prove no private content rows after E2E tests.
+- [x] P2P rooms cannot create server stories. (Submission guard → `409 p2p_room_requires_client_sync`, plus the migration-`0045` `stories_no_p2p_room` trigger.)
+- [x] P2P rooms cannot create server contributions. (Contribution guard → `404`, plus the `threads_no_p2p_room` trigger.)
+- [x] P2P rooms never enter ranking/search. (`check:p2p-ranking-exclusion`, `check:p2p-search-exclusion`; `roomVisibleToUser` also keeps the shell out of `GET /v1/rooms`.)
+- [x] P2P content events cannot be emitted. (The event router refuses any content event referencing a p2p room and counts the refusal.)
+- [x] Server logs exclude private CIDs/op IDs/invite fragments. (`check:no-private-cid-egress`.)
+- [x] DB tests prove no private content rows after E2E tests. (`private-no-server-content.audit.test.ts` + the `checkPrivateServerTables()` column allowlist.)
 
 ### Crypto
 
-- [ ] MLS add/remove works across devices.
-- [ ] HPKE invites use reviewed libraries and vectors.
-- [ ] Epoch rotation works.
-- [ ] Removed devices fail to decrypt future content.
-- [ ] Nonce uniqueness tests pass.
-- [ ] External crypto review complete.
+- [x] MLS add/remove works across devices. (`crypto/mls.ts` over `ts-mls`, RFC 9420; the cross-epoch sync suite.)
+- [x] HPKE invites use reviewed libraries and vectors. (RFC 9180 suite A.1 over WebCrypto, pinned to an `@hpke/core` interop ciphertext + RFC 7748 §6.1 DH.)
+- [x] Epoch rotation works. (`crypto/epoch.ts` — atomic rotation per commit, manifest-fork divergence.)
+- [x] Removed devices fail to decrypt future content. (The forward-secrecy property suite.)
+- [x] Nonce uniqueness tests pass. (The §3.7 nonce-uniqueness + fail-closed fuzz suite.)
+- [ ] External crypto review complete. — **OPEN.** `ts-mls` also carries its own not-yet-audited disclaimer; it is isolated behind the one-file wrapper (`check:p2p-mls-wrapper`) for a future swap.
 
 ### P2P/IPFS
 
-- [ ] Private Helia profile disables public DHT/gateways/delegated routing/IPNI/reprovide.
-- [ ] Private CIDs never go to public gateways.
-- [ ] Block exchange validates CID/signature/AEAD.
-- [ ] Relay-only mode works.
-- [ ] Offline CAR import/export works.
+- [x] Private CIDs never go to public gateways. (`check:no-private-cid-egress`; the CID profile is the dependency-free `crypto/cid.ts` over ciphertext.)
+- [x] Block exchange validates CID/signature/AEAD. (§14.2 stage-1 runs on every envelope, including on archive import — no container-conferred trust.)
+- [x] Relay-only mode works. (§15.4 ICE suppression; note that relay-only needs a TURN entry in `VITE_ICE_SERVERS`.)
+- [x] Offline CAR import/export works. (`sync/archive.ts`, the §15.9 encrypted-archive exchange.)
+- [ ] Private Helia profile disables public DHT/gateways/delegated routing/IPNI/reprovide. — **NOT APPLICABLE as written.** The maintainer chose the lighter-transport path: there is no Helia node in the private plane, so there is no public-routing surface to disable. The property it protected (no private data reaches public routing) is carried by the gate above.
 
 ### Trust/update channel
 
-- [ ] Private-mode bundle is reproducible.
-- [ ] Bundle hash is signed and in transparency log.
-- [ ] Service worker pins verified private bundle.
-- [ ] Private rooms lock on unverified bundle.
-- [ ] CSP/Trusted Types/no dynamic code checks pass.
-- [ ] Local key agent prototype or documented Tier 1 limitation exists.
+- [x] Bundle hash is signed and in transparency log. (`gen:update-manifest` — Ed25519 signature + RFC 9162 inclusion proof.)
+- [x] Service worker pins verified private bundle. (`apps/web/src/update/` + the SW pin.)
+- [x] Private rooms lock on unverified bundle. (`ensurePrivateBundleTrusted()` in `PrivateRoomSession.{create,load}`; typed lock reasons, room keys stay sealed.)
+- [x] CSP/Trusted Types/no dynamic code checks pass. (`check:csp-parity`, `check:sw`, `lint:security`, `check:private-bundle-transparency`.)
+- [x] Local key agent prototype or documented Tier 1 limitation exists. (The §10.8 `local-key-agent` tier is modelled in `crypto/key-store.ts`; the Tier-1 limitation is stated in §3.2 and in the creation copy.)
+- [ ] Private-mode bundle is reproducible. — **OPEN.** The bundle is signed and transparency-logged, but independent byte-for-byte reproduction (§30 Q9) is not yet demonstrated.
 
 ### Safety
 
-- [ ] Local moderation ops work.
-- [ ] Member block/hide works.
-- [ ] Voluntary report package preview works.
-- [ ] Directory abuse tools work for listed stubs.
-- [ ] Support docs do not promise impossible recovery/moderation.
+- [x] Local moderation ops work. (`reducer/overlay.ts` — the §14.6 device-local moderation overlays.)
+- [x] Member block/hide works. (Same overlay plane.)
+- [x] Voluntary report package preview works. (The §19.4 report schema; the package is member-assembled and member-sent.)
+- [x] Directory abuse tools work for listed stubs. (`POST /v1/private-rooms/:id/delist` and `DELETE /v1/private-rooms/:id` — the only two things platform staff can do to a P2P room, per §11.4.)
+- [x] Support docs do not promise impossible recovery/moderation. (The copy-lint rejects "secure"/"deleted everywhere" framing in the §6/§20 SSOT.)
 
 ---
 
 ## 30. Open questions
 
-1. Which audited MLS implementation will be used in the TypeScript/browser stack, and does it support required test vectors and export secrets cleanly?
-2. Which HPKE suite and library will be pinned for invite bootstrap?
-3. Is Tier 3 local key agent in scope for v1 launch, or will v1 launch with Tier 1/Tier 2 disclosures only?
-4. Should detached rooms be available in the first release or hidden behind an advanced flag?
-5. What is the exact browser support matrix for WebRTC/WebTransport/libp2p transports **and for WebCrypto `Ed25519`/`X25519`** in the target PWA environments, and where is the audited curve-library fallback (§10.7) required?
-6. What local metadata-stripping library is acceptable for images and videos without server scanning?
+Four of the original ten were settled by implementation; they are kept with
+their answers rather than deleted, because the answer is the part a reader
+needs and a silently-dropped question reads as a question nobody asked.
+
+**Settled**
+
+1. ~~Which audited MLS implementation?~~ → **`ts-mls`**, RFC 9420, suite
+   `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` pinned at module load. It
+   exports secrets cleanly (the §10.4 epoch bridge derives `room_epoch_secret`
+   through the MLS Exporter) and passes its RFC vectors. It is **not yet
+   formally audited** — its own disclaimer — so it is confined to the single
+   wrapper `crypto/mls.ts`, with `check:p2p-mls-wrapper` forbidding a deep
+   import anywhere else so a swap stays a one-file change. The external review
+   remains open (§29).
+2. ~~Which HPKE suite and library?~~ → **RFC 9180 suite A.1**, DHKEM(X25519,
+   HKDF-SHA256) / HKDF-SHA256 / AES-128-GCM, hand-rolled over WebCrypto
+   primitives (no HPKE dependency) and pinned to an `@hpke/core` interop
+   ciphertext plus the RFC 7748 §6.1 DH vector.
+5. ~~Browser support matrix / where is the curve fallback required?~~ → The
+   plane targets **WebRTC data channels** (no WebTransport/libp2p dependency),
+   and `@noble/curves` is the pinned audited fallback wherever WebCrypto
+   `Ed25519`/`X25519` is absent — `crypto/signatures.ts` is cross-validated
+   byte-for-byte against it.
+8. ~~Threshold membership changes / is Shamir in scope?~~ → **Threshold
+   recovery shipped; Shamir did not, and deliberately.**
+   `reducer/recovery-threshold.ts` counts *M distinct recover-capable admins*
+   — a CAPABILITY threshold, so the operation carries no key material at all —
+   and a successful recovery is an ordinary `member.add` (MLS Add + epoch
+   rotation). Secret-sharing was the wrong tool for the requirement and is not
+   deferred so much as declined.
+
+**Open**
+
+3. Is the Tier 3 local key agent in scope for v1 launch, or will v1 launch with
+   Tier 1/Tier 2 disclosures only? (The `local-key-agent` tier is modelled in
+   the §10.8 key store; no agent binary ships.)
+4. Should detached rooms be available in the first release or hidden behind an
+   advanced flag?
+6. What local metadata-stripping library is acceptable for images and videos
+   without server scanning?
 7. What is the default padding policy for mobile users with limited bandwidth?
-8. Should rooms support threshold admin membership changes in v1, or begin with admin-only changes — and should the optional **Shamir-secret-sharing recovery variant** (§12.6.1) be in scope at all, or remain deferred behind a separate audit?
-9. How will private-mode reproducible builds be independently verified and displayed to users?
+9. How will private-mode reproducible builds be independently verified and
+   displayed to users? (The bundle is signed and transparency-logged today;
+   independent byte-for-byte reproduction is not yet demonstrated — §29.)
 10. How much old server-private history should migration import by default?
 
 ---

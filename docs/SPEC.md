@@ -185,13 +185,17 @@ Licio is a **loom** for public knowledge. Sources, posts, claims, comments, summ
 1. **Front Page:** a personalized but constrained feed that organizes and displays the **public** content earning the most meaningful attention and constructive participation platform-wide; in-room content never appears here.
 2. **Topic Rooms:** persistent spaces around topics such as climate, local politics, science, technology, health, or city-level news. Every content item on the platform is posted in exactly one room (Section 3.4); rooms are public or private (Section 16.1).
 3. **Comment threads:** lightly nested discussion spaces embedded in content pages — every story (link, image, video, or written post) anchors its own comment thread.
-4. **Context Cards:** compact overlays explaining source history, community interpretations, claim status, timeline, and missing context.
-5. **Evidence Drawer:** a swipe-up panel of cited sources, primary documents, fact checks, data references, and counterevidence.
+4. **Where interpretations differ:** the SCOI-powered divergence section on the story surface, naming the readings that conflict without marking either correct (Section 10.5).
+5. **Per-comment sources:** the citations attached to a comment, read through a "Sources" footnote modal on that comment, and counted on the story card's sources chip (Section 5.6). (This replaced the earlier swipe-up **Evidence Drawer**: sourcing is comment-centric, so the citations live on the comment that made the claim rather than in a story-level panel — see Section 15.2 and the `EvidenceCard` removal below.)
 6. **Comment Composer:** an inline composer for text and/or image/GIF comments, with optional source-citation, correction, and lens controls.
 7. **Signal Ledger:** a private, user-facing explanation of what attention and participation signals were counted — never a public score.
-8. **Civic Map:** a visual overview of topic basins, narrative branches, and cross-community bridges.
-9. **Steward Console:** moderator and community-steward tooling for queue review, context repair, appeals, and safety decisions.
-10. **Governance & Treasury (optional):** the Knomosis surface for charters, proposals, treasuries, and receipts in enabled rooms.
+8. **Steward Console:** moderator and community-steward tooling for queue review, context repair, appeals, and safety decisions — including the **Civic Map** (Section 12.4), the attention-landscape view on its Integrity tab.
+9. **Governance & Treasury (optional):** the Knomosis surface for charters, proposals, treasuries, and receipts in enabled rooms.
+
+Two surfaces earlier revisions listed here have moved:
+
+- The compact **Context Card** overlay is **retired**. It was a container, and each of its panels now has its own home: interpretation divergence is item 4 above, evidence status is item 5, the conversation-state label cascade went with the rating labels (Section 5.6), user controls live on the card and in Profile, and the summary panel went with the thread Overview (Section 24.3). The SCOI **context gate** that was its load-bearing use — a context card required before broad distribution — was removed too, and its work is done by the three consumers named in Section 10.5. What survives under the name is the story card's **context chips** ("low coordination risk", "+N more on this story"), a card affordance rather than an overlay.
+- The **Civic Map** is a **steward/analyst** surface, not a reader one, and now sits inside the Steward Console (item 8). Its underlying Reeb landscape is computed over stories with an engagement scalar, so a reader-facing rendering would be a popularity board by another name; behind the steward bar it is what it should be — a diagnostic of how attention is grouping and where a conversation is about to come apart.
 
 ## 3.3 Core objects
 
@@ -201,7 +205,7 @@ Licio is a **loom** for public knowledge. Sources, posts, claims, comments, summ
 | Room | The community space that owns content: every story is posted in one home room; rooms are public or private (Section 16.1). |
 | Source | The external publisher, author, dataset, document, or media origin. |
 | Claim | A discrete proposition extracted from a story or comment. |
-| Evidence Card | A citation, data point, document, image, transcript, or expert reference supporting or challenging a claim. |
+| Citation | A source reference — document, dataset, transcript, report — attached inline to the comment that relies on it. (There is no separate `EvidenceCard` entity: it was removed with the move to comment-centric sourcing, migration `0075`; see Section 15.2.) |
 | Thread | The comment section owned by its anchoring story; it is lightly nested and may be filtered for sources or corrections (Section 15.3). |
 | Contribution | A value-adding comment or typed enrichment: comment, evidence citation, correction, or a legacy contribution retained for back-compatible reads. |
 | Lens | A community-specific interpretation frame: local resident, domain expert, affected group, skeptic, beginner. |
@@ -226,7 +230,7 @@ Visibility bounds distribution and discovery; it is not a secrecy guarantee (Sec
 
 ## 4.1 Personas
 
-- **The careful reader** wants to understand a story before forming an opinion: opens sources, reads context cards, asks clarifying questions, values summaries.
+- **The careful reader** wants to understand a story before forming an opinion: opens sources, reads where interpretations differ, asks clarifying questions, values sourced comments.
 - **The knowledgeable participant** has expertise or direct experience: adds evidence, corrects misconceptions, explains uncertainty and tradeoffs.
 - **The local witness** has situational knowledge about a local issue and wants to contribute context without becoming an influencer.
 - **The moderator/steward** maintains healthy norms, reviews reports, resolves context collisions, escalates safety concerns.
@@ -255,7 +259,7 @@ Attention can come from quality, outrage, confusion, fear, novelty, coordination
 |---|---|---|
 | Active dwell | Reading with foreground focus and normal scroll cadence. | Cap per item; ignore idle time and screen-on inactivity. |
 | Source open | Opening the original article, document, dataset, or evidence. | Do not reward clickbait if the user immediately returns. |
-| Context open | Opening context cards, source history, or claim timeline. | Count once per meaningful session. |
+| Context open | Opening the story's "Where interpretations differ" section, source history, or claim timeline. | Count once per meaningful session. |
 | Return visit | Returning after time away, indicating sustained interest. | Avoid rewarding obsessive loops. |
 | Thread traversal | Reading multiple branches or opposing views. | Weight nonredundant traversal above repeated same-branch reading. |
 | Save for later | Privately marking content to revisit. | Private by default; low rank weight. |
@@ -397,22 +401,37 @@ Primary bottom navigation (at most five surfaces):
 | Front Page | Ranked feed of stories and discussions. |
 | Rooms | Topic rooms, local rooms, community lenses, subscribed areas. |
 | Submit | Capture a link, write a post, upload an image or video — always into a chosen home room, with a visibility choice where the room permits one (Section 14.5). |
-| Threads | Active conversations, replies, saved drafts, participation history. |
 | Profile | Private Signal Ledger, settings, reputation, privacy, moderation notices, and (where enabled) wallet/governance. |
+
+The **Threads** tab of earlier revisions is retired: WS-T replaced the separate
+thread surface with the comment section a story owns (Section 6.4), so the
+shipped navigation is the four tabs above and `/threads/$threadId` redirects to
+the owning story's `#comments` anchor. The ceiling stays five.
 
 The Submit tab is centered and persistent; it is a contribution entry point, not a "post for applause" prompt. The Signal Ledger lives inside Profile, not as a separate tab.
 
 ## 6.3 Front Page layout
 
-Each feed card contains: story title; source; home-room chip (where the conversation lives); the Section 5.6 signal row (the dispute badge, the "Under review" safety chip, the sources count, and the corrections tally — rendered only when non-empty); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, long-press to signal problem / mute source / adjust topic). Interpretation-divergence detail lives on the STORY surface (the "Where interpretations differ" lens map) rather than as a per-card overlay or label — the tap-through story page carries the detail; the compact feed context-card payload had no client surface and was removed with the other unreachable planes. The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
+Each feed card contains: story title; source; home-room chip (where the conversation lives); the Section 5.6 signal row (the dispute badge, the "Under review" safety chip, the sources count, and the corrections tally — rendered only when non-empty); context chips ("2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and a report control. (A swipe layer — left to save, long-press for signal problem / mute source / adjust topic — exists as a component but is mounted on no production surface; the shipped card's affordances are the stretched link to the discussion, the report control, and the per-topic repeats control.) The **per-card one-line reason** ("Rising from independent source opens and evidence additions") was **removed** alongside the rating labels (Section 5.6): a single generated line either restated what the signal row already shows or edged toward a score-like claim about the item, and the honest per-item detail lives on the story surface. The wire keeps a DEPRECATED, always-emitted `distribution_reason` compat field carrying one universally-true string, because pre-removal cached bundles validate against a schema that requires it; new clients ignore it, and the field retires with `rating_label` (see `docs/ranking/README.md`). Interpretation-divergence detail lives on the STORY surface (the "Where interpretations differ" lens map) rather than as a per-card overlay or label — the tap-through story page carries the detail; the compact feed context-card payload had no client surface and was removed with the other unreachable planes. The front page serves public content only (Section 3.4). The card carries **no source-origin badge** (the `origin` provenance value is not yet a real derived signal, so a badge asserting every source is "Independent" would be misleading) and **no "N lenses" chip** (a room's lens count still drives Section 7 lens balancing but is not a per-card affordance). No card contains a like count, vote count, heart icon, public score, or reaction bar.
 
 ## 6.4 Thread layout
 
 The comment section is embedded directly in the content page. Comments are lightly nested: top-level comments, one collapsible reply preview level, and a "continue thread" link for deeper subthreads. The default read is chronological, with newest/oldest ordering. Sources attached to a comment are authored inline (a sourced phrase becomes a footnoted link) and read through a per-comment "Sources" footnote modal; active correction debates surface above the conversation as a ONE-ROW live-debates control (how many are live, how many challenge the story, the soonest deadline) that opens the live-debates modal — a short summary per arena, searchable and sortable, with challenges to the story itself pinned first, each opening the full arena. Inline controls open the comment composer in place rather than sending the reader to a separate contribution page. (The reader-facing thread **Overview** — the layered thread summary — was **removed**; see Section 24.3.)
 
-## 6.5 Context cards
+## 6.5 Story context surfaces
 
-Compact, swipeable overlays: What happened? Why it matters; Where interpretations differ (SCOI-powered); Evidence status; Conversation state (deepening, fragmented, bridged, tense, under review); and User controls (see less/more, mute topic, inspect ranking signals).
+Context reaches the reader on the STORY page, as named sections rather than as
+one swipeable overlay. The compact "context card" of earlier revisions is
+retired (Section 3.2): it bundled five unrelated panels behind one gesture, and
+each panel is better where it belongs.
+
+| What the reader gets | Where it lives now |
+|---|---|
+| Where interpretations differ | Its own SCOI-powered section on the story surface (Section 10.5), rendered when readings genuinely diverge. Opening it is the Section 5.3 "context open" signal. |
+| Evidence status | Per-comment citations, read through that comment's "Sources" footnote modal; the story card carries the sourced-comment count (Section 5.6). |
+| Conversation state | Retired with the rating-label cascade (Section 5.6). The one posture still surfaced is the descriptive "Under review" safety chip. |
+| User controls | On the card (per-topic repeats, report) and in Profile (Signal Ledger, personalization, mute). |
+| What happened / why it matters | Retired with the layered thread Overview (Section 24.3). |
 
 ## 6.6 Participation composer
 
@@ -481,7 +500,7 @@ This section specifies the TypeScript-based development stack for the Licio PWA 
 
 ### 6.12.2 Language, package manager, and build tooling
 
-**TypeScript 6.x in strict mode** (`strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`) is the project language. Strict mode catches null-safety violations, type-coercion bugs, and unchecked property access at compile time; it is non-negotiable for a security-critical application.
+**TypeScript 7.x in strict mode** (`strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`) is the project language. Strict mode catches null-safety violations, type-coercion bugs, and unchecked property access at compile time; it is non-negotiable for a security-critical application.
 
 **pnpm** is the package manager. pnpm enforces strict dependency resolution: a package cannot `import` a transitive dependency it did not explicitly declare (phantom dependencies). This closes a supply-chain attack vector that npm and Yarn classic leave open. pnpm's content-addressable store deduplicates disk usage and its lockfile is integrity-enforced. **lockfile-lint** validates the pnpm lockfile against declared registries on every CI run, preventing lockfile-poisoning attacks.
 
@@ -582,7 +601,7 @@ A type error at any point in this chain is a compile-time failure. This eliminat
 |---|---|
 | XSS → wallet drain | React JSX auto-escaping (default) + DOMPurify with Trusted Types + strict CSP with no inline scripts (Vite) + no CSS-in-JS runtime (Tailwind) + Biome lint rules blocking unsafe DOM access. |
 | Supply-chain compromise | pnpm strict resolution (no phantom deps) + minimal dependency tree (Vite ~80 vs Next.js ~300+ transitive deps; Hono ~14 KB vs Express ecosystem) + lockfile-lint + SRI on all assets + reproducible builds with signed provenance. |
-| CSP bypass | Vite emits no inline scripts or styles; Tailwind compiles to static CSS; React hydration works without inline data scripts; Hono sets CSP headers at the BFF, not in client-side meta tags. |
+| CSP bypass | Vite emits no inline scripts or styles; Tailwind compiles to static CSS; React hydration works without inline data scripts. The policy has ONE definition (`packages/shared/src/security/csp.ts`) with three delivery points — the Hono BFF header, the `vite preview` header, and a `<meta http-equiv>` injected into the built HTML at build time. The meta form is redundant on the web and load-bearing in the native-courier WebView, which has no server headers; `check:csp-parity` asserts it on the built artifact and rejects any hand-written policy in `apps/web/index.html` (two `<meta>` policies would INTERSECT). |
 | Trusted Types violation | React DOM pipeline is Trusted Types compatible; DOMPurify returns `TrustedHTML`; no other code path creates DOM nodes from strings; Biome flags `innerHTML` and `document.write`. |
 | Serialization / type confusion | End-to-end TypeScript strict mode + zod runtime validation at API boundaries + Hono RPC compile-time route contracts + Drizzle type-safe SQL. |
 | Clickjacking | Hono security-headers middleware (`frame-ancestors 'self'`); wallet and signing flows set `X-Frame-Options: DENY`. |
@@ -599,7 +618,7 @@ The client bundle targets fewer than **15 direct production dependencies**. The 
 
 | Layer | Technology | Primary security rationale |
 |---|---|---|
-| Language | TypeScript 6.x strict | Compile-time null safety, type safety, and unchecked-access prevention. |
+| Language | TypeScript 7.x strict | Compile-time null safety, type safety, and unchecked-access prevention. |
 | Package manager | pnpm | Strict resolution prevents phantom dependencies; lockfile integrity. |
 | Build | Vite 8 (Rolldown) | No inline scripts; small dep tree; deterministic output; explicit client-server boundary. |
 | UI framework | React 19 | JSX auto-escaping; Trusted Types compatible; largest security-audit community. |
@@ -842,7 +861,7 @@ SCOI powers the story-surface divergence section, bridge-comment rewards (measur
 | State | Meaning | Product action |
 |---|---|---|
 | Coherent | Local interpretations mostly agree. | Normal distribution. |
-| Ambiguous | Some missing background. | Add context-card prompt. |
+| Ambiguous | Some missing background. | Invite a bridging or context-adding comment. |
 | Split | Communities read the item differently. | Show lens map before commenting. |
 | Obstructed | Interpretations cannot be reconciled without extra context. | Slow cross-community spread; request bridge/synthesis. |
 | Weaponized | Ambiguity is used to inflame conflict. | Review and apply safety constraints. |
@@ -945,7 +964,29 @@ Trending topics trace strands over time; crossings as strands swap rank form a b
 
 ## 12.4 Reeb Attention Landscape
 
-Define a scalar function over content space (e.g. engagement velocity or controversy); the Reeb graph tracks how level-set components merge and split. Product use: visualize narrative basins in the Civic Map; detect topic bifurcation; route bridge prompts when two attention basins share a fragile saddle.
+Define a scalar function over content space (e.g. engagement velocity or controversy); the Reeb graph tracks how level-set components merge and split. Product use: visualize narrative basins in the **Civic Map**; detect topic bifurcation; route bridge prompts when two attention basins share a fragile saddle.
+
+The Civic Map is a **steward/analyst** surface, on the Integrity tab of the
+Steward Console beside the coordinated-report incidents (Section 3.2). The two
+approach one question from opposite ends: the incidents ask whether a set of
+accounts acted together, the landscape asks what shape attention is taking and
+where it is about to come apart.
+
+It is drawn as the **merge tree** the Reeb graph already is — the sweep level is
+the vertical axis, each basin a stem from its peak, each saddle the join where
+two stems meet — with fragile saddles marked in words as well as in form. Three
+rules keep it a diagnostic rather than a leaderboard, and they are enforced at
+the render boundary, not by convention: the sweep scalar positions a stem and is
+never printed, basins are never re-ordered by it, and the surface never speaks of
+"top" or "most". Because the landscape's nodes are stories scored by an
+engagement count, a reader-facing rendering would be a popularity board by
+another name — which is why the surface sits behind the steward bar.
+
+A fragile saddle is **actionable**: it names the two basins, the topics they
+share, and how few connections hold them together, and it opens a bridge request
+on the joined thread (Section 10.5) so the §12.4 prompt reaches the multi-lens
+participants who could answer it. That closes the loop this invariant was built
+for — the fragile-saddle output previously had no consumer at all.
 
 ## 12.5 Counterfactual Invariance Defect (CID)
 
@@ -1039,7 +1080,7 @@ Normalize URL and canonical source; detect duplicates and syndicated copies with
 
 ## 14.3 Source model
 
-Source profiles contain: name and canonical domain; ownership/publisher lineage when known; typical topics; correction history within Licio; community notes and context cards; known syndication relationships. The source model must not present simplistic "truth scores"; it exposes context and history, not a substitute for reader judgment.
+Source profiles contain: name and canonical domain; ownership/publisher lineage when known; typical topics; correction history within Licio; community notes; known syndication relationships. The source model must not present simplistic "truth scores"; it exposes context and history, not a substitute for reader judgment.
 
 ## 14.4 Story lifecycle
 
@@ -1252,7 +1293,7 @@ Allowed: a funded evidence bounty creates a "Needs evidence" card; completed, in
 
 ## 17.12 Success metrics
 
-Measure public value, not asset volume. **Good:** evidence bounties completed with accepted primary sources; grant-funded context cards that improve thread resolution; treasury-transparency completeness; proposal-participation diversity; low scam/fraud rate; low governance-capture rate; high share of treasury actions with clear public purpose; low reversal/dispute rate; user comprehension of transaction previews; no measurable pay-to-rank effect. **Avoid as goals:** total value locked; tokens traded; wallet connects as growth KPI; vote volume without outcome quality; treasury size as status; crypto revenue as the main criterion; speculative price; hype-driven engagement.
+Measure public value, not asset volume. **Good:** evidence bounties completed with accepted primary sources; grant-funded context work that improves thread resolution; treasury-transparency completeness; proposal-participation diversity; low scam/fraud rate; low governance-capture rate; high share of treasury actions with clear public purpose; low reversal/dispute rate; user comprehension of transaction previews; no measurable pay-to-rank effect. **Avoid as goals:** total value locked; tokens traded; wallet connects as growth KPI; vote volume without outcome quality; treasury size as status; crypto revenue as the main criterion; speculative price; hype-driven engagement.
 
 # 18. Trust, safety, and moderation
 
@@ -1551,14 +1592,22 @@ A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC f
 | `/v1/rooms/{room_id}/feed` | GET | Room feed (public + in-room content of that room) for users who pass the room read bar. |
 | `/v1/stories` | POST | Submit a content item (link, image, video, or written post) to a home room, with a visibility choice where the room permits one. |
 | `/v1/stories/{id}` | GET | Story detail and context. |
-| `/v1/threads/{id}` | GET | Thread overview and branch index. |
-| `/v1/threads/{id}/branches/{branch}` | GET | Branch content. |
-| `/v1/contributions` | POST | Create structured contribution. |
+| `/v1/stories/{id}/comments` | GET | The story's own comment section — the lightly-nested read surface of Section 6.4. |
+| `/v1/stories/{id}/comments/stream` | GET | Same-origin SSE stream of new comments on that story (Section 15.3). |
+| `/v1/threads/{id}` | GET | Thread record for the comment section the story owns. |
+| `/v1/contributions` | POST | Create a comment or typed enrichment (Section 6.6). |
 | `/v1/reports` | POST | Report content or account. |
 | `/v1/signal-ledger` | GET | Private signal explanation. |
 | `/v1/privacy/export` | POST | Request export. |
-| `/v1/privacy/delete-attention` | POST | Delete attention history. |
+| `/v1/privacy/attention/delete` | POST | Delete attention history. |
 | `/v1/feed/preferences` | PATCH | Update personalization and feed mode. |
+
+The per-branch read endpoint (`/v1/threads/{id}/branches/{branch}`) was
+**retired with the WS-T comment remodel**: the six-section thread was a
+read-time projection, and the conversation is now the single lightly-nested
+comment section a story owns (Sections 6.4, 15.3). Reads go through
+`/v1/stories/{id}/comments`; the legacy `/threads/{threadId}` client route
+redirects to the owning story's `#comments` anchor.
 
 ## 23.3 Representative payload shapes
 
@@ -1796,7 +1845,7 @@ Screen-reader support (VoiceOver, TalkBack, NVDA, JAWS) via semantic landmarks a
 
 ## 26.3 Cognitive accessibility
 
-Thread overview before deep branches; summaries with unresolved questions; progressive disclosure for mathematical/ranking explanations; plain-language labels; reading estimates; an "explain like I am new" lens where appropriate; and saving/returning without losing place.
+Collapsible reply previews with a "continue thread" link before deeper subthreads (the Section 6.4 nesting, which replaced the retired thread Overview); progressive disclosure for mathematical/ranking explanations; plain-language labels; reading estimates; an "explain like I am new" lens where appropriate; and saving/returning without losing place.
 
 ## 26.4 Internationalization
 
@@ -1847,13 +1896,13 @@ Do not optimize for total value locked, tokens traded, wallet connects, speculat
 
 ## 28.4 Success metrics by phase
 
-**Alpha:** users understand why content is shown; the structured composer does not block participation; MERI dedup improves perceived feed quality; source-opening and evidence-addition are measurable; moderation tools handle early abuse. **Beta:** PWAtt outperforms chronological on user-rated usefulness; coordinated activity is detected without high false positives; context cards reduce cross-community misunderstanding; Core Web Vitals targets are met; accessibility audits pass core flows. **GA:** transparency reports generate from live data; invariant dashboards are stable; appeals are operational; ranking experiments have release gates; security and accessibility reviews pass.
+**Alpha:** users understand why content is shown; the structured composer does not block participation; MERI dedup improves perceived feed quality; source-opening and evidence-addition are measurable; moderation tools handle early abuse. **Beta:** PWAtt outperforms chronological on user-rated usefulness; coordinated activity is detected without high false positives; the divergence section reduces cross-community misunderstanding; Core Web Vitals targets are met; accessibility audits pass core flows. **GA:** transparency reports generate from live data; invariant dashboards are stable; appeals are operational; ranking experiments have release gates; security and accessibility reviews pass.
 
 # 29. Operational workflows
 
 ## 29.1 New story
 
-User submits a link via the browser share target or the Submit tab → client captures URL, title, optional reason, the destination home room, and the visibility choice (locked to in-room when the room is private) → backend normalizes URL and detects duplicates within the visibility tier (Section 14.5) → story shell created in the home room or the existing story reopened → initial thread summary and context cards generated → visibility-eligible feed candidates receive a baseline rank → as users read and contribute, PWAtt grows or dampens → invariant services update state → the story moves through lifecycle labels.
+User submits a link via the browser share target or the Submit tab → client captures URL, title, optional reason, the destination home room, and the visibility choice (locked to in-room when the room is private) → backend normalizes URL and detects duplicates within the visibility tier (Section 14.5) → story shell created in the home room or the existing story reopened → visibility-eligible feed candidates receive a baseline rank → as users read and contribute, PWAtt grows or dampens → invariant services update state → the story moves through lifecycle labels.
 
 ## 29.2 New contribution
 
@@ -1909,7 +1958,7 @@ No crypto task blocks steps 1–9. The rule is: **PWAtt and MERI exist before pu
 ## 30.3 Workstreams
 
 - **A — Doctrine, policy, governance:** no-applause doctrine; allowed/prohibited signal matrix (prohibited: money, wallet connection, token holdings, payment amount, paid membership, treasury status, follower count); policy hierarchy; charter templates; moderation-escalation taxonomy; transparency-report data dictionary; jurisdiction/feature matrix.
-- **B — PWA UX and design system:** information architecture; story cards with no applause affordances; ranking explanations; contribution chips; context cards; two-tap report/block/mute; AI-summary disclosure; wallet/governance screens; empty/loading/offline/error/restricted states; accessibility specs; usability testing.
+- **B — PWA UX and design system:** information architecture; story cards with no applause affordances; ranking explanations; contribution chips; the story divergence section; two-tap report/block/mute; AI-summary disclosure; wallet/governance screens; empty/loading/offline/error/restricted states; accessibility specs; usability testing.
 - **C — PWA client:** app shell, routing, service worker, install, feature flags; auth/passkeys; core surfaces; UGC reporting/blocking/appeals; offline cache and background sync; in-browser attention aggregation; composer; explanation cards; optional wallet/governance modules behind flags; performance, accessibility, and security testing.
 - **D — Identity, accounts, privacy:** identity states; minimal-profile account service that records **no IP address and no location** (Section 19.1); age gate (minors excluded from wallet/governance); consent and privacy settings; new-device sign-in alerts using a coarse device descriptor only (no IP, no geolocation, no geo-IP lookup); wallet-link table isolated from profile/attention/ranking; retention/deletion/export jobs; staff access controls and audit logs that contain no IPs or locations; privacy-review workflow.
 - **E — Event pipeline and PWAtt:** event schema and classification; in-browser buffering with privacy filters; server ingestion/validation/replay protection/retention; PWAtt v0 shadow; participation-quality weighting; anti-signals; explanation logs; offline manipulation simulations; promotion to bounded ranking only after safety review.
@@ -1985,7 +2034,7 @@ A feature cannot reach public beta unless it passes each gate: **Product** (supp
 | Gaming participation | Long low-quality comments to gain rank. | Contribution quality, outcomes, redundancy, steward review, caps. |
 | Mathematical opacity | Invariants hard to explain. | User-facing labels, public methodology summaries, audit docs. |
 | False coordination positives | Authentic communities look coordinated. | Markov-fiber conditioning, human review, appeals. |
-| Context-card bias | Summaries could frame issues unfairly. | Lens diversity, citations, correction workflow, steward review. |
+| Divergence-summary bias | Lens summaries could frame issues unfairly. | Lens diversity, citations, correction workflow, steward review. |
 | Ranking conservatism | Too many constraints make the feed stale. | Tuned exploration quotas, user modes, freshness budgets. |
 | Moderator overload | Structured platform still faces abuse. | Queue prioritization, triage automation, steward program. |
 | Cold start | New stories lack attention and participation. | Freshness baseline, source context, room seeding, opt-in interests. |
@@ -2085,15 +2134,15 @@ Before any production launch, confirm: the user can use the social product witho
 
 | Invariant | Product question | Surface | Primary owner |
 |---|---|---|---|
-| MERI | Is this feed nonredundant? | Feed, topic page, evidence drawer. | Ranking + Invariants. |
+| MERI | Is this feed nonredundant? | Feed and topic page (ranking-only — MERI has no reader-facing surface). | Ranking + Invariants. |
 | MFCI | Is this activity unusually coordinated after base rates? | Integrity queue, trend controls, report handling. | Integrity. |
 | GWEI | Are cohorts receiving structurally comparable experiences? | Audit dashboard, transparency report. | Responsible AI + Data Science. |
-| SCOI | Will this content collapse context across communities? | Context cards, share flow, bridge prompts. | Conversation + Ranking. |
+| SCOI | Will this content collapse context across communities? | Story divergence section, steward context reports, bridge prompts. | Conversation + Ranking. |
 | PHI | Is the recommender steering users through risky loops? | Feed modes, user controls, ranking constraints. | Ranking + Safety. |
 | Hodge tension | Is disagreement local or structurally unresolved? | Moderator queue, thread-health labels. | Conversation Health. |
 | Tropical rank | Is cascade timing suspicious? | Integrity queue, trend dampening. | Integrity. |
 | Braid dynamics | Is the agenda being churned or gamed? | Trend dashboard. | Integrity + Editorial Ops. |
-| Reeb landscape | How are attention basins forming? | Civic Map, topic monitoring. | Discovery. |
+| Reeb landscape | How are attention basins forming, and where is one about to come apart? | Civic Map on the Steward Console's Integrity tab; bridge-prompt routing. | Integrity. |
 | CID | Is ranking stable under irrelevant transformations? | Model audit. | Responsible AI. |
 | Path signature | Is the session constructive or compulsive? | Wellbeing prompts, UX research. | Client + Data Science. |
 
@@ -2101,7 +2150,7 @@ Before any production launch, confirm: the user can use the social product witho
 
 ## 35.1 Reader opens a breaking story
 
-Sees a card whose reason reads "Readers are opening the source and local room activity is rising"; taps to see the source preview; the context card says evidence is preliminary; opens the source, reads, and saves for later; the app counts bounded active attention, not endorsement; no public badge or score appears.
+Sees a card carrying its source, a sourced-comment count, and no dispute badge; taps through to the discussion; the story surface notes that interpretations differ across two rooms; opens the source, reads, and saves for later; the app counts bounded active attention, not endorsement; no public badge or score appears.
 
 ## 35.2 User adds a correction
 
@@ -2109,7 +2158,7 @@ Sees a comment repeating an incorrect date; taps Correct; the composer requires 
 
 ## 35.3 Content crosses communities
 
-A joke from one room spreads to a political room; SCOI rises because local interpretations conflict; the story page surfaces "Where interpretations differ"; the share sheet suggests including origin context; bridge comments are invited; a user explains the original meaning and limits; SCOI decreases and distribution resumes with a context card attached.
+A joke from one room spreads to a political room; SCOI rises because local interpretations conflict; the story page surfaces "Where interpretations differ"; the share sheet suggests including origin context; bridge comments are invited; a user explains the original meaning and limits; SCOI decreases and the divergence section narrows as the readings converge.
 
 ## 35.4 Coordinated reporting attempt
 
@@ -2143,7 +2192,7 @@ PWAtt v0/v1 aggregation; Signal Ledger v0; MERI v0/v1 duplicate grouping; source
 
 ## 36.3 Priority 2 (before public beta)
 
-PWAtt v1 production ranking with conservative weights; MERI v1 dampening and explanations; MFCI shadow on live data plus coordinated-reporting protection; context cards and evidence drawer v1; T&S staffing/QA/escalation; accessibility audit and remediation; security testing and incident drill; public support/notices/appeals; transparency-report generator; privacy retention jobs and deletion verification.
+PWAtt v1 production ranking with conservative weights; MERI v1 dampening and explanations; MFCI shadow on live data plus coordinated-reporting protection; the story divergence section and per-comment sources v1; T&S staffing/QA/escalation; accessibility audit and remediation; security testing and incident drill; public support/notices/appeals; transparency-report generator; privacy retention jobs and deletion verification.
 
 ## 36.4 Priority 3 (during public beta)
 
@@ -2159,7 +2208,7 @@ K0 (before any wallet UX): pin commit and license/copyleft review; threat-model 
 
 ## 36.7 Dependency map
 
-PWAtt depends on event schema, in-browser instrumentation, privacy classification, and aggregation jobs. MERI depends on canonicalization, source metadata, embeddings, and merge tools. MFCI depends on trustworthy event ingestion, action tables, margin definitions, and analyst tooling. GWEI depends on ranking decision logs, cohort definitions, impression logs, and privacy thresholds. SCOI depends on lenses, context cards, local summaries, taxonomy, and steward patch tools. PHI depends on session summaries, topic-state transitions, recommender logs, and user reset controls. Transparency depends on moderation reason codes, ranking decision logs, incident logs, and aggregation jobs. Public beta depends on web security testing, accessibility remediation, incident response, T&S staffing, and rollback mechanisms. Wallet UX depends on web security, account identity, the wallet-link service, and the distribution-integrity pipeline. Governance simulation depends on rooms, proposals, conversation linking, and steward roles. Testnet actions depend on the Knomosis gateway, deployment manifest, law-pack registry, and event indexer. Real funds depend on legal approval, external audits, compliance controls, support staffing, incident response, and treasury accounting. The content–room ownership and visibility model (Section 14.5, workstream Q) depends on the room model, the story/thread schema, the ingestion guard chain, the upload pipeline, the search surfaces, and the ranking distribution-side visibility bar; it remodels shipped surfaces and is dependency-ordered after ingestion, forum, and ranking.
+PWAtt depends on event schema, in-browser instrumentation, privacy classification, and aggregation jobs. MERI depends on canonicalization, source metadata, embeddings, and merge tools. MFCI depends on trustworthy event ingestion, action tables, margin definitions, and analyst tooling. GWEI depends on ranking decision logs, cohort definitions, impression logs, and privacy thresholds. SCOI depends on lenses, local summaries, taxonomy, and steward patch tools. PHI depends on session summaries, topic-state transitions, recommender logs, and user reset controls. Transparency depends on moderation reason codes, ranking decision logs, incident logs, and aggregation jobs. Public beta depends on web security testing, accessibility remediation, incident response, T&S staffing, and rollback mechanisms. Wallet UX depends on web security, account identity, the wallet-link service, and the distribution-integrity pipeline. Governance simulation depends on rooms, proposals, conversation linking, and steward roles. Testnet actions depend on the Knomosis gateway, deployment manifest, law-pack registry, and event indexer. Real funds depend on legal approval, external audits, compliance controls, support staffing, incident response, and treasury accounting. The content–room ownership and visibility model (Section 14.5, workstream Q) depends on the room model, the story/thread schema, the ingestion guard chain, the upload pipeline, the search surfaces, and the ranking distribution-side visibility bar; it remodels shipped surfaces and is dependency-ordered after ingestion, forum, and ranking.
 
 # 37. Appendix D: Reference standards and sources
 

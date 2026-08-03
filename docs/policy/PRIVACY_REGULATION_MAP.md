@@ -108,7 +108,7 @@ than — the per-jurisdiction matrix below, whose "Attention signals" row aggreg
 |---|---|
 | View Signal Ledger | `GET /v1/signal-ledger` (WS-D/WS-I) |
 | Export account data | `POST /v1/privacy/export` |
-| Delete attention history | `POST /v1/privacy/delete-attention` |
+| Delete attention history | `POST /v1/privacy/attention/delete` |
 | Disable personalization / reset topic history / local vs server personalization / quiet hours / disable cross-device sync | `PATCH /v1/feed/preferences` and privacy settings (WS-D.2) |
 | Request moderation data related to one's account (where legally feasible) | Support/privacy workflow |
 
@@ -161,7 +161,7 @@ retention schedule; raw event logs use the shortest feasible tier.
   "user_rights_endpoints": [
     { "right": "View Signal Ledger", "endpoint": "GET /v1/signal-ledger" },
     { "right": "Export account data", "endpoint": "POST /v1/privacy/export" },
-    { "right": "Delete attention history", "endpoint": "POST /v1/privacy/delete-attention" },
+    { "right": "Delete attention history", "endpoint": "POST /v1/privacy/attention/delete" },
     { "right": "Feed/privacy preferences", "endpoint": "PATCH /v1/feed/preferences" }
   ],
   "minors_excluded_from_financial_features": true,

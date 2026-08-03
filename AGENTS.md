@@ -831,9 +831,9 @@ workspace has a thin local config so `pnpm --filter <ws> test` runs
 standalone.  Coverage gate: 80% minimum (lines, functions, branches,
 statements).
 
-**Test counts.**  `pnpm test` is the canonical query (≈10520 pass without
-the gated integration env; ≈10810 with live Postgres/Redis — the gated env
-also drops the skip count from ≈300 to ≈12, the residual being the
+**Test counts.**  `pnpm test` is the canonical query (≈10620 pass without
+the gated integration env; ≈10940 with live Postgres/Redis — the gated env
+also drops the skip count from ≈340 to ≈12, the residual being the
 `RUN_PERF` benchmarks).  Only monotonic growth is enforced — exact numbers
 drift, so the per-suite breakdown lives in each `docs/*/README.md`, not
 here.  WS-D/E/F/G/H/I/U and WS-R add **gated** Postgres+Redis integration
@@ -849,7 +849,8 @@ forwards the `--` verbatim and vitest drops every flag after it, so the run
 looks normal while computing no coverage at all).  Measure it with the gated
 services up: the WS-D/E/F/G/H/I/U + WS-R integration suites carry a large
 share of the branch coverage, and branches clear the bar by a thin margin
-(≈81%) WITH them.
+(measured 80.5%) WITH them — half a point, so treat a coverage drop in review
+as a real signal rather than noise.
 
 **E2E.**  Playwright over Chromium/Firefox/WebKit with axe-core assertions.
 `playwright.config.ts` is the frontend-only suite against the static
