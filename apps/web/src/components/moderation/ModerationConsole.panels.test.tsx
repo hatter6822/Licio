@@ -303,6 +303,7 @@ const civicLandscape: CivicMapResponse = {
   ],
   splits: [],
   coverage: 1,
+  scan: { complete: true, examined: 2 },
 };
 
 const incidents: IncidentQueueResponse = {

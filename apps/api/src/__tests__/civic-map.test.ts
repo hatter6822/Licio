@@ -255,6 +255,25 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     for (const roomId of seen) expect(roomId).toBe('current-room');
   });
 
+  it('reports whether the window was scanned to its END', async () => {
+    // The landscape is bounded twice — a node cap and a scan ceiling — and a
+    // partial hour drawn as the hour is the same defect as an empty report read
+    // as a clean room. The completeness travels in the RESULT, so a consumer
+    // cannot hold the node list without it.
+    const rows = [
+      {
+        storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
+        title: 'A',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 9,
+      },
+    ];
+    const { events, ingestion } = services(rows);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
+    expect(map?.scan.complete).toBe(true);
+    expect(map?.scan.examined).toBe(1);
+  });
+
   it('bridges on a CONNECTING story, not on a basin peak', async () => {
     // Basins meet through their lower-level members: a peak about X joins a
     // peak about Z through an X/Y story, and the join is about Y. Opening on a

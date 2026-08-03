@@ -855,7 +855,16 @@ export async function assembleEngagementLandscape(
   events: EventPipelineServices,
   ingestion: IngestionServices,
   nowMs: number,
-): Promise<{ nodes: ReebNode[]; edges: ReebEdge[]; stories: Map<string, StoryRecord> }> {
+): Promise<{
+  nodes: ReebNode[];
+  edges: ReebEdge[];
+  stories: Map<string, StoryRecord>;
+  /** What the bounds did. Carried in the RESULT rather than left implicit,
+   *  because a landscape that stopped at its node cap or its scan ceiling is a
+   *  partial hour, and a consumer holding a bare node list cannot tell that
+   *  from a quiet one. */
+  scan: { complete: boolean; examined: number };
+}> {
   const hourMs = 3_600_000;
   const windowStart = new Date(Math.floor(nowMs / hourMs) * hourMs - hourMs).toISOString();
 
@@ -881,6 +890,11 @@ export async function assembleEngagementLandscape(
   const nodes: ReebNode[] = [];
   const topicsById = new Map<string, readonly string[]>();
   const byId = new Map<string, StoryRecord>();
+  let examined = 0;
+  // Complete UNTIL a bound stops the walk: the loop below breaks either because
+  // the window ran out (complete) or because the node cap / scan ceiling was
+  // reached (not).
+  let complete = false;
   for (let scanned = 0; scanned < LANDSCAPE_SCAN_CEILING; scanned += LANDSCAPE_SCAN_BATCH) {
     const active = await events.windowStore.listActiveInWindow(
       windowStart,
@@ -899,7 +913,13 @@ export async function assembleEngagementLandscape(
     // duplicate node id, so the Civic Map answered 500 for a race that is only
     // reachable once restricted rows push the scan past its first batch.
     const page = active.slice(scanned).filter((row) => !topicsById.has(row.itemId));
-    if (page.length === 0) break;
+    examined += page.length;
+    if (page.length === 0) {
+      // The window had nothing further to offer — the walk ENDED rather than
+      // being cut short.
+      complete = true;
+      break;
+    }
     const hydrated = await ingestion.stories.getPublicByIds(page.map((row) => row.itemId));
     for (const row of page) {
       const story = hydrated.get(row.itemId);
@@ -909,7 +929,12 @@ export async function assembleEngagementLandscape(
       topicsById.set(row.itemId, story.topicIds);
       if (nodes.length >= LANDSCAPE_NODES) break;
     }
-    if (nodes.length >= LANDSCAPE_NODES || active.length < scanned + LANDSCAPE_SCAN_BATCH) break;
+    if (active.length < scanned + LANDSCAPE_SCAN_BATCH) {
+      // A short page IS the end of the window.
+      complete = true;
+      break;
+    }
+    if (nodes.length >= LANDSCAPE_NODES) break;
   }
 
   const edges: ReebEdge[] = [];
@@ -932,7 +957,7 @@ export async function assembleEngagementLandscape(
   // would issue a second query and reopen the window this one closed — a story
   // can leave the public set between two reads, and the second reader would then
   // have a node it cannot name. Every node here has a row, by construction.
-  return { nodes, edges, stories: byId };
+  return { nodes, edges, stories: byId, scan: { complete, examined } };
 }
 
 // ---------------------------------------------------------------------------

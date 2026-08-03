@@ -97,6 +97,7 @@ export async function buildCivicMap(
     nodes,
     edges,
     stories: byId,
+    scan,
   } = await assembleEngagementLandscape(events, ingestion, nowMs);
   // No nodes ⇒ no landscape. The assembly starts FROM the window's active rows
   // and drops anything that no longer hydrates as public, so an empty result
@@ -264,5 +265,8 @@ export async function buildCivicMap(
     // target is resolved for one.
     splits: await Promise.all(graph.splits.slice(0, 240).map(toSaddle(false))),
     coverage: nodes.length === 0 ? 0 : connected.size / nodes.length,
+    // Carried through UNCHANGED from the assembly: a map drawn from part of an
+    // hour must not be read as the hour, and only the walk knows which it was.
+    scan,
   };
 }

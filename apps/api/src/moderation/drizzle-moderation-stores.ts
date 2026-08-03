@@ -35,6 +35,7 @@ import type {
   ReportTargetType,
   ReviewerAvailability,
 } from '@licio/shared';
+import { OPEN_CASE_STATUSES } from '@licio/shared';
 import {
   and,
   asc,
@@ -339,6 +340,32 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
       .update(moderationCases)
       .set({ enforcementDelayed: true, updatedAt: new Date() })
       .where(and(eq(moderationCases.caseId, caseId), eq(moderationCases.enforcementDelayed, false)))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapCase(row);
+  }
+
+  async resolveIfOpen(
+    caseId: string,
+    target: { targetType: ReportTargetType; targetId: string },
+  ): Promise<ModerationCaseRecord | null> {
+    // ONE STATEMENT, like `claimIfUnassigned` below: the whole precondition —
+    // this case, about THIS target, still open — lives in the UPDATE, so a case
+    // resolved between a caller's read and its write cannot be rewritten. Note
+    // what is NOT in the `set`: `resolvedActionId` stays as it is. A delist is
+    // not a `moderation_actions` row, so writing null there would erase a
+    // completed case's link to the enforcement that actually closed it.
+    const rows = await this.#db
+      .update(moderationCases)
+      .set({ status: 'resolved', updatedAt: new Date() })
+      .where(
+        and(
+          eq(moderationCases.caseId, caseId),
+          eq(moderationCases.targetType, target.targetType),
+          eq(moderationCases.targetId, target.targetId),
+          inArray(moderationCases.status, [...OPEN_CASE_STATUSES]),
+        ),
+      )
       .returning();
     const row = rows[0];
     return row === undefined ? null : mapCase(row);

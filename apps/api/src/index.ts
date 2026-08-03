@@ -103,17 +103,11 @@ import {
   RedisSlidingWindowStore,
 } from './events/redis-event-stores.js';
 import {
-  applyRetentionPreferenceChange,
-  exportUserAttention,
-  purgeUserAttention,
-} from './events/retention.js';
-import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
 } from './events/services.js';
 import type { ItemSafetyStateStore } from './events/stores.js';
 import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
-import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
 import {
   buildDebateJudgeRunner,
   DEBATE_SCHEDULER_INTERVAL_MS,
@@ -161,6 +155,7 @@ import {
 } from './governance/services.js';
 import { createInMemoryGovernanceStores } from './governance/stores.js';
 import { accountRef } from './identity/crypto.js';
+import { installDataRightsHooks } from './identity/data-rights-hooks.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -269,19 +264,13 @@ import { assertProductionParity } from './lib/parity-guard.js';
 import { isTierUniqueViolation, TIER_COLLISION_RETRIES } from './lib/pg-errors.js';
 import { pgNoticeLogLevel } from './lib/pg-notices.js';
 import {
-  getPreferences,
   getVapidConfig,
-  purgePushStateForUser,
   sendBodylessWakeToUser,
   setPushStateStore,
   subscriptionsForUser,
 } from './lib/push-service.js';
-import {
-  REPLY_NOTIFICATIONS_PER_USER_CAP,
-  replyNotifications,
-  setReplyNotificationStore,
-} from './lib/reply-notifications.js';
-import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
+import { setReplyNotificationStore } from './lib/reply-notifications.js';
+import { setUserSettingsStore } from './lib/user-settings.js';
 import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { notFoundHandler } from './middleware/error-handler.js';
 import { actorQueues } from './moderation/authz.js';
@@ -291,7 +280,6 @@ import {
   createWsJContributionSafety,
 } from './moderation/forum-integration.js';
 import { malwareVerdictForUrl } from './moderation/malware-fetch.js';
-import { noticeToView } from './moderation/notices.js';
 import {
   type ContentEnforcementDeps,
   type ContentPortDeps,
@@ -725,26 +713,6 @@ setRankingServices(rankingServices);
     return story;
   };
 }
-// Close the WS-D residual hooks with their real WS-E implementations: DSAR
-// export and deletion now cover attention data, and a retention-preference
-// change tightens existing purge deadlines (never extends them). The purge
-// mode distinguishes the attention RESET (attention tiers only) from the
-// account hard purge (attention deleted + remaining owned rows de-linked).
-identityServices.purgeAttention = (userId, mode) => purgeUserAttention(eventServices, userId, mode);
-identityServices.exportAttention = (userId) => exportUserAttention(eventServices, userId);
-// The CONTENT half of the data-rights hooks (WS-F stories + WS-G forum/
-// rooms/uploads, WS-Q.3.5 tier tagging) is composed in the testable
-// forum/data-rights module. Export is COMPLETE (§19.3 / GDPR Art. 15) and
-// covers BOTH visibility tiers; anonymize tombstones the author across tiers
-// and removes (private-room) memberships + steward rows.
-identityServices.exportContributions = (userId) =>
-  exportUserContent(ingestionServices, forumServices, userId);
-identityServices.anonymizeContributions = (userId) => anonymizeUserContent(forumServices, userId);
-identityServices.onPrivacyChange = (change) => {
-  void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>
-    logger.error({ err }, 'retention preference propagation failed'),
-  );
-};
 // DSAR export-archive storage (WS-D.2.2c): S3-compatible when the all-or-none
 // S3_* env group is set (a partial group fails validation at boot).  Archives
 // are SecretBox-sealed client-side either way; without S3 they are in-memory,
@@ -788,40 +756,6 @@ identityServices.alertTransports = createAlertTransports({
       }
     : {}),
   onError: (channel, err) => logger.warn({ channel, err }, 'security-alert delivery failed'),
-});
-// WS-C/WS-T client-state purge on hard deletion (WS-D.2.4): push
-// subscriptions + notification preferences + settings-sync rows + the
-// reply-notification inbox die with the account, and rows the account left
-// as the ACTOR in other users' inboxes are anonymized (production tombstones
-// the users row, so no FK action ever does this implicitly).
-identityServices.purgeClientState = async (userId) => {
-  await purgePushStateForUser(userId);
-  await getUserSettingsStore().purge(userId);
-  await replyNotifications.purgeForUser(userId);
-};
-// WS-S §21.4 — the private-room DIRECTORY record dies with its creator's
-// account. Deletion tombstones the users row, so the stub's
-// `created_by_account_id` FK action never fires and the record would otherwise
-// survive as exactly the "this account created a private room at time T" trace
-// the DELETE route exists to erase. The ROOM is untouched: it lives on member
-// devices, and the server never held it.
-identityServices.purgePrivateRoomStubs = async (userId) => {
-  await getPrivateRoomStubService().purgeForAccount(userId);
-};
-// …and the SAME rows are DISCLOSED (Art. 15). The purge above is the only thing
-// that knows a private-room creator has durable server rows at all; an export
-// that did not consult the same store would report an account with none.
-identityServices.exportPrivateRoomStubs = async (userId) =>
-  await getPrivateRoomStubService().exportForAccount(userId);
-// …and the SAME durable per-user state reaches the DSAR archive (Art. 15):
-// what deletion knows how to remove, export must know how to disclose.
-identityServices.exportClientState = async (userId) => ({
-  settings: await getUserSettingsStore().get(userId),
-  notification_preferences: await getPreferences(userId),
-  reply_notifications: await replyNotifications.listForUser(
-    userId,
-    REPLY_NOTIFICATIONS_PER_USER_CAP,
-  ),
 });
 // WS-H.7.4 — which rooms the landscape may hydrate a story from.
 //
@@ -1266,22 +1200,26 @@ if (db) {
   moderationServices.evidenceDecisions = stores.evidenceDecisions;
   moderationServices.configStore = new DrizzlePwattConfigStore(db);
 }
-// WS-J ↔ WS-D DSAR: the user's moderation notices (statement-of-reasons +
-// appeal outcomes) are durable user data, so they belong in the data export
-// (GDPR Art. 15).  Reporter identity never appears (noticeToView carries the
-// reason code only).  Paged so the export is COMPLETE.
-identityServices.exportModerationNotices = async (userId) => {
-  const out: unknown[] = [];
-  let after: string | null = null;
-  for (;;) {
-    const page = await moderationServices.notices.listByUser(userId, after, 200);
-    for (const n of page) out.push(noticeToView(n));
-    if (page.length < 200) break;
-    after = page[page.length - 1]?.createdAt ?? null;
-    if (after === null) break;
-  }
-  return out;
-};
+// EVERY §19.3 data-rights hook, in one call (GDPR Art. 15 / Art. 17): attention,
+// content, client state, the private-room directory record, the moderation
+// notices, and the retention-preference propagation.
+//
+// Installed HERE rather than beside each service because the moderation stores
+// are swapped to their Drizzle adapters just above, and the notice export must
+// read the store this boot ends with. The installer captures the service
+// OBJECTS, so it does.
+//
+// It is one function for both composition roots: an absent hook is a silent
+// no-op — the archive simply omits a store, the erasure simply leaves it — so a
+// root that assigned them inline could drift from the other without anything
+// failing. `check:prod-parity` requires every root to make this call.
+installDataRightsHooks(identityServices, {
+  events: eventServices,
+  ingestion: ingestionServices,
+  forum: forumServices,
+  moderation: moderationServices,
+  log: logger,
+});
 // WS-J #18: auto-assignment only chooses reviewers who can open the queue —
 // resolve each reviewer's queues from their WS-D steward roles.
 moderationServices.reviewerQueues = async (id) => {

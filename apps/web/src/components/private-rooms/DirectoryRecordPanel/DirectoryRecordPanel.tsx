@@ -131,25 +131,29 @@ export function DirectoryRecordPanel({
       // commitments in it are what a member would bootstrap from.
       await accept(await fetchPrivateRoomBootstrap(roomServerId, token));
     } catch (err) {
-      // A 404 is DECISIVE: §21.2 collapses unknown-room, wrong-token and
-      // malformed-id into it, so with a capability in hand it means the record
-      // is gone. That is the state a re-registration answers — and it is also
-      // permission to drop the local handle, which is otherwise unrepairable
-      // (a retry of DELETE stops at the same 404 before reaching the cleanup).
+      // THE READ NEVER CLEARS THE HANDLE.
+      //
+      // A 404 says "no record YOU can reach": §21.2 collapses an unknown room,
+      // a wrong token and a malformed id into one answer, so a stale or
+      // corrupted local token produces exactly this. The owner-scoped lookup
+      // below narrows the MESSAGE, and it cannot narrow more than that — a
+      // `null` from it means "the account signed in here owns no record for
+      // this room", which a joined member on their own account, or the creator
+      // signed into a second account, satisfies while the creator's record
+      // stands. Clearing on that destroys the device's only copy of a
+      // capability a member admitted after epoch 0 cannot re-derive, and takes
+      // the directory reference out of every invite that device makes
+      // afterwards.
+      //
+      // Deletion is the only thing that proves absence, and this device knows
+      // when it performed one — so the remove action owns the clear, and it now
+      // treats the server's 404 as the record already being gone, which is the
+      // retry-repairs-it property this branch was standing in for.
       const status = err instanceof ApiClientError ? err.status : undefined;
       if (status === 404) {
-        // A 404 says "no record YOU can reach", not "no record". §21.2 collapses
-        // an unknown room, a wrong token and a malformed id into one answer, so
-        // a stale or corrupted local token produces exactly this — and clearing
-        // the handle on it would destroy the only copy of a capability a device
-        // admitted after epoch 0 cannot re-derive, taking the directory
-        // reference out of every invite that device makes afterwards.
-        //
-        // Only the OWNER-SCOPED lookup can tell the two apart, so it decides.
-        // A non-owner keeps the handle and is told the record cannot be reached.
         // A FAILED lookup is not an absent record. Folding a transient error, a
         // 401 during session expiry, or an unreachable server into the same
-        // `null` as "the owner owns nothing here" would clear the handle on
+        // `null` as "the owner owns nothing here" would state absence on
         // exactly the evidence that proves nothing.
         const lookup =
           accountId === null
@@ -158,8 +162,10 @@ export function DirectoryRecordPanel({
                 .then((found) => ({ ok: true as const, found }))
                 .catch(() => ({ ok: false as const }));
         if (lookup.ok && lookup.found === null) {
+          // This ACCOUNT has no record here — the state re-registration
+          // answers. The handle stays: it is the only capability for whatever
+          // record another account may still own.
           setState({ kind: 'absent' });
-          await session.clearDirectoryStub();
         } else {
           setState({ kind: 'unreadable' });
           setError(
@@ -181,7 +187,7 @@ export function DirectoryRecordPanel({
     } finally {
       setBusy(null);
     }
-  }, [roomServerId, token, t, session, accept, accountId]);
+  }, [roomServerId, token, t, accept, accountId]);
 
   useEffect(() => {
     void read();
@@ -562,22 +568,34 @@ export function DirectoryRecordPanel({
                   disabled={busy !== null}
                   onClick={() =>
                     void run('remove', async () => {
-                      const result = await deletePrivateRoomStub(roomServerId ?? '');
+                      // A 404 HERE means the record is already gone, which is
+                      // the outcome this action wants — so it is success for
+                      // cleanup purposes, and a retry after a failed local
+                      // clear repairs it instead of stopping at the server's
+                      // refusal. That is what lets the READ path keep the
+                      // handle: deletion this device performed is the only
+                      // proof of absence it has.
+                      const result = await deletePrivateRoomStub(roomServerId ?? '').catch(
+                        (err: unknown) => {
+                          if (err instanceof ApiClientError && err.status === 404) return null;
+                          throw err;
+                        },
+                      );
                       // FORGET the handle with the record. Left behind it would
                       // survive a reload as a pointer to nothing — and the next
                       // invite would carry it, handing a new member a capability
                       // whose first use is an unexplained 404.
-                      //
-                      // If THIS write fails the action reports failure, and a
-                      // retry cannot repair it: the second DELETE stops at the
-                      // server's 404 first. The read path handles that — a 404
-                      // with a capability in hand is decisive, so it clears the
-                      // handle itself. The repair is a reload, not a dead end.
                       await session.clearDirectoryStub();
                       // The SERVER's own wording, not ours: it is the sentence
                       // §21.4 requires, and rephrasing it here is how "removed
                       // Licio's record" quietly becomes "deleted the room".
-                      setRemoved(result.message);
+                      setRemoved(
+                        result?.message ??
+                          t(
+                            'privateRoom.record.alreadyRemoved',
+                            'Licio’s record for this room is already removed. The room itself is untouched — it lives on members’ devices.',
+                          ),
+                      );
                     })
                   }
                 >

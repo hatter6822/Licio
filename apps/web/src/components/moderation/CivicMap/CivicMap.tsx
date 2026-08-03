@@ -283,6 +283,19 @@ export function CivicMap({
           : ''}
       </p>
 
+      {/* A bounded scan says so. The landscape stops at its node cap or its scan
+          ceiling on a busy hour — and a partial hour read as the hour is the
+          same mistake as an empty report read as a clean room. */}
+      {!data.scan.complete ? (
+        <p className="text-ink-muted text-xs" role="note">
+          {t(
+            'civicMap.partialScan',
+            'This hour had more activity than one map holds: {n} items were examined and the busiest were kept. Treat what is missing as unexamined, not absent.',
+            { n: String(data.scan.examined) },
+          )}
+        </p>
+      ) : null}
+
       {data.coverage < 0.25 ? (
         <p className="text-ink-muted text-xs" role="note">
           {t(

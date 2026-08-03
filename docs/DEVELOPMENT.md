@@ -1342,7 +1342,7 @@ change.
 
 | Command | Fails if… |
 |---------|-----------|
-| `pnpm check:prod-parity` | an in-memory adapter has no boot-wired production counterpart, an env key is neither schema-validated nor a documented dev flag, or a production adapter holds in-memory state |
+| `pnpm check:prod-parity` | an in-memory adapter has no boot-wired production counterpart, an env key is neither schema-validated nor a documented dev flag, a production adapter holds in-memory state, or a composition root does not install the data-rights hooks (an absent export/purge hook is a SILENT no-op — the archive omits that store and the erasure leaves it behind) |
 | `pnpm check:sql-identifiers` | a migration identifier sits at Postgres's 63-byte limit (over-long names truncate silently and can collide — Section 15) |
 | `pnpm check:policy` | a doctrine/policy document fails validation |
 | `pnpm check:knomosis-pins` | a non-`local` Knomosis deployment in `apps/api/src/knomosis/pin.config.json` carries sentinel (all-zero) finality values (Section 17.8) |
@@ -1515,7 +1515,9 @@ runs nine jobs on every PR: **Lint & Format** (Biome, `lint:security`, and the
 doctrine scans including `check:no-applause` / `check:no-raw-egress` /
 `check:prod-parity` — the dev↔prod parity gate: every in-memory adapter needs
 a boot-wired production counterpart, every env key must be schema-validated or
-a documented dev flag, and production adapters hold no in-memory state — plus
+a documented dev flag, production adapters hold no in-memory state, and every
+composition root (the production boot AND the E2E harness) installs the §19.3
+data-rights hooks from the one module that owns them — plus
 the private-P2P and update-channel gates), **Type Check** (`typecheck:ci`),
 **Lockfile Integrity**, **Dependency Budget**, **Test & Coverage** (with live
 Postgres/Redis service containers so the gated suites run, plus the named

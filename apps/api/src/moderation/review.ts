@@ -17,6 +17,7 @@ import {
   type ConsoleAction,
   type ModerationCaseRow,
   type ModerationReasonCode,
+  OPEN_CASE_STATUSES,
   type ReportQueueResponse,
   type SlaState,
   type UserHistory,
@@ -142,7 +143,7 @@ export async function buildReportQueue(
   actor: StewardActor,
   filter: QueueFilterInput,
 ): Promise<ReportQueueResponse> {
-  const baseStatus = filter.status ?? (['new', 'in_progress', 'escalated'] as const);
+  const baseStatus = filter.status ?? OPEN_CASE_STATUSES;
   // The `reporter` + `category` filters each resolve to a SET of case ids (via
   // the reports); an empty set matches nothing (so an unknown reporter/category
   // yields an empty queue, not every case).  When BOTH are present the queue is
@@ -409,7 +410,7 @@ export async function buildCaseReview(
       (subjectUserId !== null &&
         (await services.cases.count({
           subjectUserId,
-          status: ['new', 'in_progress', 'escalated'],
+          status: OPEN_CASE_STATUSES,
           enforcementDelayed: true,
         })) > 0);
 

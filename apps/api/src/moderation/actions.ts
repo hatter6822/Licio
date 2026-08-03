@@ -18,6 +18,7 @@ import {
   type ModerationActionRequest,
   type ModerationActionResponse,
   type ModerationReasonCode,
+  OPEN_CASE_STATUSES,
   type RevertActionResponse,
   reasonCodeAppealable,
   type StewardCapability,
@@ -258,7 +259,7 @@ export async function applyAction(
       // enforcement-delayed coordinated-report case off-page and slip the pivot.
       const openDelayed = await services.cases.count({
         subjectUserId,
-        status: ['new', 'in_progress', 'escalated'],
+        status: OPEN_CASE_STATUSES,
         enforcementDelayed: true,
       });
       if (openDelayed > 0) {

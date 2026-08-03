@@ -274,14 +274,13 @@ describe('DirectoryRecordPanel', () => {
     expect(screen.queryByRole('button', { name: /store a bootstrap record/i })).toBeNull();
   });
 
-  it('clears a handle whose record is GONE, so a failed cleanup is repairable', async () => {
-    // If DELETE commits and the local clear fails, a retry cannot repair it —
-    // the second DELETE stops at the server's 404 first. The read path treats a
-    // 404 with a capability in hand as decisive and clears the handle itself.
+  it('KEEPS the handle when a read fails and this account owns no record', async () => {
+    // An account-scoped `null` is not proof of absence. A joined member signed
+    // into their own account — or the creator signed into a second one — owns
+    // no record while the creator's stands, and a stale token makes the read
+    // 404 exactly as a deleted record does. Clearing there destroys the only
+    // copy of a capability a member admitted after epoch 0 cannot re-derive.
     const cleared = vi.fn().mockResolvedValue(undefined);
-    // The bootstrap read 404s AND the owner lookup answers successfully with no
-    // record — only that pair is proof of deletion. A failing lookup keeps the
-    // handle, which the next test asserts.
     ownsRecord = false;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
@@ -299,8 +298,60 @@ describe('DirectoryRecordPanel', () => {
     const session = sessionDouble(STUB);
     (session as unknown as { clearDirectoryStub: unknown }).clearDirectoryStub = cleared;
     render(<DirectoryRecordPanel session={session} />);
-    await waitFor(() => expect(cleared).toHaveBeenCalled());
+    // The panel still SAYS this account has no record — that is what the lookup
+    // proves, and it is what re-registration answers.
     expect(await screen.findByText(/Licio holds no record of this room/i)).toBeInTheDocument();
+    expect(cleared).not.toHaveBeenCalled();
+  });
+
+  it('repairs a failed cleanup on retry: the server 404 IS the record being gone', async () => {
+    // Deletion this device performed is the only proof of absence it has, so
+    // the remove action owns the clear — and a DELETE that 404s means the row
+    // is already gone, which is this action's own outcome. Without that a
+    // failed local clear was unrepairable (the retry stopped at the 404).
+    const cleared = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/csrf-token')) {
+        return new Response(JSON.stringify({ token: 'csrf' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.includes('/private-rooms/mine')) {
+        return new Response(
+          JSON.stringify({
+            stubs: [
+              {
+                room_server_id: ROOM_SERVER_ID,
+                stub_id: STUB.stubId,
+                directory_mode: 'listed',
+                room_public_key: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
+                signed_stub: {},
+              },
+            ],
+            next_cursor: null,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (init?.method === 'DELETE') {
+        return new Response(JSON.stringify({ error: { code: 'not_found', message: 'gone' } }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(bootstrapBody()), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const session = sessionDouble(STUB);
+    (session as unknown as { clearDirectoryStub: unknown }).clearDirectoryStub = cleared;
+    render(<DirectoryRecordPanel session={session} />);
+    await userEvent.click(await screen.findByRole('button', { name: /Remove Licio/i }));
+    await waitFor(() => expect(cleared).toHaveBeenCalled());
+    expect(await screen.findByText(/already removed/i)).toBeInTheDocument();
   });
 
   it('says delisting KEEPS the record resolvable', async () => {

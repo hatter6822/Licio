@@ -4,7 +4,9 @@
 // keyset pagination, SLA state thresholds, the side-by-side snapshot + thread
 // context, user history (no financial field), and the appeal queue + review
 // panel.  Exercised over in-memory stores with a snapshot-bearing content port.
+import { AUDIT_NOTES_MAX, auditRecordViewSchema } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { writeAudit } from '../moderation/audit.js';
 import type { StewardActor } from '../moderation/authz.js';
 import type {
   ContentSnapshot,
@@ -435,6 +437,42 @@ describe('buildCaseReview (snapshot + thread + side-by-side)', () => {
     expect(review?.reported_contribution_id).toBe('rc-1');
     expect(review?.available_actions).toContain('remove');
     expect(await buildCaseReview(services, SAFETY, 'missing')).toBeNull();
+  });
+
+  it('keeps an over-long note RENDERABLE — a stored row that cannot be read is not a record', async () => {
+    // The console reads every audit row through `auditRecordViewSchema`, whose
+    // `notes` is bounded, so a longer note stored fine and then failed the parse
+    // on EVERY later read of that case — the case about a room whose reported
+    // listing carried a 120-character name and a 2000-character description
+    // became the one case staff could not open, review, or delist from.
+    //
+    // Pinned at the FUNNEL rather than at the call site that hit it: every
+    // writer (writeAudit, appendAudit, the transactor's tx.audit) passes through
+    // the same append, so the invariant is "a row that can be stored can be
+    // rendered" rather than "each writer remembers the limit".
+    const caseId = await insertCase({ caseId: 'eeeeeeee-0000-4000-9000-00000000000f' });
+    await writeAudit(services, {
+      actorUserId: null,
+      actorRole: null,
+      action: 'private_room_listing_reported',
+      targetType: 'private_room_stub',
+      targetId: '00000000-0000-4000-8000-00000000000f',
+      caseId,
+      reversible: false,
+      notes: 'x'.repeat(AUDIT_NOTES_MAX * 3),
+    });
+    const review = await buildCaseReview(services, SAFETY, caseId);
+    const stored = review?.case_history.find(
+      (row) => row.action === 'private_room_listing_reported',
+    );
+    // The row the case panel renders parses — which is the thing that was
+    // broken, and it is the WHOLE response that failed on it: one row over the
+    // bound took `caseReviewResponseSchema.parse` down and with it every read of
+    // this case.
+    expect(() => auditRecordViewSchema.parse(stored)).not.toThrow();
+    expect(stored?.notes?.length).toBeLessThanOrEqual(AUDIT_NOTES_MAX);
+    // …and a reader can tell an excerpt from the whole text.
+    expect(stored?.notes).toMatch(/truncated/);
   });
 
   it('withholds the ENFORCEMENT verbs while MFCI-2 holds the case — and says so', async () => {

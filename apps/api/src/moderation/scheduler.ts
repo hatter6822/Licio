@@ -6,6 +6,7 @@
 // (WS-J.2.1a).  One instance runs per window via the distributed lease.
 import { hostname } from 'node:os';
 import type { ConsoleAction } from '@licio/shared';
+import { OPEN_CASE_STATUSES } from '@licio/shared';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { accountStateFor, parseDurationDays, restoreStateFrom } from './actions.js';
 import type { ModerationServices } from './services.js';
@@ -128,7 +129,7 @@ export async function runModerationTick(
 
   try {
     const open = await services.cases.list({
-      status: ['new', 'in_progress', 'escalated'],
+      status: OPEN_CASE_STATUSES,
       limit: 1_000,
     });
     let breached = 0;

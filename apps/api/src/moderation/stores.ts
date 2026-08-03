@@ -23,6 +23,7 @@ import type {
   ReviewerAvailability,
   StewardRoleId,
 } from '@licio/shared';
+import { isOpenCaseStatus } from '@licio/shared';
 import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 type Clock = () => number;
@@ -289,6 +290,28 @@ export interface ModerationCaseStore {
    * at once, each triggering detection — is exactly when it is least true.
    */
   delayEnforcementIfNotDelayed(caseId: string): Promise<ModerationCaseRecord | null>;
+  /**
+   * COMPARE-AND-SET: resolve a case ONLY while it is still open, and only when
+   * it is the case about the target the caller believes it is.
+   *
+   * Both halves of the precondition live in the write for the same reason
+   * `claimIfUnassigned` puts the assignee there.  A remedy that carries a
+   * `case_id` from a client is carrying a value that can be STALE — resolved
+   * minutes ago by another reviewer, or simply wrong — and an unconditional
+   * `update` then rewrote a completed case: its `resolvedActionId` link to the
+   * enforcement that actually closed it was replaced with null, and the case
+   * history presented a later, unrelated remedy as its resolution.  A read of
+   * `status` before the write cannot fix that, because the whole question is
+   * what happened between the read and the write.
+   *
+   * Null ⇒ no such case, a case about a different target, or one already
+   * resolved — the caller must not claim to have resolved it, and must not
+   * attach its record to it either.
+   */
+  resolveIfOpen(
+    caseId: string,
+    target: { targetType: ReportTargetType; targetId: string },
+  ): Promise<ModerationCaseRecord | null>;
   /**
    * REASSIGN only if the case is still held by `expectedAssignee`.
    *
@@ -704,6 +727,26 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore, InMemor
       enforcementDelayed: true,
       updatedAt: iso(this.#now),
     };
+    this.#rows.set(caseId, updated);
+    return { ...updated };
+  }
+
+  async resolveIfOpen(
+    caseId: string,
+    target: { targetType: ReportTargetType; targetId: string },
+  ): Promise<ModerationCaseRecord | null> {
+    // Read, test and write with NO `await` between them, matching the Drizzle
+    // adapter's one-statement conditional UPDATE.
+    const r = this.#rows.get(caseId);
+    if (
+      !r ||
+      r.targetType !== target.targetType ||
+      r.targetId !== target.targetId ||
+      !isOpenCaseStatus(r.status)
+    ) {
+      return null;
+    }
+    const updated: ModerationCaseRecord = { ...r, status: 'resolved', updatedAt: iso(this.#now) };
     this.#rows.set(caseId, updated);
     return { ...updated };
   }

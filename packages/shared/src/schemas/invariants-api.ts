@@ -158,6 +158,28 @@ export const civicMapSaddleSchema = z.object({
 });
 export type CivicMapSaddle = z.infer<typeof civicMapSaddleSchema>;
 
+/**
+ * How much of what the surface COULD have read, it actually read.
+ *
+ * Every analyst read here is bounded — a landscape scans a capped number of the
+ * window's active rows, a room report walks a capped number of the room's
+ * threads — and a bounded scan that returns a bare list is indistinguishable
+ * from a complete one that found nothing.  That ambiguity is the whole defect
+ * class these surfaces exist to remove: an empty SCOI report reads as "no
+ * divergent conversations in this room", and a steward acts on it.
+ *
+ * So completeness travels WITH the result. `complete: false` means the bound
+ * stopped the scan, not the data — there may be more beyond it, and the surface
+ * must say so rather than let its silence be read as a clean answer.
+ */
+export const scanCoverageSchema = z.object({
+  /** False ⇒ a bound stopped the scan; findings beyond it were never looked at. */
+  complete: z.boolean(),
+  /** How many candidate rows were examined (not how many were returned). */
+  examined: z.number().int().min(0),
+});
+export type ScanCoverage = z.infer<typeof scanCoverageSchema>;
+
 export const civicMapResponseSchema = z.object({
   window: z.object({ start: isoTimestampSchema, end: isoTimestampSchema }),
   /** The same five figures the invariant persists, so the panel and the
@@ -176,6 +198,10 @@ export const civicMapResponseSchema = z.object({
    *  means the landscape is mostly isolated points — say so rather than
    *  drawing a confident map over nothing. */
   coverage: z.number().min(0).max(1),
+  /** Whether the window was scanned to its end. A busy hour, or one dominated
+   *  by room-restricted activity, stops at the node cap or the scan ceiling —
+   *  and a map drawn from part of an hour must not be read as the hour. */
+  scan: scanCoverageSchema,
 });
 export type CivicMapResponse = z.infer<typeof civicMapResponseSchema>;
 

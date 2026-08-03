@@ -803,6 +803,37 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     expect(body.reports.map((entry) => entry.story_id)).toEqual([storyId]);
   });
 
+  it('says when the room scan was CUT SHORT rather than complete', async () => {
+    // A bounded scan that returns a bare list is indistinguishable from a
+    // complete one that found nothing — the same ambiguity the room-scoped
+    // paging was introduced to remove, one layer in. A room deeper than the
+    // scan ceiling must not read as a clean room.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId } = await seedSplitRoom(fixture, steward.userId);
+    // 520 threads in this room: past the 500-thread ceiling, and none of them
+    // measured, so the report is empty either way. Only `scan.complete`
+    // distinguishes "nothing here" from "we stopped looking".
+    for (let i = 0; i < 520; i += 1) {
+      const { threadId } = await seedStory(fixture);
+      await fixture.ingestion.stories.updateThread(threadId, { roomId });
+    }
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    expect(report.status).toBe(200);
+    const body = (await report.json()) as {
+      reports: unknown[];
+      scan: { complete: boolean; examined: number };
+    };
+    expect(body.scan.complete).toBe(false);
+    expect(body.scan.examined).toBeGreaterThanOrEqual(500);
+
+    // …and a room the scan reaches the end of says so, which is what makes the
+    // flag worth reading.
+    const small = await seedSplitRoom(fixture, steward.userId);
+    const complete = await adminRequest(fixture, steward.cookie, `/scoi/reports/${small.roomId}`);
+    expect(((await complete.json()) as { scan: { complete: boolean } }).scan.complete).toBe(true);
+  });
+
   it('withdraws a bridge target once a request is OPEN on it', async () => {
     // The map published a target the POST beside it answers `409 already_open`
     // for: eligibility asked "may this caller act here?" and never "is there

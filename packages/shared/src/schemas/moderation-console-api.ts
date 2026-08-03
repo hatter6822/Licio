@@ -244,6 +244,19 @@ export type SideBySideView = z.infer<typeof sideBySideViewSchema>;
 // Audit log viewer + transparency export (WS-J.2.5a/b).
 // ---------------------------------------------------------------------------
 
+/**
+ * The most an audit note may carry to a console reader.
+ *
+ * Named because it is a WRITE-side obligation that only shows up on the read:
+ * a row whose note exceeds this is stored happily and then fails
+ * `caseReviewResponseSchema.parse` on every subsequent read of that case, so
+ * one over-long note takes the whole case panel down — including for the room
+ * whose report produced it. The audit append clamps to this value, so the
+ * invariant "a stored row can always be rendered" holds by construction rather
+ * than by every writer remembering the limit.
+ */
+export const AUDIT_NOTES_MAX = 2000;
+
 export const auditRecordViewSchema = z
   .object({
     audit_id: uuidSchema,
@@ -262,7 +275,7 @@ export const auditRecordViewSchema = z
     report_ids: z.array(uuidSchema),
     co_approver_handle: z.string().min(1).nullable(),
     /** Internal note — visible to authorized roles only. */
-    notes: z.string().max(2000).nullable(),
+    notes: z.string().max(AUDIT_NOTES_MAX).nullable(),
   })
   .strict();
 export type AuditRecordView = z.infer<typeof auditRecordViewSchema>;

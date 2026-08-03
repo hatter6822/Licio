@@ -509,17 +509,21 @@ export function createPrivateRoomsRoutes() {
           // stamping the audit row with its id would print an enforcement
           // against another room into that case's history, permanently, while
           // the intended case stayed open.
+          // …and only while it is still OPEN. `resolveIfOpen` carries the whole
+          // precondition — this case, about THIS room, not yet resolved — into
+          // one conditional write, so a case another reviewer closed a moment
+          // ago is neither reopened-and-reclosed nor stripped of the
+          // `resolvedActionId` link to the enforcement that actually closed it.
+          // Its history keeps the remedy that resolved it rather than gaining a
+          // later, unrelated one presented as the resolution — which is also
+          // why a non-match takes the audit's `case_id` with it.
           let matchedCase: string | undefined;
           if (caseId !== undefined) {
-            const theCase = await tx.cases.getById(caseId);
-            if (
-              theCase !== null &&
-              theCase.targetType === 'room' &&
-              theCase.targetId === params.data.roomServerId
-            ) {
-              matchedCase = caseId;
-              await tx.cases.update(caseId, { status: 'resolved', resolvedActionId: null });
-            }
+            const resolved = await tx.cases.resolveIfOpen(caseId, {
+              targetType: 'room',
+              targetId: params.data.roomServerId,
+            });
+            if (resolved !== null) matchedCase = caseId;
           }
           await tx.audit({
             actorUserId: auth.userId,

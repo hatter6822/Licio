@@ -226,7 +226,13 @@ room view's "Manage members & verify devices" toggle, all jsdom + axe tested):
   NOTHING for a room with no stub (a `detached` room has nothing to manage), and
   the removal confirmation reads back the server's own wording, because
   "removed Licio's record" quietly becoming "deleted the room" is exactly the
-  §21.4 failure mode.
+  §21.4 failure mode.  The device's stored capability is dropped ONLY by a
+  removal this device performed (a `404` from that DELETE means the record is
+  already gone, so a retry repairs a failed local clear): a failed read cannot
+  prove absence, and neither can an account-scoped `/mine` lookup — a joined
+  member on their own account owns no record while the creator's stands, and
+  clearing there would destroy the only copy of a token a member admitted after
+  epoch 0 cannot re-derive.
 - `PrivateRoomDirectory` (§4.2, on `/private`) browses the PUBLIC directory of
   `listed` rooms: display metadata only, keyset-paged, and with no join
   affordance — a P2P room is invite-only, so the honest offer is "this room

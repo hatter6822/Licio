@@ -51,6 +51,7 @@ import {
 } from './governance/services.js';
 import { createInMemoryGovernanceStores } from './governance/stores.js';
 import { accountRef } from './identity/crypto.js';
+import { installDataRightsHooks } from './identity/data-rights-hooks.js';
 import { buildIdentityServicesFromEnv, setIdentityServices } from './identity/services.js';
 import {
   createInMemoryIngestionServices,
@@ -284,6 +285,24 @@ e2eModeration.delistListedRoom = async (roomServerId: string) =>
 e2eModeration.isPubliclyListedRoom = async (roomServerId: string) =>
   await getPrivateRoomStubService().isPubliclyListed(roomServerId);
 e2eModeration.registerRollback(e2eStubStore);
+
+// …and EVERY §19.3 data-rights hook, through the same installer the production
+// boot calls (GDPR Art. 15 / Art. 17).
+//
+// The harness had none of them. An absent hook is a silent no-op — the archive
+// omits that store, the erasure leaves it behind — so the runtime that drives
+// the authenticated flows was exporting and deleting an account without its
+// attention data, its content, its client state, its moderation notices or (the
+// review finding that prompted this) its private-room directory record, and no
+// test could fail on any of it. One call, both roots, no drift; the parity gate
+// requires it.
+installDataRightsHooks(identityServices, {
+  events: eventServices,
+  ingestion: ingestionServices,
+  forum: forumServices,
+  moderation: e2eModeration,
+  log: logger,
+});
 
 // WS-R.12 — same dummy-DATABASE_URL hazard for the LCAP ingestion server: `getLcapIngestServer()`
 // would otherwise bind the Drizzle store and 500 on the service worker's background C0-sync `/pulse`.

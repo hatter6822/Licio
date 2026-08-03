@@ -423,13 +423,22 @@ export function createInvariantsAdminRoutes(
         const entries = [];
         let threadCursor: { createdAt: string; threadId: string } | null = null;
         let scanned = 0;
+        // COMPLETE until a bound stops the walk. An empty report and a
+        // truncated one are the same list, and a steward reading "no divergent
+        // conversations" off a scan that stopped at its ceiling is exactly the
+        // ambiguity this room-scoped paging exists to remove — so the answer
+        // says which it was.
+        let complete = false;
         scan: while (scanned < SCOI_REPORT_SCAN_CEILING && entries.length < SCOI_REPORT_ENTRIES) {
           const threads = await ingestion.stories.listThreadsByRoom(
             roomId,
             threadCursor,
             SCOI_REPORT_PAGE,
           );
-          if (threads.length === 0) break;
+          if (threads.length === 0) {
+            complete = true;
+            break;
+          }
           scanned += threads.length;
           const stories = await ingestion.stories.getByIds(threads.map((t) => t.storyId));
           const last = threads[threads.length - 1];
@@ -466,9 +475,21 @@ export function createInvariantsAdminRoutes(
             });
             if (entries.length >= SCOI_REPORT_ENTRIES) break scan;
           }
-          if (threads.length < SCOI_REPORT_PAGE) break;
+          if (threads.length < SCOI_REPORT_PAGE) {
+            // A short page IS the end of the room.
+            complete = true;
+            break;
+          }
         }
-        return c.json({ room_id: roomId, reports: entries });
+        return c.json({
+          room_id: roomId,
+          reports: entries,
+          // `complete: false` ⇒ the room has threads this scan never looked at,
+          // so an empty or short list is a partial answer rather than a clean
+          // room. `examined` is how many threads were walked, not how many are
+          // reported.
+          scan: { complete, examined: scanned },
+        });
       })
 
       .get('/reeb/landscape', async (c) => {

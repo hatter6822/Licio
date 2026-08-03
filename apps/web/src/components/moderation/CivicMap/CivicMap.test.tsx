@@ -77,6 +77,7 @@ function landscape(over: Partial<CivicMapResponse> = {}): CivicMapResponse {
     ],
     splits: [],
     coverage: 0.8,
+    scan: { complete: true, examined: 2 },
     ...over,
   };
 }

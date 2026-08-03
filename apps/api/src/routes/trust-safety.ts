@@ -7,6 +7,7 @@
 // Every response is re-validated against the shared schema on egress.
 
 import {
+  AUDIT_NOTES_MAX,
   appealCreatedResponseSchema,
   appealEligibilityViewSchema,
   blockListResponseSchema,
@@ -47,6 +48,34 @@ import { buildSupportContact } from '../moderation/support.js';
 import { getPrivateRoomStubService } from '../private-rooms/service.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
+
+/**
+ * The report-time listing snapshot, as ONE audit note that the console can
+ * always render.
+ *
+ * §21.3 lets a room's members edit the published name and description, so a
+ * case reviewed later can be about text nobody can still see — the capture is
+ * what keeps the report reviewable. Both fields are member-supplied and bounded
+ * generously on their own (120 and 2000 characters), which TOGETHER exceed the
+ * console's note bound: the audit row stored fine and then failed
+ * `caseReviewResponseSchema` on every read, so the room whose listing was
+ * reported became the one room staff could not review or delist.
+ *
+ * The name is kept whole — it is the thing most reports are about, and it
+ * cannot overrun on its own — and the description takes what is left, cut with
+ * an explicit marker so a reader can tell an excerpt from the whole text.
+ */
+function listingEvidenceNote(listing: {
+  display_name: string | null;
+  display_description: string | null;
+}): string {
+  const head = `Listing as reported — name: ${listing.display_name ?? '(none)'}; description: `;
+  const body = listing.display_description ?? '(none)';
+  const room = AUDIT_NOTES_MAX - head.length;
+  if (body.length <= room) return head + body;
+  const mark = '… [excerpt]';
+  return head + body.slice(0, Math.max(0, room - mark.length)) + mark;
+}
 
 /** Single-param path validator (`:id` → `{ [name]: uuid }`). */
 const uuidParam = <K extends string>(name: K) =>
@@ -221,11 +250,29 @@ export function createTrustSafetyRoutes() {
             resolvedContentKind,
             resolvedSubjectUserId,
           );
-          // NOT on an idempotent retry. `submitReport` returns the ORIGINAL
-          // report unchanged, and the listing may have been edited since — so a
-          // second capture would attach text the reporter never reported to the
-          // same case, labelled as what they reported.
-          if (outcome.ok && !outcome.response.idempotent && listing !== null) {
+          // ONCE PER CASE, keyed on the CASE'S OWN TRAIL.
+          //
+          // The rule is "one capture per case" — §21.3 lets members edit the
+          // published text, so a second capture would attach words the reporter
+          // never saw to the same case, labelled as what they reported. Keying
+          // that on THIS REQUEST's `idempotent` flag enforced something else,
+          // though: `writeAudit` is the catching variant (it returns null on
+          // failure), so a chain-append failure lost the evidence silently and
+          // every retry then skipped the capture as "already done" — the one
+          // case that has no snapshot is the one that permanently cannot get
+          // one. The trail is the authority on whether a capture exists, so ask
+          // it.
+          const captured =
+            outcome.ok && listing !== null && outcome.response.idempotent
+              ? (
+                  await mod.audit.list({
+                    caseId: outcome.caseId,
+                    action: 'private_room_listing_reported',
+                    limit: 1,
+                  })
+                ).length > 0
+              : false;
+          if (outcome.ok && listing !== null && !captured) {
             // BEST EFFORT: the report has already committed, and losing the
             // capture must not un-take it.
             await writeAudit(mod, {
@@ -245,9 +292,15 @@ export function createTrustSafetyRoutes() {
               // does not render notes.
               caseId: outcome.caseId,
               reversible: false,
-              notes: `Listing as reported — name: ${listing.display_name ?? '(none)'}; description: ${
-                listing.display_description ?? '(none)'
-              }`,
+              // BUDGETED against the console's own note bound. The published
+              // name and description are member-supplied and long enough
+              // TOGETHER to exceed it (120 + 2000), and an over-long note used
+              // to make every later read of this case fail its response schema
+              // — so the room whose listing was reported became the one room
+              // staff could not review. The append clamps as a backstop; the
+              // budget here is what keeps the evidence a deliberate excerpt
+              // rather than an arbitrary cut mid-word.
+              notes: listingEvidenceNote(listing),
             });
           }
           if (!outcome.ok) {
