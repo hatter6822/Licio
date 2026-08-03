@@ -22,6 +22,7 @@ import {
   type DbExecutor,
   embeddings as embeddingsTable,
   ingestionReviewItems,
+  rooms as roomsTable,
   sourceSyndications,
   sources as sourcesTable,
   stories as storiesTable,
@@ -365,17 +366,27 @@ export class DrizzleStoryStore implements StoryStore {
     if (storyIds.length === 0) return out;
     // The restriction is in the QUERY — so a story hidden between selecting its
     // id and hydrating it is simply absent rather than enriched.
+    //
+    // And it covers the ROOM, not only the item. A story can carry
+    // `visibility: 'public'` inside a PRIVATE room, where the ordinary read bar
+    // requires membership — filtering on the item alone published its title,
+    // topics and level to every integrity steward. `storyReadableByUser`
+    // enforces the room bar on normal reads; this is the same bar, for a caller
+    // whose membership is unknown and must be assumed absent.
     const rows = await this.#db
-      .select()
+      .select({ story: storiesTable })
       .from(storiesTable)
+      .innerJoin(roomsTable, eq(roomsTable.roomId, storiesTable.roomId))
       .where(
         and(
           inArray(storiesTable.storyId, [...storyIds]),
           eq(storiesTable.visibility, 'public'),
           isNull(storiesTable.hiddenState),
+          eq(roomsTable.visibility, 'public'),
+          eq(roomsTable.storageMode, 'server'),
         ),
       );
-    for (const row of rows) out.set(row.storyId, this.#toRecord(row));
+    for (const row of rows) out.set(row.story.storyId, this.#toRecord(row.story));
     return out;
   }
 

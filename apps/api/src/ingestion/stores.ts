@@ -979,12 +979,32 @@ export class InMemoryStoryStore implements StoryStore {
     const out = new Map<string, StoryRecord>();
     for (const id of storyIds) {
       const story = this.#stories.get(id);
-      if (story && story.visibility === 'public' && story.hiddenState === null) {
+      // The item AND its room — see the Drizzle twin: a `public` story can sit
+      // in a PRIVATE room, where the ordinary read bar requires membership.
+      // `publicRoomIds` is injected because this store does not own rooms;
+      // absent ⇒ no room qualifies, which is fail-closed.
+      if (
+        story &&
+        story.visibility === 'public' &&
+        story.hiddenState === null &&
+        (await this.publicRoom(story.roomId))
+      ) {
         out.set(id, story);
       }
     }
     return out;
   }
+
+  /**
+   * Is this room publicly readable?
+   *
+   * Assigned by the composition root, which is the only place that knows both
+   * domains — this store does not own rooms and must not construct their store.
+   * The DEFAULT is `false`, not `true`: an unwired binding must hide stories
+   * rather than publish them, and a divergence that only shows up in dev is the
+   * kind this whole guard exists to prevent.
+   */
+  publicRoom: (roomId: string) => Promise<boolean> = async () => false;
 
   async listBySubmitter(
     userId: string,

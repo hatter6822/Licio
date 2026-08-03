@@ -816,19 +816,36 @@ export class PrivateRoomSession {
     const schema = signedStub['schema'];
     const claimed = signedStub['room_public_key'];
     const manifest = signedStub['manifest_key_commitment'];
-    if (
-      Object.keys(signedStub).length !== 3 ||
-      schema !== 'licio.private.directory_stub.v2' ||
-      typeof claimed !== 'string' ||
-      typeof manifest !== 'string'
-    ) {
-      return false;
-    }
-    const canonicalBody = {
-      schema,
-      room_public_key: claimed,
-      manifest_key_commitment: manifest,
-    } as const;
+    if (typeof claimed !== 'string' || typeof manifest !== 'string') return false;
+    // BOTH shapes verify.
+    //
+    // A record written before the capability moved to its own column carries the
+    // v1 body, and migration `0120` preserves those bytes exactly — the server
+    // holds no room key and cannot re-sign, so rewriting them would have made
+    // every existing record unverifiable. The v1 body is served only to a caller
+    // holding the capability (it contains one), which is why a member can still
+    // check it and a stranger never sees it.
+    //
+    // Reconstructed field by field rather than canonicalizing the received
+    // object: a body with an unexpected key must not verify, because the
+    // signature was produced over a closed set.
+    const legacyToken = signedStub['bootstrap_blind_id'];
+    const canonicalBody =
+      schema === 'licio.private.directory_stub.v2'
+        ? Object.keys(signedStub).length === 3
+          ? ({ schema, room_public_key: claimed, manifest_key_commitment: manifest } as const)
+          : null
+        : schema === 'licio.private.directory_stub.v1' &&
+            Object.keys(signedStub).length === 4 &&
+            typeof legacyToken === 'string'
+          ? ({
+              schema,
+              room_public_key: claimed,
+              manifest_key_commitment: manifest,
+              bootstrap_blind_id: legacyToken,
+            } as const)
+          : null;
+    if (canonicalBody === null) return false;
     // The founder's signing key, from the roster this session was bootstrapped
     // with — the same set `PrivateRoomEngine.load` verifies the genesis self-add
     // against, so it is the room's own answer rather than the record's.

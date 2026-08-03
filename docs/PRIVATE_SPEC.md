@@ -2132,6 +2132,14 @@ client's own dev console — and this capability does not rotate: one logged lin
 keeps opening an `unlisted` record long after the invite exchange, and after a
 delist.
 
+A record written BEFORE that column existed keeps its body exactly as signed —
+the server holds no room key and cannot re-sign, so rewriting it would leave
+every existing record unverifiable, and deleting those rows would strand every
+member holding a handle and every outstanding invite. Such a body still contains
+the capability, so it is served only to a reader who presented one, and omitted
+from the open `listed` read that was the harvest. A v2 body carries no secret
+and is served to everyone.
+
 It is deliberately NOT inside `signed_stub`. That body is projected wholesale to
 anonymous readers of a `listed` room, so a secret placed in it is published to
 everyone — see §21.1. Signing the token would add nothing anyway: the signature

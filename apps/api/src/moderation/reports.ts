@@ -93,7 +93,9 @@ export function maxSeverity(a: ReportSeverity, b: ReportSeverity): ReportSeverit
 }
 
 export type SubmitReportOutcome =
-  | { ok: true; response: ReportCreatedResponse }
+  /** `caseId` so a caller can attach evidence to the CASE the trail is fetched
+   *  by — `report_id` addresses the report, which the case panel does not read. */
+  | { ok: true; response: ReportCreatedResponse; caseId: string }
   | { ok: false; code: 'rate_limited'; retryAfter: number }
   /** WS-N.2.3e: key-like material in the free text — blocked with the
    *  standing warning; the matched value is discarded, never stored. */
@@ -155,7 +157,7 @@ export async function submitReport(
   const byOp = await services.reports.findByOperationId(reporterUserId, request.local_operation_id);
   if (byOp) {
     services.metrics.increment('reports.idempotent_op');
-    return { ok: true, response: toResponse(byOp, true) };
+    return { ok: true, response: toResponse(byOp, true), caseId: byOp.caseId };
   }
   // 2. Idempotency by reporter+target+reason within the 24h cooldown (edit-then-
   //    resubmit to evade the per-target cap is the same logical report).
@@ -169,7 +171,7 @@ export async function submitReport(
   );
   if (dup) {
     services.metrics.increment('reports.idempotent_dup');
-    return { ok: true, response: toResponse(dup, true) };
+    return { ok: true, response: toResponse(dup, true), caseId: dup.caseId };
   }
 
   // 3. WS-N.2.3e — the no-private-key filter on the support channel: a report
@@ -373,7 +375,10 @@ export async function submitReport(
     });
   }
 
-  return { ok: true, response: toResponse(report, idempotent) };
+  // The CASE id travels with the outcome: a caller attaching evidence to this
+  // report (the §21 listing capture) needs the case the trail is fetched by,
+  // and the response's `report_id` is not it.
+  return { ok: true, response: toResponse(report, idempotent), caseId: theCase.caseId };
 }
 
 /**

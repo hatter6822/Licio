@@ -303,6 +303,12 @@ export function createPrivateRoomsRoutes() {
     authMiddleware(),
     perAccountRateLimit({ limit: 60, windowMs: 60 * 60_000, accountId }),
     async (c) => {
+      // OWNER-SCOPED, so never cached. The projection carries the record's own
+      // display metadata and — for the export — the capability, and a browser or
+      // shared cache keyed on this URL would replay one account's answer to the
+      // next signed-in account without `authMiddleware` running again.
+      c.header('Cache-Control', 'no-store, private');
+      c.header('Vary', 'Cookie', { append: true });
       const auth = c.get('auth');
       if (!auth)
         return c.json({ error: { code: 'unauthenticated', message: 'Sign in required' } }, 401);
@@ -357,7 +363,10 @@ export function createPrivateRoomsRoutes() {
     // contract makes the two indistinguishable to a cache as well as to a
     // reader, which is exactly why neither may be stored.
     c.header('Cache-Control', 'no-store, private');
-    c.header('Vary', BOOTSTRAP_TOKEN_HEADER);
+    // APPEND, never assign: `corsMiddleware` has already put `Origin` here, and
+    // overwriting it would let a shared cache reuse one origin's
+    // `Access-Control-Allow-Origin` decision for another.
+    c.header('Vary', BOOTSTRAP_TOKEN_HEADER, { append: true });
     const params = roomIdParamSchema.safeParse({ roomServerId: c.req.param('roomServerId') });
     // A malformed id is answered with the SAME 404 as an unknown one — a 400
     // here would confirm that a well-formed id is the only kind that can exist.

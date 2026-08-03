@@ -147,11 +147,17 @@ export function DirectoryRecordPanel({
         //
         // Only the OWNER-SCOPED lookup can tell the two apart, so it decides.
         // A non-owner keeps the handle and is told the record cannot be reached.
-        const stillThere =
+        // A FAILED lookup is not an absent record. Folding a transient error, a
+        // 401 during session expiry, or an unreachable server into the same
+        // `null` as "the owner owns nothing here" would clear the handle on
+        // exactly the evidence that proves nothing.
+        const lookup =
           accountId === null
-            ? null
-            : await findMyPrivateRoomStub({ roomServerId }).catch(() => null);
-        if (accountId !== null && stillThere === null) {
+            ? { ok: false as const }
+            : await findMyPrivateRoomStub({ roomServerId })
+                .then((found) => ({ ok: true as const, found }))
+                .catch(() => ({ ok: false as const }));
+        if (lookup.ok && lookup.found === null) {
           setState({ kind: 'absent' });
           await session.clearDirectoryStub();
         } else {

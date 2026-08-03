@@ -207,7 +207,7 @@ import {
   registerIngestionConsumers,
   setIngestionServices,
 } from './ingestion/services.js';
-import type { StoryStore } from './ingestion/stores.js';
+import { InMemoryStoryStore, type StoryStore } from './ingestion/stores.js';
 import {
   DrizzleBridgeAttemptStore,
   DrizzleCalibrationStore,
@@ -823,6 +823,19 @@ identityServices.exportClientState = async (userId) => ({
     REPLY_NOTIFICATIONS_PER_USER_CAP,
   ),
 });
+// WS-H.7.4 — which rooms the landscape may hydrate a story from.
+//
+// A `public` story can sit in a PRIVATE room, where the ordinary read bar
+// requires membership, so the item's own visibility is not the whole answer.
+// The Drizzle store joins `rooms` for this; the in-memory twin has no rooms of
+// its own, so the binding arrives here — the only place that knows both.
+if (ingestionServices.stories instanceof InMemoryStoryStore) {
+  ingestionServices.stories.publicRoom = async (roomId) => {
+    const room = await forumServices.rooms.getById(roomId);
+    return room !== null && room.visibility === 'public' && room.storageMode === 'server';
+  };
+}
+
 setIdentityServices(identityServices);
 
 // --- WS-J trust, safety, and abuse operations -------------------------------

@@ -183,13 +183,24 @@ export function createTrustSafetyRoutes() {
             // `unlisted` stays rejected, identically to an unknown id: its
             // existence is what the blind token protects, and it publishes no
             // name to be abusive with.
+            // The PUBLIC LISTING is checked first, and a forum row is required
+            // only for an ordinary server room.
+            //
+            // In the default no-`DATABASE_URL` runtime the in-memory stub store
+            // creates no `rooms` shell, so requiring one first made every listed
+            // P2P room 404 before its listing was ever consulted — reporting
+            // worked against Postgres and not in the runtime everyone develops
+            // in. The listing is the thing being reported, so it decides.
             const forum = getForumServices();
-            const room = await forum.rooms.getById(request.target_id);
-            if (!room) return c.json(deny('target_not_found', 'Target not found'), 404);
-            const reportable =
-              (await roomVisibleToUser(forum, room, auth.userId)) ||
-              (await getPrivateRoomStubService().isPubliclyListed(request.target_id));
-            if (!reportable) return c.json(deny('target_not_found', 'Target not found'), 404);
+            const listedRoom = await getPrivateRoomStubService().isPubliclyListed(
+              request.target_id,
+            );
+            if (!listedRoom) {
+              const room = await forum.rooms.getById(request.target_id);
+              if (!room || !(await roomVisibleToUser(forum, room, auth.userId))) {
+                return c.json(deny('target_not_found', 'Target not found'), 404);
+              }
+            }
           }
           // CAPTURE the listing that was reported, before it can be edited.
           //
@@ -214,11 +225,21 @@ export function createTrustSafetyRoutes() {
             // BEST EFFORT: the report has already committed, and losing the
             // capture must not un-take it.
             await writeAudit(mod, {
-              actorUserId: auth.userId,
+              // NO ACTOR. `/moderation-console/audit` resolves every actor to a
+              // handle for any queue reader, while reporter identity is gated to
+              // safety and integrity roles — so naming the reporter here would
+              // let a community or appeals steward read who filed the report
+              // straight out of the general feed. The row is EVIDENCE about the
+              // listing, not a record of somebody's action.
+              actorUserId: null,
               actorRole: null,
               action: 'private_room_listing_reported',
               targetType: 'private_room_stub',
               targetId: request.target_id,
+              // CASE-SCOPED, or the panel never shows it: `buildCaseReview`
+              // fetches the trail by `caseId` alone, and the general audit panel
+              // does not render notes.
+              caseId: outcome.caseId,
               reversible: false,
               notes: `Listing as reported — name: ${listing.display_name ?? '(none)'}; description: ${
                 listing.display_description ?? '(none)'

@@ -176,6 +176,9 @@ export interface AccountStubExport {
   readonly updated_at: string;
 }
 
+/** The `/mine` projection: the owner's record MINUS the capability. */
+export type OwnedStubRow = Omit<AccountStubExport, 'bootstrap_blind_id'>;
+
 /** Aggregate-only counters — no room, account, or token identity (§27.2). */
 export interface PrivateRoomStubMetrics {
   created: number;
@@ -282,7 +285,7 @@ export class PrivateRoomStubService {
     this.#metrics.bootstrapReads += 1;
     // The signed body carries the capability, so it goes only to a caller who
     // already holds it (see `BootstrapResponse.signed_stub`).
-    return { ok: true, value: this.#project(stub) };
+    return { ok: true, value: this.#project(stub, capable) };
   }
 
   /**
@@ -375,7 +378,7 @@ export class PrivateRoomStubService {
     // exists in the state they described it in.
     if (!next) return { ok: false, reason: 'not_found' };
     this.#metrics.updated += 1;
-    return { ok: true, value: this.#project(next) };
+    return { ok: true, value: this.#project(next, true) };
   }
 
   /**
@@ -398,7 +401,7 @@ export class PrivateRoomStubService {
     const next = await this.store.delist(roomServerId);
     if (!next) return { ok: false, reason: 'not_found' };
     this.#metrics.delisted += 1;
-    return { ok: true, value: this.#project(next) };
+    return { ok: true, value: this.#project(next, true) };
   }
 
   /**
@@ -535,15 +538,29 @@ export class PrivateRoomStubService {
   async findOwnedStub(
     accountId: string,
     target: { readonly roomServerId?: string; readonly roomPublicKey?: string },
-  ): Promise<AccountStubExport | null> {
+  ): Promise<OwnedStubRow | null> {
     const stub = await this.store.findForAccount(accountId, target);
-    return stub === null ? null : this.#exportRow(stub);
+    return stub === null ? null : this.#lookupRow(stub);
+  }
+
+  /**
+   * The `/mine` row: the owner's record WITHOUT the capability.
+   *
+   * `/mine` answers "do I own this / is my orphan out there", and both callers
+   * need only the id — so the token does not travel on a polled endpoint, where
+   * a cache or a log is one misconfiguration away. The Art. 15 export keeps it,
+   * because an archive of what is held about you that omits a field the purge
+   * deletes is not an archive.
+   */
+  #lookupRow(stub: StoredPrivateRoomStub): OwnedStubRow {
+    const { bootstrap_blind_id: _withheld, ...rest } = this.#exportRow(stub);
+    return rest;
   }
 
   async listForAccountPage(
     accountId: string,
     options: { readonly limit?: number; readonly cursor?: string } = {},
-  ): Promise<{ stubs: AccountStubExport[]; next_cursor: string | null }> {
+  ): Promise<{ stubs: OwnedStubRow[]; next_cursor: string | null }> {
     const limit = Math.min(
       Math.max(1, Math.trunc(options.limit ?? ACCOUNT_STUB_PAGE)),
       ACCOUNT_STUB_PAGE,
@@ -556,7 +573,7 @@ export class PrivateRoomStubService {
     const page = rows.slice(0, limit);
     const last = page.at(-1);
     return {
-      stubs: page.map((stub) => this.#exportRow(stub)),
+      stubs: page.map((stub) => this.#lookupRow(stub)),
       next_cursor: rows.length > limit && last ? `${last.createdAt}|${last.stubId}` : null,
     };
   }
@@ -621,7 +638,7 @@ export class PrivateRoomStubService {
     const next = await this.store.delist(roomServerId, { requireListed: true });
     if (!next) return null;
     this.#metrics.delisted += 1;
-    return this.#project(next);
+    return this.#project(next, true);
   }
 
   /** A snapshot of the aggregate-only counters (no room identity). */
@@ -638,7 +655,20 @@ export class PrivateRoomStubService {
    * the right flag. A gate here would have to be got right again by whoever
    * writes the next endpoint.
    */
-  #project(stub: StoredPrivateRoomStub): BootstrapResponse {
+  /**
+   * @param capable the caller presented the §21.2 token.
+   *
+   * It matters for ONE case: a LEGACY (v1) body, written before the capability
+   * moved to its own column, still contains that capability — and the migration
+   * preserves those bodies byte-for-byte because the server cannot re-sign them.
+   * So a v1 body goes only to a caller who already holds the token, and is
+   * omitted from the open `listed` read that was the harvest. A v2 body carries
+   * no secret and is served to everyone, which is why the parameter is not a
+   * general visibility switch.
+   */
+  #project(stub: StoredPrivateRoomStub, capable: boolean): BootstrapResponse {
+    const legacyBody = stub.signedStub['schema'] !== 'licio.private.directory_stub.v2';
+    const withBody = capable || !legacyBody;
     return {
       room_server_id: stub.roomServerId,
       directory_mode: stub.directoryMode,
@@ -651,8 +681,8 @@ export class PrivateRoomStubService {
       rendezvous_policy: stub.rendezvousPolicy,
       bootstrap_hints: stub.bootstrapHints.map((h) => ({ kind: h.kind, value: h.value })),
       bootstrap_endpoints: BOOTSTRAP_ENDPOINTS,
-      signed_stub: stub.signedStub,
-      stub_signature: stub.stubSignature,
+      signed_stub: withBody ? stub.signedStub : null,
+      stub_signature: withBody ? stub.stubSignature : null,
       created_at: stub.createdAt,
       updated_at: stub.updatedAt,
     };

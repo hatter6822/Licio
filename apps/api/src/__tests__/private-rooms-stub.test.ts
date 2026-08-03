@@ -792,6 +792,27 @@ describe('a reported listing is captured before it can be edited', () => {
   });
 });
 
+describe('the owner lookup withholds the capability', () => {
+  it('omits `bootstrap_blind_id` from /mine while the export keeps it', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+
+    // Both `/mine` callers need only the id, so the token does not travel on a
+    // polled endpoint where a cache or a log is one misconfiguration away.
+    const found = await svc.findOwnedStub(ACCOUNT, {
+      roomServerId: created.value.room_server_id,
+    });
+    expect(JSON.stringify(found)).not.toContain(TOKEN);
+    const page = await svc.listForAccountPage(ACCOUNT, {});
+    expect(JSON.stringify(page)).not.toContain(TOKEN);
+
+    // …and the Art. 15 archive still discloses it: what the purge deletes, the
+    // export declares.
+    expect((await svc.exportForAccount(ACCOUNT))[0]?.bootstrap_blind_id).toBe(TOKEN);
+  });
+});
+
 describe('the targeted owner lookup', () => {
   it('finds ONE record by room id or by the room’s signing key', async () => {
     const svc = freshService();

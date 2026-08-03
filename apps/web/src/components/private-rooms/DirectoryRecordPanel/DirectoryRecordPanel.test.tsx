@@ -233,6 +233,25 @@ describe('DirectoryRecordPanel', () => {
     expect(posted).toBe(0);
   });
 
+  it('KEEPS the handle when the owner lookup itself fails', async () => {
+    // A 404 says "no record you can reach", and a failed lookup says nothing at
+    // all — folding the two together would destroy a capability a device
+    // admitted after epoch 0 cannot re-derive.
+    const cleared = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('/private-rooms/mine')) throw new Error('offline');
+      return new Response(JSON.stringify({ error: { code: 'not_found', message: 'gone' } }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const session = sessionDouble(STUB);
+    (session as unknown as { clearDirectoryStub: unknown }).clearDirectoryStub = cleared;
+    render(<DirectoryRecordPanel session={session} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be opened/i);
+    expect(cleared).not.toHaveBeenCalled();
+  });
+
   it('does not offer registration on a device that joined later', async () => {
     // The capability is bound to the room's genesis epoch, which forward secrecy
     // keeps from a device admitted afterwards — so the action would do the
@@ -260,12 +279,23 @@ describe('DirectoryRecordPanel', () => {
     // the second DELETE stops at the server's 404 first. The read path treats a
     // 404 with a capability in hand as decisive and clears the handle itself.
     const cleared = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ error: { code: 'not_found', message: 'gone' } }), {
+    // The bootstrap read 404s AND the owner lookup answers successfully with no
+    // record — only that pair is proof of deletion. A failing lookup keeps the
+    // handle, which the next test asserts.
+    ownsRecord = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/private-rooms/mine')) {
+        return new Response(JSON.stringify({ stubs: [], next_cursor: null }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: { code: 'not_found', message: 'gone' } }), {
         status: 404,
         headers: { 'content-type': 'application/json' },
-      }),
-    );
+      });
+    });
     const session = sessionDouble(STUB);
     (session as unknown as { clearDirectoryStub: unknown }).clearDirectoryStub = cleared;
     render(<DirectoryRecordPanel session={session} />);

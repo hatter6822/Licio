@@ -396,6 +396,10 @@ export interface PrivateRoomStubInsertInput {
   readonly displayAvatarPublicCid: string | null;
   readonly rendezvousPolicy: RendezvousPolicy;
   readonly bootstrapHints: readonly BootstrapHint[];
+  /**
+   * The body a WRITE supplies: v2, closed, carrying no secret. The columns are
+   * derived from it, which is why it is typed rather than a loose record.
+   */
   readonly signedStub: SignedStubBody;
   readonly stubSignature: string;
   readonly bootstrapBlindId: string;
