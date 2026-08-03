@@ -35,6 +35,7 @@ import {
 import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
+import type { RoomStore } from '../forum/stores.js';
 import type { AuditEntryInput } from '../identity/audit.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -103,7 +104,16 @@ export interface InvariantTx {
    * the thread's open-row slot for good. A predicate the write depends on has
    * to be read where the write happens.
    */
-  readonly threads: Pick<StoryStore, 'getThreadById'>;
+  readonly threads: Pick<StoryStore, 'getThreadById' | 'getThreadByIdForUpdate'>;
+  /**
+   * The room and its stewards, on that handle too.
+   *
+   * WS-Q moves a thread between rooms and a steward grant can be revoked, so
+   * "this caller may act on this conversation" is as perishable as its
+   * writability — and it is checked before a candidate lookup that takes its own
+   * time. Both are re-asked inside the unit, against the row it holds.
+   */
+  readonly rooms: Pick<RoomStore, 'getById' | 'stewardRolesFor'>;
 }
 
 export interface InvariantPlatformServices {
@@ -191,8 +201,11 @@ export function createInMemoryInvariantServices(
         return services.bridgeAttempts;
       },
       audit: (input) => identity.audit.append(input),
-      get threads(): Pick<StoryStore, 'getThreadById'> {
+      get threads(): Pick<StoryStore, 'getThreadById' | 'getThreadByIdForUpdate'> {
         return ingestion.stories;
+      },
+      get rooms(): Pick<RoomStore, 'getById' | 'stewardRolesFor'> {
+        return forum.rooms;
       },
     },
     () => (services.bridgeAttempts instanceof InMemoryBridgeAttemptStore ? [bridgeAttempts] : []),

@@ -196,6 +196,22 @@ describe('JoinPanel — the §21.2 pre-join directory check', () => {
     ).toBeVisible();
   });
 
+  it('does not let a STALLED directory read block the join', async () => {
+    // The check is advisory — it reports, it does not gate — and awaiting it
+    // held the panel busy, so a directory request that never settles disabled
+    // the grant controls indefinitely on an otherwise valid join.
+    const admin = await makeSession();
+    await registerStub(admin);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      // Never settles.
+      () => new Promise<Response>(() => {}),
+    );
+    await openInvite(admin);
+    // The request is shown and the grant field is usable while the lookup hangs.
+    expect(await screen.findByLabelText(/your join request/i)).toBeInTheDocument();
+    expect(await screen.findByLabelText(/paste the grant/i)).toBeEnabled();
+  });
+
   it('WARNS when the invite names a record that does not resolve', async () => {
     const admin = await makeSession();
     await registerStub(admin);

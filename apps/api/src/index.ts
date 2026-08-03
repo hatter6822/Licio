@@ -684,6 +684,10 @@ if (db) {
         // the insert depends on has to be read inside the transaction, or the
         // window it closes is still open.
         threads: new DrizzleStoryStore(tx),
+        // The room and its stewards on the same handle: authority is as
+        // perishable as writability (WS-Q moves threads, grants are revoked),
+        // and both are re-asked inside the unit.
+        rooms: new DrizzleRoomStore(tx),
       }),
     );
 }

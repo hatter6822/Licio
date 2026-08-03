@@ -158,7 +158,18 @@ function JoinerSection({
       // invite carries — the reason it rides the SEALED invite rather than the
       // post-admission grant. See `lookUpDirectory` for what this does and does
       // not establish; either way it is a REPORT, never a gate.
-      setRecordCheck({ fragment, lookup: await lookUpDirectory(invite) });
+      //
+      // NOT AWAITED HERE, which is what makes that true. Awaiting it held `busy`
+      // for as long as the request took, and a stalled directory read then
+      // disabled the grant controls indefinitely — a check described as advisory
+      // preventing a join it has no authority over. The join request is already
+      // built and shown; the verdict lands beside it when it arrives, and it is
+      // still keyed to this fragment so a late answer cannot describe a
+      // different invite.
+      void lookUpDirectory(invite).then(
+        (lookup) => setRecordCheck({ fragment, lookup }),
+        () => setRecordCheck({ fragment, lookup: { kind: 'unavailable' } }),
+      );
     } catch {
       setError(
         t(

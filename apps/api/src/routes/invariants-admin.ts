@@ -637,8 +637,23 @@ export function createInvariantsAdminRoutes(
           // separately-composed store runs OUTSIDE this transaction and leaves
           // exactly the window it was added to close. The predicate the write
           // depends on is read where the write happens.
-          const current = await tx.threads.getThreadById(threadId);
+          // LOCKED, and re-authorized, against the row this unit holds.
+          //
+          // A plain read inside a READ COMMITTED transaction is a snapshot, not
+          // a hold — the archive commits between it and the insert, and the
+          // attempt lands on a conversation that can never answer it. And
+          // authority is as perishable as writability: WS-Q moves a thread
+          // between rooms and a steward grant can be revoked, both of them while
+          // the candidate lookup above was running.
+          const current = await tx.threads.getThreadByIdForUpdate(threadId);
           if (current === null || !acceptsContributions(current)) return null;
+          const currentRoom =
+            current.roomId === null ? null : await tx.rooms.getById(current.roomId);
+          if (currentRoom === null || currentRoom.storageMode !== 'server') return null;
+          const stillAuthorized = auth.roles.includes('admin')
+            ? true
+            : (await tx.rooms.stewardRolesFor(currentRoom.roomId, auth.userId)).length > 0;
+          if (!stillAuthorized) return null;
           const attempt = await tx.bridgeAttempts.insertIfNoneOpen({
             attemptId: crypto.randomUUID(),
             threadId,

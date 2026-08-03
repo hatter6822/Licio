@@ -174,6 +174,21 @@ export class DrizzleStoryStore implements StoryStore {
     return rows[0] ? this.#toThread(rows[0]) : null;
   }
 
+  async getThreadByIdForUpdate(threadId: string): Promise<ThreadShellRecord | null> {
+    // `FOR UPDATE`, because the caller's write DEPENDS on this row's state.
+    // Inside a READ COMMITTED transaction a plain SELECT is a snapshot, not a
+    // hold: an `updateThread` archiving the conversation can commit between it
+    // and the insert, and the attempt lands on a thread that can never answer
+    // it. The lock makes the concurrent update wait for this unit instead.
+    const rows = await this.#db
+      .select()
+      .from(threadsTable)
+      .where(eq(threadsTable.threadId, threadId))
+      .limit(1)
+      .for('update');
+    return rows[0] ? this.#toThread(rows[0]) : null;
+  }
+
   async updateThread(
     threadId: string,
     patch: Partial<Pick<ThreadShellRecord, 'roomId' | 'conversationState' | 'safetyState'>>,

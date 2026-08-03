@@ -350,6 +350,20 @@ export interface StoryStore {
   getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null>;
   /** Batch thread-shell read keyed by STORY id (WS-I safety filter). */
   getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>>;
+  /**
+   * The thread, LOCKED for the duration of the caller's transaction.
+   *
+   * A predicate the write depends on is not settled by reading it in the same
+   * transaction: READ COMMITTED takes a fresh snapshot per statement, so an
+   * archive can commit between the read and the insert and the row that gated
+   * the write is already stale. `FOR UPDATE` holds it — a concurrent
+   * `updateThread` waits for the unit to finish, which is the difference
+   * between checking a state and depending on one.
+   *
+   * The in-memory twin is the same read: a single-threaded fold has no window
+   * between two awaits it controls.
+   */
+  getThreadByIdForUpdate(threadId: string): Promise<ThreadShellRecord | null>;
   /** Reverse shell lookup (thread-scoped events → story lifecycle/freshness). */
   getStoryIdByThreadId(threadId: string): Promise<string | null>;
   // -- WS-G thread ownership (the forum module reads/writes through these) --
@@ -806,6 +820,12 @@ export class InMemoryStoryStore implements StoryStore {
       if (thread !== undefined) out.set(storyId, thread);
     }
     return out;
+  }
+
+  async getThreadByIdForUpdate(threadId: string): Promise<ThreadShellRecord | null> {
+    // No lock to take: this adapter's fold cannot interleave between the two
+    // awaits the caller controls.
+    return await this.getThreadById(threadId);
   }
 
   async getStoryIdByThreadId(threadId: string): Promise<string | null> {
