@@ -57,7 +57,9 @@ type RecordState =
   /** No record — never registered, or one this device's handle outlived. */
   | { kind: 'absent' }
   /** The read failed for a reason that is NOT "there is nothing there". */
-  | { kind: 'unreadable' };
+  | { kind: 'unreadable' }
+  /** A record came back that this ROOM did not sign. */
+  | { kind: 'unverified' };
 
 export function DirectoryRecordPanel({
   session,
@@ -94,7 +96,24 @@ export function DirectoryRecordPanel({
     setBusy('refresh');
     setError(null);
     try {
-      setState({ kind: 'present', record: await fetchPrivateRoomBootstrap(roomServerId, token) });
+      const fetched = await fetchPrivateRoomBootstrap(roomServerId, token);
+      // VERIFY before believing it. The server stores `signed_stub` verbatim and
+      // cannot check it — it holds no room key — so the signature is worth
+      // exactly what the client's willingness to read it is worth. Nothing read
+      // it until now, which made both the room's signature and the server's
+      // refusal to let a PATCH change the signing identity decoration.
+      //
+      // Fail CLOSED: a record that does not verify is not shown at all, because
+      // the commitments in it are what a member would bootstrap from.
+      if (
+        fetched.signed_stub === null ||
+        fetched.stub_signature === null ||
+        !(await session.verifyDirectoryRecord(fetched.signed_stub, fetched.stub_signature))
+      ) {
+        setState({ kind: 'unverified' });
+        return;
+      }
+      setState({ kind: 'present', record: fetched });
     } catch (err) {
       // A 404 is DECISIVE: §21.2 collapses unknown-room, wrong-token and
       // malformed-id into it, so with a capability in hand it means the record
@@ -190,6 +209,13 @@ export function DirectoryRecordPanel({
         {removed !== null ? (
           <p className="text-ink-muted text-sm" role="status">
             {removed}
+          </p>
+        ) : state.kind === 'unverified' ? (
+          <p className="text-error-on-soft text-sm" role="alert">
+            {t(
+              'privateRoom.record.unverified',
+              'Licio returned a record for this room that the room did not sign. It is not shown, and nothing here should be trusted until you can check with another member.',
+            )}
           </p>
         ) : state.kind === 'absent' ? (
           <div className="flex flex-col gap-2">

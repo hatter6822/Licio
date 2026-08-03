@@ -843,8 +843,13 @@ export async function assembleActivitySnapshots(
 // Reeb (WS-H.7.4): engagement landscape over the topic-similarity graph
 // ---------------------------------------------------------------------------
 
-/** The most active items one landscape sweep considers. */
+/** The most active PUBLIC items one landscape sweep draws. */
 const LANDSCAPE_NODES = 100;
+/** How many window rows one scan step reads while looking for that many. */
+const LANDSCAPE_SCAN_BATCH = 200;
+/** …and the point at which it stops looking: a window whose active rows are
+ *  overwhelmingly restricted must not turn one map load into a table walk. */
+const LANDSCAPE_SCAN_CEILING = 1_000;
 
 export async function assembleEngagementLandscape(
   events: EventPipelineServices,
@@ -863,21 +868,40 @@ export async function assembleEngagementLandscape(
   // empty landscape. The window rows already ARE the set of things that drew
   // attention, so the bound applies to them — busiest first, so a truncated
   // landscape keeps the clusters worth seeing.
-  const active = await events.windowStore.listActiveInWindow(windowStart, '1h', LANDSCAPE_NODES);
-
-  // …then hydrate, PUBLIC-ONLY and in one query. The restriction lives in the
-  // read rather than in a filter afterwards, so a `room_only` or hidden story
-  // cannot reach a surface whose caller's room authority is unknown; anything
-  // that does not hydrate is simply not a node.
-  const byId = await ingestion.stories.getPublicByIds(active.map((row) => row.itemId));
-
+  // The cap counts PUBLIC nodes, so it is applied after hydration rather than to
+  // the candidate read.
+  //
+  // A window's busiest rows are not all public — `room_only`, hidden and deleted
+  // stories draw events too — so limiting the candidate query to
+  // `LANDSCAPE_NODES` spent the whole budget before anything was filtered: a
+  // hundred high-activity restricted rows produced an EMPTY map for an hour with
+  // real public activity. It scans in bounded batches until the landscape is
+  // full or the window is exhausted, with a hard scan ceiling so a window that
+  // is overwhelmingly restricted cannot turn one map load into a table walk.
   const nodes: ReebNode[] = [];
   const topicsById = new Map<string, readonly string[]>();
-  for (const row of active) {
-    const story = byId.get(row.itemId);
-    if (!story) continue;
-    nodes.push({ id: row.itemId, value: row.eventCount });
-    topicsById.set(row.itemId, story.topicIds);
+  const byId = new Map<string, StoryRecord>();
+  for (let scanned = 0; scanned < LANDSCAPE_SCAN_CEILING; scanned += LANDSCAPE_SCAN_BATCH) {
+    const active = await events.windowStore.listActiveInWindow(
+      windowStart,
+      '1h',
+      scanned + LANDSCAPE_SCAN_BATCH,
+    );
+    // Hydrate PUBLIC-ONLY, in one query: the restriction lives in the read
+    // rather than in a filter afterwards, so a restricted story cannot reach a
+    // surface whose caller's room authority is unknown.
+    const page = active.slice(scanned);
+    if (page.length === 0) break;
+    const hydrated = await ingestion.stories.getPublicByIds(page.map((row) => row.itemId));
+    for (const row of page) {
+      const story = hydrated.get(row.itemId);
+      if (!story) continue;
+      byId.set(row.itemId, story);
+      nodes.push({ id: row.itemId, value: row.eventCount });
+      topicsById.set(row.itemId, story.topicIds);
+      if (nodes.length >= LANDSCAPE_NODES) break;
+    }
+    if (nodes.length >= LANDSCAPE_NODES || active.length < scanned + LANDSCAPE_SCAN_BATCH) break;
   }
 
   const edges: ReebEdge[] = [];

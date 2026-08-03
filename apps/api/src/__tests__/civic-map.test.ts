@@ -39,11 +39,12 @@ function services(stories: FakeStory[], opts: { omitFromList?: string[] } = {}) 
     windowStore: {
       // The landscape STARTS from the window — what actually drew attention —
       // rather than from the most recent stories filtered by activity.
-      listActiveInWindow: () =>
+      listActiveInWindow: (_start: string, _size: string, limit: number) =>
         Promise.resolve(
           stories
             .filter((s) => s.events > 0)
             .sort((a, b) => b.events - a.events)
+            .slice(0, limit)
             .map((s) => ({ itemId: s.storyId, eventCount: s.events })),
         ),
     },
@@ -216,6 +217,40 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(map?.basins.map((basin) => basin.title)).toEqual(['Old but busy']);
   });
 
+  it('keeps looking past restricted rows rather than spending the cap on them', async () => {
+    // A window's busiest rows are not all public. Applying the node cap to the
+    // candidate READ meant a run of high-activity restricted stories consumed
+    // the whole budget and the map came back empty for an hour with real public
+    // activity.
+    const restricted = Array.from({ length: 150 }, (_unused, i) => ({
+      storyId: `${String(i).padStart(8, '0')}-9999-4999-8999-999999999999`,
+      title: `Restricted ${i}`,
+      topicIds: [TOPIC_A?.id ?? ''],
+      events: 1_000 - i,
+    }));
+    const publicOne = {
+      storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
+      title: 'The public one',
+      topicIds: [TOPIC_A?.id ?? ''],
+      events: 5,
+    };
+    const { events } = services([...restricted, publicOne]);
+    const ingestion = {
+      stories: {
+        // Only the public story hydrates — the rest are `room_only`/hidden, so
+        // the public-only read does not return them.
+        getPublicByIds: (ids: readonly string[]) =>
+          Promise.resolve(
+            new Map(ids.includes(publicOne.storyId) ? [[publicOne.storyId, publicOne]] : []),
+          ),
+        getThreadsByStoryIds: (ids: readonly string[]) =>
+          Promise.resolve(new Map(ids.map((id) => [id, { threadId: `thread-${id}` }]))),
+      },
+    } as unknown as Parameters<typeof buildCivicMap>[1];
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
+    expect(map?.basins.map((basin) => basin.title)).toEqual(['The public one']);
+  });
+
   it('never surfaces the UNCLASSIFIED sentinel as a topic', async () => {
     const { events, ingestion } = services([
       story('11111111-1111-4111-8111-111111111111', 10, [UNCLASSIFIED_TOPIC_ID]),
@@ -243,8 +278,8 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     ];
     const events = {
       windowStore: {
-        listActiveInWindow: () =>
-          Promise.resolve(rows.map((r) => ({ itemId: r.storyId, eventCount: 5 }))),
+        listActiveInWindow: (_start: string, _size: string, limit: number) =>
+          Promise.resolve(rows.slice(0, limit).map((r) => ({ itemId: r.storyId, eventCount: 5 }))),
       },
     } as unknown as Parameters<typeof buildCivicMap>[0];
     const busy = {
@@ -285,9 +320,11 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     ];
     const events = {
       windowStore: {
-        listActiveInWindow: () =>
+        listActiveInWindow: (_start: string, _size: string, limit: number) =>
           Promise.resolve(
-            rows.map((r) => ({ itemId: r.storyId, eventCount: r.storyId === gone ? 20 : 3 })),
+            rows
+              .slice(0, limit)
+              .map((r) => ({ itemId: r.storyId, eventCount: r.storyId === gone ? 20 : 3 })),
           ),
       },
     } as unknown as Parameters<typeof buildCivicMap>[0];

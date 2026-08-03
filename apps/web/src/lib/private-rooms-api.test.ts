@@ -61,8 +61,9 @@ const STUB = {
   rendezvous_policy: 'licio_blind',
   bootstrap_hints: [],
   bootstrap_endpoints: [],
-  signed_stub: { bootstrap_blind_id: 'YmxpbmQ' },
-  stub_signature: 'c2ln',
+  signed_stub: { bootstrap_blind_id: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A' },
+  stub_signature:
+    'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
   created_at: '2026-08-02T00:00:00.000Z',
   updated_at: '2026-08-02T00:00:00.000Z',
 };
@@ -87,11 +88,12 @@ describe('createPrivateRoomStub (§21.1)', () => {
       rendezvousPolicy: 'licio_blind',
       signedStub: {
         schema: 'licio.private.directory_stub.v2',
-        room_public_key: 'cm9vbQ',
-        manifest_key_commitment: 'bWFu',
+        room_public_key: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
+        manifest_key_commitment: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8',
       },
-      stubSignature: 'c2ln',
-      bootstrapBlindId: 'Ym9vdHN0cmFw',
+      stubSignature:
+        'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+      bootstrapBlindId: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A',
     });
     // No `room_public_key`/`manifest_key_commitment`: the server DERIVES both
     // from the signed body, so there is no second copy to disagree with it.
@@ -113,11 +115,12 @@ describe('createPrivateRoomStub (§21.1)', () => {
       rendezvousPolicy: 'licio_blind',
       signedStub: {
         schema: 'licio.private.directory_stub.v2',
-        room_public_key: 'cm9vbQ',
-        manifest_key_commitment: 'bWFu',
+        room_public_key: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
+        manifest_key_commitment: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8',
       },
-      stubSignature: 'c2ln',
-      bootstrapBlindId: 'Ym9vdHN0cmFw',
+      stubSignature:
+        'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+      bootstrapBlindId: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A',
     });
     const body = lastBody();
     expect(body['display_name']).toBeUndefined();
@@ -132,8 +135,9 @@ describe('createPrivateRoomStub (§21.1)', () => {
         directoryMode: 'unlisted',
         rendezvousPolicy: 'licio_blind',
         signedStub: {},
-        stubSignature: 'c2ln',
-        bootstrapBlindId: 'Ym9vdHN0cmFw',
+        stubSignature:
+          'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+        bootstrapBlindId: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A',
       }),
     ).rejects.toThrow();
   });
@@ -142,10 +146,10 @@ describe('createPrivateRoomStub (§21.1)', () => {
 describe('fetchPrivateRoomBootstrap (§21.2)', () => {
   it('passes the invite-derived token as a query parameter', async () => {
     respondTo(STUB);
-    await fetchPrivateRoomBootstrap('room-1', 'YmxpbmQ');
+    await fetchPrivateRoomBootstrap('room-1', 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A');
     const url = String(fetchMock.mock.calls.at(-1)?.[0]);
     expect(url).toContain('/v1/private-rooms/room-1/bootstrap');
-    expect(url).toContain('token=YmxpbmQ');
+    expect(url).toContain('token=PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A');
   });
 
   it('sends no token parameter when none is supplied (a listed room)', async () => {
@@ -165,8 +169,12 @@ describe('fetchPrivateRoomBootstrap (§21.2)', () => {
 describe('updatePrivateRoomStub / delist / delete (§21.3, §21.4)', () => {
   it('sends only the fields actually supplied', async () => {
     respondTo(STUB);
-    await updatePrivateRoomStub('room-1', { latestManifestCommitment: 'bmV3' });
-    expect(lastBody()).toEqual({ latest_manifest_commitment: 'bmV3' });
+    await updatePrivateRoomStub('room-1', {
+      latestManifestCommitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
+    });
+    expect(lastBody()).toEqual({
+      latest_manifest_commitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
+    });
   });
 
   it('delist returns the demoted stub', async () => {

@@ -2173,11 +2173,11 @@ Four properties hold:
 - **`listed` only.** The mode is filtered in the QUERY, not by the caller.
   `unlisted` existence is exactly what must never be enumerable (§15.3.1), and
   `detached` rooms have no stub at all.
-- **Display metadata only.** The commitments, the bootstrap hints, and above all
-  `signed_stub` — which carries the `bootstrap_blind_id` capability — stay behind
-  `GET /bootstrap`. A browse row carrying the signed body would hand every
-  anonymous reader the token that gates unlisted records, for every room that is
-  ever delisted.
+- **Display metadata only.** The commitments, the bootstrap hints and the signed
+  body stay behind `GET /bootstrap`. The CAPABILITY is not in any of them — it is
+  its own never-projected column (§21.1) — but a browse row is a browse row: it
+  publishes what a room chose to publish, and a reader who wants the record's
+  commitments can ask for the record.
 - **Unauthenticated,** like the listed bootstrap read: the contents are public by
   the creator's explicit choice, and requiring an account would only add an
   identity to a read that needs none.

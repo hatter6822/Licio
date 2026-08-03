@@ -19,13 +19,33 @@
 // server is a courier for them, never a validator of them.
 import { z } from 'zod';
 
-/** A base64url commitment / public key / blind id — bounded, never decrypting
- *  material (§8.2). */
-const commitmentSchema = z
-  .string()
-  .min(1)
-  .max(512)
-  .regex(/^[A-Za-z0-9_-]+$/, 'expected a base64url commitment');
+/**
+ * A base64url value of an EXACT byte length — the shape a specific primitive
+ * produces, not merely "bounded base64url".
+ *
+ * `1..512 base64url` is a value channel wearing a cryptographic name. Every one
+ * of these columns is the output of a fixed-size primitive, so anything else in
+ * one is content: an authenticated client could encode a message, a member id,
+ * or key material across `room_public_key`, `manifest_key_commitment`,
+ * `stub_signature` and `bootstrap_blind_id`, and the strict object schema and
+ * the §8.1 key scan would see only legal field NAMES — the same defect the hint
+ * values had, in the fields that look most obviously safe.
+ *
+ * Unpadded base64url of n bytes is exactly `ceil(n * 4 / 3)` characters, so the
+ * length is a total constraint rather than a bound.
+ */
+function base64UrlBytes(bytes: number, what: string) {
+  const chars = Math.ceil((bytes * 4) / 3);
+  return z
+    .string()
+    .length(chars, `expected ${bytes}-byte base64url (${what})`)
+    .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
+}
+
+/** Ed25519 public key, SHA-256 commitment, HMAC-SHA256 blind id — all 32 bytes. */
+const commitmentSchema = base64UrlBytes(32, 'commitment, public key or blind id');
+/** Ed25519 signature — 64 bytes. */
+const signatureSchema = base64UrlBytes(64, 'Ed25519 signature');
 
 /** Public display metadata — `listed` rooms only, and bounded for DoS. */
 const displayNameSchema = z.string().min(1).max(120);
@@ -259,7 +279,7 @@ export const privateRoomCreateStubRequestSchema = z
     rendezvous_policy: rendezvousPolicySchema,
     bootstrap_hints: z.array(bootstrapHintSchema).max(MAX_BOOTSTRAP_HINTS).optional(),
     signed_stub: signedStubSchema,
-    stub_signature: commitmentSchema,
+    stub_signature: signatureSchema,
     /**
      * §21.2 — the bootstrap capability, sent ALONGSIDE the signed body rather
      * than inside it, and stored in its own never-projected column.
@@ -308,7 +328,7 @@ export const privateRoomStubUpdateRequestSchema = z
     bootstrap_hints: z.array(bootstrapHintSchema).max(MAX_BOOTSTRAP_HINTS).optional(),
     latest_manifest_commitment: commitmentSchema.nullable().optional(),
     signed_stub: signedStubSchema.optional(),
-    stub_signature: commitmentSchema.optional(),
+    stub_signature: signatureSchema.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: 'no updatable field supplied' })

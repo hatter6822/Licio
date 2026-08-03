@@ -23,8 +23,12 @@ import type { PrivateRoomStubStore } from '../private-rooms/stores.js';
 const DB_URL = process.env['DATABASE_URL'];
 
 /** A base64url-safe commitment fixture. */
-const COMMITMENT = 'Y29tbWl0bWVudA';
-const TOKEN = 'Ym9vdHN0cmFwLWJsaW5kLWlk';
+/** 32 bytes base64url — the exact shape a commitment/public key/blind id has. */
+const COMMITMENT = 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI';
+/** 64 bytes base64url — an Ed25519 signature. */
+const SIGNATURE =
+  'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ';
+const TOKEN = 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A';
 
 describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract', () => {
   let db: Awaited<ReturnType<typeof import('@licio/db')['createDbClient']>>;
@@ -74,7 +78,7 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
         room_public_key: COMMITMENT,
         manifest_key_commitment: COMMITMENT,
       },
-      stubSignature: COMMITMENT,
+      stubSignature: SIGNATURE,
       bootstrapBlindId: TOKEN,
       createdByAccountId: null,
     });
@@ -122,10 +126,10 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
     const roomId = newRoomId();
     await createListed(roomId);
     const updated = await store.update(roomId, {
-      latestManifestCommitment: 'bmV3LW1hbmlmZXN0',
+      latestManifestCommitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
       rendezvousPolicy: 'manual_only',
     });
-    expect(updated?.latestManifestCommitment).toBe('bmV3LW1hbmlmZXN0');
+    expect(updated?.latestManifestCommitment).toBe('Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE');
     expect(updated?.rendezvousPolicy).toBe('manual_only');
     expect(updated?.displayName).toBe('Gated listed room');
   });

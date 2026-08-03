@@ -27,13 +27,13 @@ import {
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
 const OTHER_ACCOUNT = '22222222-2222-4222-8222-222222222222';
-const TOKEN = 'Ym9vdHN0cmFwLWJsaW5kLWlk';
+const TOKEN = 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A';
 /** The canonical §8.2 stub body — a CLOSED set of PUBLIC commitments.
  *  The capability is NOT in here: it is its own never-projected column. */
 const SIGNED_STUB = {
   schema: 'licio.private.directory_stub.v2',
-  room_public_key: 'cm9vbS1wdWJsaWMta2V5',
-  manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
+  room_public_key: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
+  manifest_key_commitment: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8',
 } as const;
 
 /** Deterministic ids so a test can address the room it just created. */
@@ -57,7 +57,8 @@ function listedRequest(
     display_name: 'Neighbourhood watch',
     rendezvous_policy: 'licio_blind',
     signed_stub: SIGNED_STUB,
-    stub_signature: 'c3R1Yi1zaWduYXR1cmU',
+    stub_signature:
+      'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
     bootstrap_blind_id: TOKEN,
     ...over,
   };
@@ -70,7 +71,8 @@ function unlistedRequest(
     directory_mode: 'unlisted',
     rendezvous_policy: 'licio_blind',
     signed_stub: SIGNED_STUB,
-    stub_signature: 'c3R1Yi1zaWduYXR1cmU',
+    stub_signature:
+      'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
     bootstrap_blind_id: TOKEN,
     ...over,
   };
@@ -233,13 +235,17 @@ describe('review fixes — the scan, the token invariant, and staff delisting', 
     expect(privateRoomStubUpdateRequestSchema.safeParse({ signed_stub: SIGNED_STUB }).success).toBe(
       false,
     );
-    expect(privateRoomStubUpdateRequestSchema.safeParse({ stub_signature: 'c2ln' }).success).toBe(
-      false,
-    );
+    expect(
+      privateRoomStubUpdateRequestSchema.safeParse({
+        stub_signature:
+          'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+      }).success,
+    ).toBe(false);
     expect(
       privateRoomStubUpdateRequestSchema.safeParse({
         signed_stub: SIGNED_STUB,
-        stub_signature: 'c2ln',
+        stub_signature:
+          'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
       }).success,
     ).toBe(true);
   });
@@ -338,7 +344,7 @@ describe('§21.3 update — only the mutable fields, only the creator', () => {
         display_name: 'Renamed',
         rendezvous_policy: 'manual_only',
         bootstrap_hints: [{ kind: 'manual', value: 'paste-me' }],
-        latest_manifest_commitment: 'bmV3LW1hbmlmZXN0',
+        latest_manifest_commitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
       }).success,
     ).toBe(true);
   });
@@ -362,10 +368,12 @@ describe('§21.3 update — only the mutable fields, only the creator', () => {
     if (!created.ok) throw new Error('create failed');
     const updated = await svc.update(
       created.value.room_server_id,
-      { latest_manifest_commitment: 'bmV3LW1hbmlmZXN0' },
+      { latest_manifest_commitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE' },
       ACCOUNT,
     );
-    expect(updated.ok && updated.value.latest_manifest_commitment).toBe('bmV3LW1hbmlmZXN0');
+    expect(updated.ok && updated.value.latest_manifest_commitment).toBe(
+      'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
+    );
   });
 });
 
@@ -482,8 +490,12 @@ describe('§21.3 — a record cannot change who signed it', () => {
     const result = await svc.update(
       created.value.room_server_id,
       {
-        signed_stub: { ...SIGNED_STUB, room_public_key: 'YW5vdGhlci1kZXZpY2Uta2V5' },
-        stub_signature: 'c2ln',
+        signed_stub: {
+          ...SIGNED_STUB,
+          room_public_key: '2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz_o',
+        },
+        stub_signature:
+          'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
       },
       ACCOUNT,
     );
@@ -497,7 +509,11 @@ describe('§21.3 — a record cannot change who signed it', () => {
     if (!created.ok) throw new Error('create failed');
     const result = await svc.update(
       created.value.room_server_id,
-      { signed_stub: SIGNED_STUB, stub_signature: 'YW5vdGhlci1zaWduYXR1cmU' },
+      {
+        signed_stub: SIGNED_STUB,
+        stub_signature:
+          'bj9hfDw3s1fYlzBBPvvBHWfz8IBZGDm3EXZMiRTV54EBt0iB5ZM5iXKxzspGUyoOixlFO34poTRTcGW0df_Xkg',
+      },
       ACCOUNT,
     );
     expect(result.ok).toBe(true);

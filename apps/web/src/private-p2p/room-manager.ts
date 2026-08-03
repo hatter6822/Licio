@@ -776,6 +776,72 @@ export class PrivateRoomSession {
     return this.session.epochs.some((entry) => entry.epoch === 0);
   }
 
+  /**
+   * Verify a §21 directory record against the room's OWN key before believing it.
+   *
+   * "Signed by the room" was a property nothing checked. The server stores
+   * `signed_stub` verbatim and cannot verify it (it holds no room key), so the
+   * signature is worth exactly as much as the client's willingness to read it —
+   * and until now no client did, which made the identity guarantee, and the
+   * refusal that preserves it, decoration.
+   *
+   * Two things are checked, and both are necessary. The signature must verify
+   * over the CANONICAL encoding of the body, and `room_public_key` must be the
+   * founder device's signing key as this session knows it — otherwise a
+   * substituted record signed by an attacker's key verifies against itself
+   * perfectly.
+   *
+   * Fail closed: anything unparseable, unknown or mismatched is `false`.
+   */
+  async verifyDirectoryRecord(
+    signedStub: Record<string, unknown>,
+    stubSignature: string,
+  ): Promise<boolean> {
+    // Re-shape to the CLOSED §8.2 body before canonicalizing. The wire type is
+    // `Record<string, unknown>`, and canonical encoding of an arbitrary object
+    // is not defined — nor should a body with an unexpected key verify, since
+    // the signature was produced over the closed set.
+    const schema = signedStub['schema'];
+    const claimed = signedStub['room_public_key'];
+    const manifest = signedStub['manifest_key_commitment'];
+    if (
+      Object.keys(signedStub).length !== 3 ||
+      schema !== 'licio.private.directory_stub.v2' ||
+      typeof claimed !== 'string' ||
+      typeof manifest !== 'string'
+    ) {
+      return false;
+    }
+    const canonicalBody = {
+      schema,
+      room_public_key: claimed,
+      manifest_key_commitment: manifest,
+    } as const;
+    // The founder's signing key, from the roster this session was bootstrapped
+    // with — the same set `PrivateRoomEngine.load` verifies the genesis self-add
+    // against, so it is the room's own answer rather than the record's.
+    const founderDeviceId = await verifiedFounderDeviceId(
+      this.p2p,
+      this.session.manifest,
+      this.session.manifestCommitment,
+    );
+    if (founderDeviceId === undefined) return false;
+    const founder = this.session.bootstrapDevices.find(
+      (device) => device.deviceId === founderDeviceId,
+    );
+    if (founder === undefined || founder.signingPublicKey !== claimed) return false;
+    try {
+      const key = await this.p2p.importPublicKeyRaw(this.p2p.fromBase64Url(claimed));
+      return await this.p2p.verifyEd25519(
+        key,
+        this.p2p.canonical(canonicalBody),
+        this.p2p.fromBase64Url(stubSignature),
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /** The §21 directory record for this room, if it registered one. */
   get directoryStub(): StoredRoomSession['directoryStub'] {
     return this.session.directoryStub;

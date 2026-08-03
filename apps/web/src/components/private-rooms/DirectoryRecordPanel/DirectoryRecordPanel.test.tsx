@@ -20,7 +20,7 @@ import { checkA11y } from '../../../test/axe.js';
 import { DirectoryRecordPanel } from './DirectoryRecordPanel.js';
 
 const ROOM_SERVER_ID = '11111111-1111-4111-8111-111111111111';
-const TOKEN = 'Ym9vdHN0cmFwLWJsaW5kLWlk';
+const TOKEN = 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A';
 
 function bootstrapBody(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -29,14 +29,15 @@ function bootstrapBody(over: Record<string, unknown> = {}): Record<string, unkno
     display_name: 'Neighbourhood watch',
     display_description: null,
     display_avatar_public_cid: null,
-    room_public_key: 'cm9vbS1rZXk',
-    manifest_key_commitment: 'bWFuaWZlc3Q',
+    room_public_key: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
+    manifest_key_commitment: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8',
     latest_manifest_commitment: null,
     rendezvous_policy: 'licio_blind',
     bootstrap_hints: [],
     bootstrap_endpoints: [],
     signed_stub: {},
-    stub_signature: 'c2ln',
+    stub_signature:
+      'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
     created_at: '2026-08-02T00:00:00.000Z',
     updated_at: '2026-08-02T00:00:00.000Z',
     ...over,
@@ -62,16 +63,20 @@ function sessionDouble(
             },
           },
     attachDirectoryStub: async () => {},
+    // The panel VERIFIES the record against the room's own key before showing
+    // it; the double accepts, and one test below rejects.
+    verifyDirectoryRecord: async () => true,
     // Only a device holding the GENESIS epoch can derive the room's §21.2
     // capability, so registration is offered only there.
     canRegisterDirectory: true,
     name: 'Neighbourhood watch',
     clearDirectoryStub: async () => {},
     directoryStubPayload: async () => ({
-      roomPublicKey: 'cm9vbS1rZXk',
-      manifestKeyCommitment: 'bmV3LW1hbmlmZXN0',
+      roomPublicKey: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
+      manifestKeyCommitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
       signedStub: { schema: 'licio.private.directory_stub.v1' },
-      stubSignature: 'c2ln',
+      stubSignature:
+        'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
       bootstrapBlindId: TOKEN,
     }),
   } as unknown as PrivateRoomSession;
@@ -100,7 +105,7 @@ function mockApi(handler: (url: string, init?: RequestInit) => unknown): void {
                     room_server_id: ROOM_SERVER_ID,
                     stub_id: STUB.stubId,
                     directory_mode: 'listed',
-                    room_public_key: 'cm9vbS1rZXk',
+                    room_public_key: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
                     signed_stub: {},
                   },
                 ]
@@ -155,6 +160,21 @@ describe('DirectoryRecordPanel', () => {
     expect(await screen.findByText(/Licio holds no record of this room/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /store a bootstrap record/i }));
     expect(await screen.findByRole('status')).toHaveTextContent(/now holds a bootstrap record/i);
+  });
+
+  it('refuses to show a record the ROOM did not sign', async () => {
+    // The server stores `signed_stub` verbatim and cannot check it — it holds no
+    // room key — so a client that does not verify makes both the signature and
+    // the server's identity-preservation refusal decoration.
+    mockApi(() => bootstrapBody());
+    const session = sessionDouble(STUB);
+    (session as unknown as { verifyDirectoryRecord: unknown }).verifyDirectoryRecord = async () =>
+      false;
+    render(<DirectoryRecordPanel session={session} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/the room did not sign/i);
+    // Fail CLOSED: nothing from the record is displayed, since its commitments
+    // are what a member would bootstrap from.
+    expect(screen.queryByText('Neighbourhood watch')).toBeNull();
   });
 
   it('does not offer registration on a device that joined later', async () => {
