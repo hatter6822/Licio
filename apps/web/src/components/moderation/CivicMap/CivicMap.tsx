@@ -403,6 +403,49 @@ export function CivicMap({
         </details>
       ) : null}
 
+      {/* SPLITS, in words.
+          The summary counted them and nothing showed them: the diagram is a
+          MERGE tree and both detail lists iterated `data.merges`, so an analyst
+          could see that three basins bifurcated and not which, at what level, or
+          into what. That is half the landscape SPEC §12.4 asks this surface to
+          support, and it is the half that detects a community coming apart.
+
+          A list rather than tree geometry: a split tree is the merge tree's dual
+          and drawing both on one axis would assert a shape neither has. */}
+      {data.splits.length > 0 ? (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-ink-muted">
+            {t('civicMap.splitsToggle', 'List every branch point')}
+          </summary>
+          <ul className="mt-2 flex flex-col gap-1">
+            {data.splits.map((split) => {
+              const a = basinById.get(split.basin_a);
+              const b = basinById.get(split.basin_b);
+              const shared = split.shared_topics.map((topic) => topic.name).join(', ');
+              return (
+                <li
+                  key={`split-${split.basin_a}-${split.basin_b}-${split.level}`}
+                  className="text-ink-muted"
+                >
+                  {t(
+                    'civicMap.splitRow',
+                    '“{a}” and “{b}” separate here, with {n, plural, one {# connection} other {# connections}} left between them',
+                    {
+                      a: a?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
+                      b: b?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
+                      n: split.connecting_edges,
+                    },
+                  )}
+                  {shared
+                    ? ` · ${t('civicMap.sharedTopics', 'Shared topics: {topics}', { topics: shared })}`
+                    : ''}
+                </li>
+              );
+            })}
+          </ul>
+        </details>
+      ) : null}
+
       {/* The full landscape as text — the accessible equivalent of the diagram,
           and the only place basins are enumerated. Neutral order, as above. */}
       <details className="text-xs">

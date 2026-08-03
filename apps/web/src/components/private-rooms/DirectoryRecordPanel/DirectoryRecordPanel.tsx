@@ -36,7 +36,7 @@ import {
   deletePrivateRoomStub,
   delistPrivateRoomStub,
   fetchPrivateRoomBootstrap,
-  listMyPrivateRoomStubs,
+  findMyPrivateRoomStub,
   updatePrivateRoomStub,
 } from '../../../lib/private-rooms-api.js';
 import type { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
@@ -133,9 +133,9 @@ export function DirectoryRecordPanel({
     let live = true;
     // Fail CLOSED: an unanswerable ownership question hides the controls rather
     // than offering ones that would 403.
-    void listMyPrivateRoomStubs()
+    void findMyPrivateRoomStub({ roomServerId })
       .then((mine) => {
-        if (live) setOwned(mine.some((entry) => entry.room_server_id === roomServerId));
+        if (live) setOwned(mine !== null);
       })
       .catch(() => {
         if (live) setOwned(false);
@@ -146,6 +146,20 @@ export function DirectoryRecordPanel({
   }, [roomServerId, accountId]);
 
   const record = state.kind === 'present' ? state.record : null;
+
+  // Why registration is unavailable, or null when it is available.
+  const registerBlockedBecause =
+    accountId === null
+      ? t(
+          'privateRoom.record.registerNeedsAccount',
+          'Sign in to have Licio store a bootstrap record for this room.',
+        )
+      : session.canRegisterDirectory
+        ? null
+        : t(
+            'privateRoom.record.registerNeedsFounder',
+            'Only a device that has been in this room since it was created can register a record for it — its bootstrap key is one this device never received.',
+          );
 
   async function run(action: Exclude<Action, null>, work: () => Promise<void>): Promise<void> {
     setBusy(action);
@@ -197,40 +211,82 @@ export function DirectoryRecordPanel({
                 demoted-then-restored by accident), and a bootstrap pointer is
                 what makes an invite resolve — which is the thing that was
                 lost. */}
-            <div>
-              <Button
-                type="button"
-                variant="secondary"
-                disabled={busy !== null}
-                onClick={() =>
-                  void run('register', async () => {
-                    const payload = await session.directoryStubPayload();
-                    const created = await createPrivateRoomStub({
-                      directoryMode: 'unlisted',
-                      rendezvousPolicy: 'licio_blind',
-                      signedStub: payload.signedStub,
-                      stubSignature: payload.stubSignature,
-                      bootstrapBlindId: payload.bootstrapBlindId,
-                    });
-                    await session.attachDirectoryStub({
-                      roomServerId: created.room_server_id,
-                      bootstrapBlindId: payload.bootstrapBlindId,
-                    });
-                    setStatus(
-                      t(
-                        'privateRoom.record.registered',
-                        'Licio now holds a bootstrap record for this room. New invites can use it.',
-                      ),
-                    );
-                    await read();
-                  })
-                }
-              >
-                {busy === 'register'
-                  ? t('privateRoom.record.registering', 'Registering…')
-                  : t('privateRoom.record.register', 'Let Licio store a bootstrap record')}
-              </Button>
-            </div>
+            {registerBlockedBecause !== null ? (
+              // The action is not OFFERED where it would deterministically fail.
+              // Registering is an authenticated write, and the capability is
+              // bound to the room's genesis epoch, which a device admitted later
+              // does not hold — so both are stated rather than discovered
+              // through a generic error after the signing work is done.
+              <p className="text-ink-muted text-xs" role="note">
+                {registerBlockedBecause}
+              </p>
+            ) : (
+              <div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy !== null}
+                  onClick={() =>
+                    void run('register', async () => {
+                      const payload = await session.directoryStubPayload();
+                      let created: Awaited<ReturnType<typeof createPrivateRoomStub>> | null = null;
+                      try {
+                        created = await createPrivateRoomStub({
+                          directoryMode: 'unlisted',
+                          rendezvousPolicy: 'licio_blind',
+                          signedStub: payload.signedStub,
+                          stubSignature: payload.stubSignature,
+                          bootstrapBlindId: payload.bootstrapBlindId,
+                        });
+                        await session.attachDirectoryStub({
+                          roomServerId: created.room_server_id,
+                          bootstrapBlindId: payload.bootstrapBlindId,
+                        });
+                      } catch (err) {
+                        // SAME reconciliation the creation wizard runs, for the
+                        // same reason: the POST can commit and its response be
+                        // lost, or the local write can fail after it. Nothing
+                        // here is keyed on the room, so a retry would mint a
+                        // SECOND record while the first stayed unreachable.
+                        const status = err instanceof ApiClientError ? err.status : undefined;
+                        const refused = status !== undefined && status >= 400 && status < 500;
+                        if (!refused) {
+                          const orphan = await findMyPrivateRoomStub({
+                            roomPublicKey: payload.roomPublicKey,
+                          });
+                          if (orphan !== null) {
+                            await session.attachDirectoryStub({
+                              roomServerId: orphan.room_server_id,
+                              bootstrapBlindId: payload.bootstrapBlindId,
+                            });
+                            setStatus(
+                              t(
+                                'privateRoom.record.recovered',
+                                'Licio already held a record for this room, and this device is now using it.',
+                              ),
+                            );
+                            await read();
+                            return;
+                          }
+                        }
+                        throw err;
+                      }
+                      setStatus(
+                        t(
+                          'privateRoom.record.registered',
+                          'Licio now holds a bootstrap record for this room. New invites can use it.',
+                        ),
+                      );
+                      await read();
+                    })
+                  }
+                >
+                  {busy === 'register'
+                    ? t('privateRoom.record.registering', 'Registering…')
+                    : t('privateRoom.record.register', 'Let Licio store a bootstrap record')}
+                </Button>
+              </div>
+            )}
           </div>
         ) : (
           <>

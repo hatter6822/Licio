@@ -236,6 +236,26 @@ These panels are the COPY-PASTE membership path (the §15.5 live-transport deliv
 of the MLS Welcome that finishes a remote joiner's session is the device-session
 slice below).
 
+### Tracked residual — cross-device directory capability (WS-S.1.2b)
+
+`attachDirectoryStub` writes the §21 handle to the LOCAL `StoredRoomSession`
+only. It authors no room operation, so a room whose record is re-registered on
+one device leaves every other member device holding the previous
+`room_server_id` — which 404s — and `createInvite()` on those devices keeps
+emitting the stale reference until each is re-invited or re-registers itself.
+
+Two things bound the damage today. The capability itself is derived from the
+GENESIS epoch, so a re-registration produces the same `bootstrap_blind_id` and
+only the server id moves; and registration is offered only on a device that
+holds that epoch, which is the device that registered originally in the common
+single-founder case.
+
+Closing it properly needs a `directory.set` room operation — a new op body in
+`schemas/ops.ts`, a reducer field, and a §11.3 capability rule for who may
+author it — so that the handle rides the room's own encrypted state like every
+other shared fact. That is a protocol addition rather than a fix, and it is
+deferred to the WS-S.1.2b follow-up rather than approximated with a broadcast.
+
 ## Remaining work
 
 The single-device room (create / author / read / persist / reload) is complete

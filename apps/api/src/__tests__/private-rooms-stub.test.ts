@@ -672,6 +672,35 @@ describe('owner reads — paged, and complete where completeness is the point', 
   });
 });
 
+describe('the targeted owner lookup', () => {
+  it('finds ONE record by room id or by the room’s signing key', async () => {
+    const svc = freshService();
+    const mine = await svc.create(listedRequest(), ACCOUNT);
+    await svc.create(listedRequest(), OTHER_ACCOUNT);
+    if (!mine.ok) throw new Error('create failed');
+
+    expect(
+      (await svc.findOwnedStub(ACCOUNT, { roomServerId: mine.value.room_server_id }))
+        ?.room_server_id,
+    ).toBe(mine.value.room_server_id);
+    // By the room's own signing key — how a client identifies a record whose
+    // SERVER id it never learned, after a create whose response was lost.
+    expect(
+      (await svc.findOwnedStub(ACCOUNT, { roomPublicKey: SIGNED_STUB.room_public_key }))
+        ?.room_server_id,
+    ).toBe(mine.value.room_server_id);
+  });
+
+  it('answers null for another account’s record rather than finding it', async () => {
+    const svc = freshService();
+    const theirs = await svc.create(listedRequest(), OTHER_ACCOUNT);
+    if (!theirs.ok) throw new Error('create failed');
+    expect(
+      await svc.findOwnedStub(ACCOUNT, { roomServerId: theirs.value.room_server_id }),
+    ).toBeNull();
+  });
+});
+
 describe('Art. 15 — the export discloses exactly what the purge removes', () => {
   it("exports every stub the account created, and none of anyone else's", async () => {
     const svc = freshService();

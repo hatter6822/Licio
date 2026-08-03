@@ -23,7 +23,7 @@ import { ApiClientError } from '../../../lib/api.js';
 import {
   createPrivateRoomStub,
   deletePrivateRoomStub,
-  listMyPrivateRoomStubs,
+  findMyPrivateRoomStub,
 } from '../../../lib/private-rooms-api.js';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { useAuthStore } from '../../../stores/auth.js';
@@ -211,13 +211,12 @@ export function CreatePrivateRoomWizard({
           // record anywhere to reconcile against.
           if (posted && !serverRefused) {
             try {
-              // The room's founder signing key identifies OUR record among the
-              // account's: the local session knows it, and it is what the room
-              // signed. This is why the owner lookup exists — without it, a lost
-              // response left a record nobody could ever address.
-              const mine = await listMyPrivateRoomStubs();
-              const ours = mine.filter((stub) => stub.room_public_key === roomPublicKey);
-              for (const stub of ours) await deletePrivateRoomStub(stub.room_server_id);
+              // The room's founder signing key identifies OUR record: the local
+              // session knows it, and it is what the room signed. This is why
+              // the owner lookup exists — without it, a lost response left a
+              // record nobody could ever address.
+              const ours = await findMyPrivateRoomStub({ roomPublicKey });
+              if (ours !== null) await deletePrivateRoomStub(ours.room_server_id);
             } catch {
               // The reconcile read failed too. Escalate the copy only when a
               // record is KNOWN to exist: if the create was a bare transport

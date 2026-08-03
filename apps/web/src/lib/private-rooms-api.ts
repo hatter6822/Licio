@@ -226,29 +226,32 @@ const myStubsSchema = z.object({
 });
 
 /**
- * §21.1 — the directory records this account created.
+ * §21.1 — ONE directory record this account created, by room id or by the
+ * room's own signing key.
  *
  * The recovery read. A create whose POST commits but whose RESPONSE is lost
  * leaves a server record the client never learned the id of; without a way to
  * ask, that record is unreachable forever — publicly enumerable, if it was
- * listed. Matching on `room_public_key` (the room's own founder signing key,
- * which the local session knows) is how a device identifies its own record
- * among them.
+ * listed. `roomPublicKey` is how a device identifies its own record in exactly
+ * that case: the key is the room's, it is in the record, and the client has it
+ * locally.
  */
-export async function listMyPrivateRoomStubs(): Promise<MyStub[]> {
-  // Every page, not the first one: both callers ask a yes/no question about a
-  // SPECIFIC room ("do I own this record", "is my orphan out there"), and a
-  // first-page answer would be wrong for an account whose room sits deeper.
-  const stubs: MyStub[] = [];
-  let cursor: string | null = null;
-  do {
-    const query = cursor === null ? '' : `?cursor=${encodeURIComponent(cursor)}`;
-    const response = await apiFetch(`${API_BASE}/v1/private-rooms/mine${query}`);
-    const page = await parseResponse(response, myStubsSchema);
-    stubs.push(...page.stubs);
-    cursor = page.next_cursor;
-  } while (cursor !== null);
-  return stubs;
+export async function findMyPrivateRoomStub(
+  target: { readonly roomServerId: string } | { readonly roomPublicKey: string },
+): Promise<MyStub | null> {
+  // ONE request, because the question is about ONE room.
+  //
+  // This walked every page once, since both callers ask a yes/no question about
+  // a specific room — and that was wrong twice: it spends a request per page
+  // against a per-account budget, so an account with enough stubs can never
+  // finish the walk, and a truncated walk answers "no" where the honest answer
+  // is "unknown".
+  const query =
+    'roomServerId' in target
+      ? `room=${encodeURIComponent(target.roomServerId)}`
+      : `room_public_key=${encodeURIComponent(target.roomPublicKey)}`;
+  const response = await apiFetch(`${API_BASE}/v1/private-rooms/mine?${query}`);
+  return (await parseResponse(response, myStubsSchema)).stubs[0] ?? null;
 }
 
 /** §21.4 — stop advertising a listed room (it stays resolvable for members). */

@@ -549,6 +549,24 @@ export class PrivateRoomStubService {
    * per request is a response-amplification path. The export iterates these
    * pages to completion instead.
    */
+  /**
+   * Does this account own the record for `roomServerId` / `roomPublicKey`?
+   *
+   * A TARGETED read, because the two questions its callers actually ask are
+   * about one room: "do I own this record" and "is my orphaned registration out
+   * there". Answering either by walking pages is wrong twice over — it costs a
+   * request per page against a per-account budget, so an account with enough
+   * stubs can never finish the walk, and the answer for a deep record would be
+   * "no" rather than "unknown".
+   */
+  async findOwnedStub(
+    accountId: string,
+    target: { readonly roomServerId?: string; readonly roomPublicKey?: string },
+  ): Promise<AccountStubExport | null> {
+    const stub = await this.store.findForAccount(accountId, target);
+    return stub === null ? null : this.#exportRow(stub);
+  }
+
   async listForAccountPage(
     accountId: string,
     options: { readonly limit?: number; readonly cursor?: string } = {},

@@ -281,6 +281,27 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
     return deleted.length;
   }
 
+  async findForAccount(
+    accountId: string,
+    target: { readonly roomServerId?: string; readonly roomPublicKey?: string },
+  ): Promise<StoredPrivateRoomStub | null> {
+    if (target.roomServerId === undefined && target.roomPublicKey === undefined) return null;
+    const conditions = [eq(privateRoomStubs.createdByAccountId, accountId)];
+    if (target.roomServerId !== undefined) {
+      conditions.push(eq(privateRoomStubs.roomServerId, target.roomServerId));
+    }
+    if (target.roomPublicKey !== undefined) {
+      conditions.push(eq(privateRoomStubs.roomPublicKey, target.roomPublicKey));
+    }
+    const rowsFound = await this.db
+      .select()
+      .from(privateRoomStubs)
+      .where(and(...conditions))
+      .limit(1);
+    const row = rowsFound[0];
+    return row ? toStub(row) : null;
+  }
+
   async listForAccount(
     accountId: string,
     options?: {

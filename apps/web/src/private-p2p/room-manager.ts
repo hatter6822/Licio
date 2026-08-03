@@ -764,6 +764,18 @@ export class PrivateRoomSession {
     await putRoomSession(this.session);
   }
 
+  /**
+   * Can this device derive the room's §21.2 capability?
+   *
+   * Only a device holding the GENESIS epoch can: the blind id is bound to
+   * epoch-0's rendezvous key, and forward secrecy means a joined device never
+   * receives it. Registration surfaces ask before offering the action, so a
+   * member is not walked into a signature that cannot produce a valid record.
+   */
+  get canRegisterDirectory(): boolean {
+    return this.session.epochs.some((entry) => entry.epoch === 0);
+  }
+
   /** The §21 directory record for this room, if it registered one. */
   get directoryStub(): StoredRoomSession['directoryStub'] {
     return this.session.directoryStub;
@@ -806,8 +818,24 @@ export class PrivateRoomSession {
     readonly stubSignature: string;
     readonly bootstrapBlindId: string;
   }> {
-    const genesis = this.session.epochs[0];
-    if (!genesis) throw new Error('room session carries no epoch keys');
+    // The GENESIS epoch specifically, found by number rather than by position.
+    //
+    // `epochs[0]` is the first epoch this DEVICE holds, which for a founder is
+    // epoch 0 and for a joiner is whatever epoch it was admitted at — §11
+    // forward secrecy means a joiner never receives the earlier keys. Reading
+    // position zero and calling it genesis therefore derived a bootstrap blind
+    // id from the wrong key on every joined device: a capability no other member
+    // can reproduce, for a record members are meant to share.
+    //
+    // Fail closed rather than deriving something. A device that cannot produce
+    // the room's canonical capability must not publish a record claiming to be
+    // the room's — the caller offers the action only where it can succeed.
+    const genesis = this.session.epochs.find((entry) => entry.epoch === 0);
+    if (!genesis) {
+      throw new Error(
+        'private-p2p: this device does not hold the room genesis epoch, so it cannot derive the §21.2 bootstrap capability',
+      );
+    }
     const keys = await this.p2p.deriveRoomEpochKeys(
       genesis.roomEpochSecret,
       this.session.roomIdCommitment,
@@ -1394,8 +1422,18 @@ export class PrivateRoomSession {
     const keyPackage = await p2p.generateMemberKeyPackage(p2p.utf8(deviceId));
     const inviteePublicKey = p2p.toBase64Url(hpke.publicKey);
     const requestedAtBucket = params.requestedAtBucket ?? coarseBucket();
-    /** Set by `complete` from the opened invite; read by `completeJoin`. */
-    let directory: StoredDirectoryStub['capability'] | undefined;
+    /**
+     * Capabilities retained from opened invites, keyed by the room they are FOR.
+     *
+     * A map rather than a variable: one preparation can open invites for two
+     * rooms, and a single slot meant the most recent one won — so a delayed
+     * grant for the first room would persist the SECOND room's token, after
+     * which settings address the wrong record and future invites hand that
+     * unrelated capability out. The key is the invite's `room_public_key`, which
+     * the grant's own manifest carries, so the match is exact rather than
+     * positional.
+     */
+    const directoryByRoomKey = new Map<string, StoredDirectoryStub['capability']>();
     return {
       inviteePublicKey,
       async complete(sealedInvite: string) {
@@ -1404,13 +1442,12 @@ export class PrivateRoomSession {
         // delivery of it this device gets, and the only one that is encrypted to
         // this device — the grant that follows is plaintext on an out-of-band
         // channel.
-        directory =
-          invite.room_stub_ref !== undefined && invite.bootstrap_blind_id !== undefined
-            ? {
-                roomServerId: invite.room_stub_ref,
-                bootstrapBlindId: invite.bootstrap_blind_id,
-              }
-            : undefined;
+        if (invite.room_stub_ref !== undefined && invite.bootstrap_blind_id !== undefined) {
+          directoryByRoomKey.set(invite.room_public_key, {
+            roomServerId: invite.room_stub_ref,
+            bootstrapBlindId: invite.bootstrap_blind_id,
+          });
+        }
         const request = await p2p.buildJoinRequest({
           invite,
           keyPackage: keyPackage.publicPackage,
@@ -1421,6 +1458,11 @@ export class PrivateRoomSession {
         return { invite, request };
       },
       completeJoin(grant: JoinGrant) {
+        // Match the grant to the invite it answers, by the room key the grant's
+        // MANIFEST carries. An unmatched grant simply gets no capability — a
+        // wrong one would point this room's settings at another room's record.
+        const roomKey = manifestRoomPublicKey(grant.manifest);
+        const directory = roomKey === undefined ? undefined : directoryByRoomKey.get(roomKey);
         return PrivateRoomSession.finishJoin(grant, {
           bundle: keyPackage,
           signingPrivateKey: signing.privateKey,

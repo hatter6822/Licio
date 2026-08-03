@@ -107,6 +107,17 @@ const restrictedBody = {
   },
 } as const;
 
+/** The two ways a client names ONE of its own records. */
+const mineTargetSchema = z.object({
+  room: z.uuid().optional(),
+  room_public_key: z
+    .string()
+    .min(1)
+    .max(512)
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .optional(),
+});
+
 const roomIdParamSchema = z.object({ roomServerId: z.uuid() });
 
 /** §4.2 directory paging. Both fields are optional; a bad value is a 400 rather
@@ -287,6 +298,26 @@ export function createPrivateRoomsRoutes() {
       const auth = c.get('auth');
       if (!auth)
         return c.json({ error: { code: 'unauthenticated', message: 'Sign in required' } }, 401);
+      // A TARGETED lookup when the caller names a room — the shape both real
+      // callers need. Walking pages to answer "do I own this one" spends a
+      // request per page against a per-account budget, so an account with enough
+      // stubs could never finish the walk and would read "no" for a deep record.
+      const target = mineTargetSchema.safeParse({
+        room: c.req.query('room'),
+        room_public_key: c.req.query('room_public_key'),
+      });
+      if (!target.success) {
+        return c.json({ error: { code: 'invalid_request', message: 'Invalid lookup' } }, 400);
+      }
+      if (target.data.room !== undefined || target.data.room_public_key !== undefined) {
+        const found = await getPrivateRoomStubService().findOwnedStub(auth.userId, {
+          ...(target.data.room !== undefined ? { roomServerId: target.data.room } : {}),
+          ...(target.data.room_public_key !== undefined
+            ? { roomPublicKey: target.data.room_public_key }
+            : {}),
+        });
+        return c.json({ stubs: found === null ? [] : [found], next_cursor: null }, 200);
+      }
       const query = directoryQuerySchema.safeParse({
         limit: c.req.query('limit'),
         cursor: c.req.query('cursor'),

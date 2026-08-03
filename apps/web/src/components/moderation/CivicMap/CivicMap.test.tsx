@@ -268,6 +268,31 @@ describe('CivicMap', () => {
     expect(screen.getByText(new RegExp(from.replace(/\s/g, '\\s')))).toBeInTheDocument();
   });
 
+  it('shows WHICH basins bifurcate, not just how many', async () => {
+    // The summary counted splits and nothing rendered them — both detail lists
+    // iterated `merges`. That is half of SPEC §12.4's landscape, and the half
+    // that detects a community coming apart.
+    const data = landscape({
+      splits: [
+        {
+          basin_a: BASIN_A,
+          basin_b: BASIN_C,
+          level: 6,
+          connecting_edges: 1,
+          fragile: false,
+          survivor: BASIN_A,
+          bridge_thread_id: null,
+          shared_topics: [TOPIC],
+        },
+      ],
+    });
+    render(<CivicMap data={data} />);
+    await userEvent.click(screen.getByText(/List every branch point/i));
+    expect(
+      screen.getByText(/“Flooding on the ring road” and “Untargetable basin” separate here/),
+    ).toBeInTheDocument();
+  });
+
   it('has no accessibility violations', async () => {
     const { container } = render(<CivicMap data={landscape()} onOpenBridge={vi.fn()} />);
     await checkA11y(container);

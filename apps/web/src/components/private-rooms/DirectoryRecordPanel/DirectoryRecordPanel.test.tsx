@@ -62,6 +62,9 @@ function sessionDouble(
             },
           },
     attachDirectoryStub: async () => {},
+    // Only a device holding the GENESIS epoch can derive the room's §21.2
+    // capability, so registration is offered only there.
+    canRegisterDirectory: true,
     name: 'Neighbourhood watch',
     clearDirectoryStub: async () => {},
     directoryStubPayload: async () => ({
@@ -152,6 +155,28 @@ describe('DirectoryRecordPanel', () => {
     expect(await screen.findByText(/Licio holds no record of this room/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /store a bootstrap record/i }));
     expect(await screen.findByRole('status')).toHaveTextContent(/now holds a bootstrap record/i);
+  });
+
+  it('does not offer registration on a device that joined later', async () => {
+    // The capability is bound to the room's genesis epoch, which forward secrecy
+    // keeps from a device admitted afterwards — so the action would do the
+    // signing work and then produce a record no member could resolve.
+    mockApi(() => bootstrapBody());
+    const session = sessionDouble(undefined);
+    (session as unknown as { canRegisterDirectory: boolean }).canRegisterDirectory = false;
+    render(<DirectoryRecordPanel session={session} />);
+    expect(
+      await screen.findByText(/has been in this room since it was created/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /store a bootstrap record/i })).toBeNull();
+  });
+
+  it('does not offer registration to a signed-out visitor', async () => {
+    useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
+    mockApi(() => bootstrapBody());
+    render(<DirectoryRecordPanel session={sessionDouble(undefined)} />);
+    expect(await screen.findByText(/Sign in to have Licio store/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /store a bootstrap record/i })).toBeNull();
   });
 
   it('clears a handle whose record is GONE, so a failed cleanup is repairable', async () => {

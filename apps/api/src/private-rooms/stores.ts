@@ -458,6 +458,18 @@ export interface PrivateRoomStubStore {
    * to disclose. Without this the archive silently omitted the one durable
    * server row a private-room creator has.
    */
+  /**
+   * ONE stub this account created, addressed by room id or by the room's own
+   * signing key — the indexed answer to "do I own this record".
+   *
+   * `roomPublicKey` is how a client identifies a record whose SERVER id it never
+   * learned (a create whose response was lost): the key is the room's, it is in
+   * the record, and the client has it locally.
+   */
+  findForAccount(
+    accountId: string,
+    target: { readonly roomServerId?: string; readonly roomPublicKey?: string },
+  ): Promise<StoredPrivateRoomStub | null>;
   listForAccount(
     accountId: string,
     options?: {
@@ -589,6 +601,22 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
       }
     }
     return Promise.resolve(removed);
+  }
+
+  findForAccount(
+    accountId: string,
+    target: { readonly roomServerId?: string; readonly roomPublicKey?: string },
+  ): Promise<StoredPrivateRoomStub | null> {
+    if (target.roomServerId === undefined && target.roomPublicKey === undefined) {
+      return Promise.resolve(null);
+    }
+    const found = [...this.#stubs.values()].find(
+      (stub) =>
+        stub.createdByAccountId === accountId &&
+        (target.roomServerId === undefined || stub.roomServerId === target.roomServerId) &&
+        (target.roomPublicKey === undefined || stub.roomPublicKey === target.roomPublicKey),
+    );
+    return Promise.resolve(found ?? null);
   }
 
   listForAccount(
