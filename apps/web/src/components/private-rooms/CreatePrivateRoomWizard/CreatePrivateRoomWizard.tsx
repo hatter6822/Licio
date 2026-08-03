@@ -18,6 +18,7 @@ import {
 } from '@licio/shared';
 import { useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { createPrivateRoomStub } from '../../../lib/private-rooms-api.js';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { Button } from '../../ui/Button/index.js';
 import { Checkbox } from '../../ui/Checkbox/index.js';
@@ -28,6 +29,13 @@ export interface CreatePrivateRoomWizardProps {
   onCreated?: (roomId: string) => void;
 }
 
+/** §4.2 — how discoverable the room's EXISTENCE is, chosen at creation.
+ *  `detached` is the default because it is the one that leaks nothing: no
+ *  server record of any kind. The other two trade a little of that for
+ *  reachability, and the copy says which. */
+const DIRECTORY_CHOICES = ['detached', 'unlisted', 'listed'] as const;
+type DirectoryChoice = (typeof DIRECTORY_CHOICES)[number];
+
 export function CreatePrivateRoomWizard({
   onCreated,
 }: CreatePrivateRoomWizardProps): React.ReactElement {
@@ -35,9 +43,11 @@ export function CreatePrivateRoomWizard({
   const headingId = useId();
   const [name, setName] = useState('');
   const [roomType, setRoomType] = useState<RoomType>('global_topic');
+  const [directory, setDirectory] = useState<DirectoryChoice>('detached');
   const [acked, setAcked] = useState<Record<string, boolean>>({});
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [directoryWarning, setDirectoryWarning] = useState<string | null>(null);
 
   const allAcked = PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS.every((a) => acked[a.id] === true);
   const canCreate = allAcked && name.trim().length > 0 && !creating;
@@ -54,6 +64,35 @@ export function CreatePrivateRoomWizard({
         founderMemberId: globalThis.crypto.randomUUID(),
         founderDeviceId: globalThis.crypto.randomUUID(),
       });
+      // The room exists on this device the moment `create` resolves.  The
+      // directory stub is a SEPARATE, optional, best-effort step (§21.1): if it
+      // fails, the room is still perfectly usable through out-of-band invites,
+      // so a network error here must not read as "creation failed" and must not
+      // discard the room the user just made.
+      if (directory !== 'detached') {
+        try {
+          const payload = await session.directoryStubPayload();
+          await createPrivateRoomStub({
+            directoryMode: directory,
+            // Display metadata is `listed`-only — the server REFUSES it on an
+            // unlisted room rather than dropping it silently, so send it only
+            // where it belongs.
+            ...(directory === 'listed' ? { displayName: name.trim() } : {}),
+            roomPublicKey: payload.roomPublicKey,
+            manifestKeyCommitment: payload.manifestKeyCommitment,
+            rendezvousPolicy: 'licio_blind',
+            signedStub: payload.signedStub,
+            stubSignature: payload.stubSignature,
+          });
+        } catch {
+          setDirectoryWarning(
+            t(
+              'privateRoom.create.directoryFailed',
+              'The room was created on this device, but Licio could not save its directory record. Share an invite directly, or try listing it again later.',
+            ),
+          );
+        }
+      }
       onCreated?.(session.roomId);
     } catch {
       setError(t('privateRoom.create.error', 'Could not create the room on this device.'));
@@ -93,6 +132,54 @@ export function CreatePrivateRoomWizard({
         options={ROOM_TYPES.map((type) => ({ value: type, label: type.replace(/_/g, ' ') }))}
       />
 
+      <Select
+        label={t('privateRoom.create.directory', 'Who can find this room')}
+        value={directory}
+        onValueChange={(v) => setDirectory(v as DirectoryChoice)}
+        options={[
+          {
+            value: 'detached',
+            label: t(
+              'privateRoom.create.directory.detached',
+              'Nobody — Licio keeps no record of it (invite only)',
+            ),
+          },
+          {
+            value: 'unlisted',
+            label: t(
+              'privateRoom.create.directory.unlisted',
+              'People you invite — Licio stores a bootstrap record, no name',
+            ),
+          },
+          {
+            value: 'listed',
+            label: t(
+              'privateRoom.create.directory.listed',
+              'Anyone with the link — Licio also stores the room name',
+            ),
+          },
+        ]}
+      />
+      {/* The honest limit of each choice, stated where the choice is made.  The
+          room's CONTENT is end-to-end encrypted either way; what varies is how
+          much the server knows the room EXISTS. */}
+      <p className="text-ink-muted text-xs" role="note">
+        {directory === 'detached'
+          ? t(
+              'privateRoom.create.directory.detachedNote',
+              'Nothing about this room reaches Licio. You share access yourself, and if every member loses their keys it cannot be recovered.',
+            )
+          : directory === 'unlisted'
+            ? t(
+                'privateRoom.create.directory.unlistedNote',
+                'Licio stores commitments and a bootstrap pointer — no name, no members, no messages. Only someone holding your invite can resolve it.',
+              )
+            : t(
+                'privateRoom.create.directory.listedNote',
+                'Licio also stores the room name and description so anyone with the link can see what it is. Messages and members stay end-to-end encrypted.',
+              )}
+      </p>
+
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-1 font-medium text-sm">
           {t('privateRoom.create.ackLegend', 'Please acknowledge each point to continue')}
@@ -110,6 +197,14 @@ export function CreatePrivateRoomWizard({
       {error ? (
         <p className="text-error-on-soft text-sm" role="alert">
           {error}
+        </p>
+      ) : null}
+
+      {/* The directory step is best-effort: the room already exists locally, so
+          this is a WARNING, not the creation error above. */}
+      {directoryWarning ? (
+        <p className="text-warning-on-soft text-sm" role="alert">
+          {directoryWarning}
         </p>
       ) : null}
 

@@ -1097,6 +1097,8 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
   'apps/api/src/routes/csp-report.ts': 'browser CSP violation report sink',
   'apps/api/src/routes/private-rendezvous.ts':
     'WS-S.6.6 server-blind rendezvous — opaque announce/poll/signal, no room state',
+  'apps/api/src/routes/private-rooms.ts':
+    'PRIVATE_SPEC §21.1-§21.4 directory stub — a bootstrap POINTER (commitments + rendezvous policy) for an E2EE room whose authority is room keys, not the platform (§11.4). Creating or delisting one is content participation, which is never KYC-gated; a P2P room has no election, ratification, proposal, vote, or delegation for the floor to gate',
   'apps/api/src/lcap/routes.ts':
     '§29 LCAP content/checkpoint sync plane — content availability, never participation',
   'apps/api/src/routes/auth.ts':

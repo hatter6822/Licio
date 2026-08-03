@@ -63,6 +63,52 @@ describe('CreatePrivateRoomWizard', () => {
     expect(typeof onCreated.mock.calls[0]?.[0]).toBe('string');
   });
 
+  it('defaults the directory choice to the one that leaks nothing', () => {
+    render(<CreatePrivateRoomWizard />);
+    // `detached` — no server record at all — is the default, and the note under
+    // the control states that limit rather than leaving it implied.
+    expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(/Nobody/i);
+    expect(screen.getByText(/Nothing about this room reaches Licio/i)).toBeInTheDocument();
+  });
+
+  it('states the honest limit of each directory choice as it is selected', async () => {
+    const user = userEvent.setup();
+    render(<CreatePrivateRoomWizard />);
+    await user.click(screen.getByLabelText(/who can find this room/i));
+    await user.click(screen.getByRole('option', { name: /Licio also stores the room name/i }));
+    // The listed note must say what the server LEARNS, and must not imply the
+    // content is any less encrypted than the other modes.
+    expect(
+      screen.getByText(/Licio also stores the room name and description/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/stay end-to-end encrypted/i)).toBeInTheDocument();
+  });
+
+  it('creates the room LOCALLY even when the directory registration fails', async () => {
+    // The room exists the moment the local create resolves, so a failed §21.1
+    // stub POST is a WARNING, not a creation failure — the user must not lose
+    // the room they just made to a network error.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
+    try {
+      const user = userEvent.setup();
+      const onCreated = vi.fn();
+      render(<CreatePrivateRoomWizard onCreated={onCreated} />);
+
+      await user.type(screen.getByLabelText(/room name/i), 'Listed Room');
+      await user.click(screen.getByLabelText(/who can find this room/i));
+      await user.click(screen.getByRole('option', { name: /Licio also stores the room name/i }));
+      for (const ack of PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS) {
+        await user.click(screen.getByLabelText(ack.label));
+      }
+      await user.click(screen.getByRole('button', { name: /create private room/i }));
+
+      await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+      expect(screen.getByText(/could not save its directory record/i)).toBeInTheDocument();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('has no accessibility violations', async () => {
     const { container } = render(<CreatePrivateRoomWizard />);
     await checkA11y(container);

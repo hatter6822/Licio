@@ -1,0 +1,348 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-S.1.2 / §21.1–§21.4 — the directory-stub store for a Private P2P room.
+//
+// A stub is the ONLY durable server record a P2P room may have besides the
+// (deliberately unlinkable) rendezvous rows: a bootstrap pointer carrying
+// cryptographic COMMITMENTS, a rendezvous policy, and — for a `listed` room
+// only — public display metadata.  The §8.1 forbiddance list is the column
+// denylist for `private_room_stubs`, so nothing here may carry content, a
+// private CID, an operation head, a member list, activity state, or key
+// material.  `packages/db`'s `checkPrivateServerTables()` pins that
+// structurally; these wire schemas pin the same boundary at the edge, so a
+// forbidden field is rejected before it can reach a column that does not exist.
+//
+// Like `private-rendezvous/stores.ts`, this deliberately does NOT import
+// `@licio/private-p2p`: the server verifies no room signature and holds no room
+// key (PRIV-API-RENDEZVOUS-1).  It stores the client's `signed_stub` +
+// `stub_signature` VERBATIM so members can verify authorship themselves — the
+// server is a courier for them, never a validator of them.
+import { z } from 'zod';
+
+/** A base64url commitment / public key / blind id — bounded, never decrypting
+ *  material (§8.2). */
+const commitmentSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(/^[A-Za-z0-9_-]+$/, 'expected a base64url commitment');
+
+/** Public display metadata — `listed` rooms only, and bounded for DoS. */
+const displayNameSchema = z.string().min(1).max(120);
+const displayDescriptionSchema = z.string().min(1).max(2_000);
+
+/** A PUBLIC avatar CID (§8.2 explicitly allows this one; a PRIVATE CID never
+ *  reaches the server). Bounded and charset-restricted to a CIDv1 alphabet. */
+const publicCidSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9]+$/, 'expected a base32/base58 CIDv1');
+
+/** §8.2 bootstrap policy — HOW peers find each other, never WHO they are. */
+export const rendezvousPolicySchema = z.enum(['licio_blind', 'member_rendezvous', 'manual_only']);
+export type RendezvousPolicy = z.infer<typeof rendezvousPolicySchema>;
+
+/** A bootstrap hint: a relay/rendezvous pointer, never a peer identity. */
+const bootstrapHintSchema = z
+  .object({
+    kind: z.enum(['licio_blind', 'member_relay', 'manual']),
+    value: z.string().min(1).max(1_024),
+  })
+  .strict();
+export type BootstrapHint = z.infer<typeof bootstrapHintSchema>;
+
+/** At most this many hints per stub (bounded row size). */
+export const MAX_BOOTSTRAP_HINTS = 16;
+
+/**
+ * The client-signed §8.2 stub body, stored VERBATIM so any member can verify
+ * `stub_signature` over it with the room public key.  The server never
+ * interprets it beyond two things:
+ *
+ *  - it is a bounded object (DoS), and
+ *  - for an `unlisted` room it MUST carry `bootstrap_blind_id`, the §21.2
+ *    capability the bootstrap read is gated on.
+ *
+ * `.passthrough()` is deliberate: the signature covers the WHOLE object, so
+ * stripping an unknown key the client signed would make every verification
+ * fail.  Confidentiality is not at risk from a key the client chose to publish
+ * in a signed public record — but the FORBIDDEN-KEY scan below still refuses
+ * the §8.1 classes outright, so a client cannot smuggle content or a member
+ * list into the one free-form field.
+ */
+const signedStubSchema = z
+  .object({ bootstrap_blind_id: commitmentSchema.optional() })
+  .passthrough()
+  .refine((value) => JSON.stringify(value).length <= 8_192, {
+    message: 'signed_stub exceeds 8 KiB',
+  });
+
+/**
+ * §8.1 key classes that may never appear in `signed_stub`, at any depth.
+ *
+ * The column allowlist cannot help here — `signed_stub` is one jsonb column, so
+ * everything inside it is invisible to a column-level guard.  This is that
+ * guard's counterpart for the free-form field, and it is a PREFIX/segment scan
+ * for the same reason `FORBIDDEN_PRIVATE_COLUMN_SEGMENTS` is: an exact-name list
+ * is evaded by a suffix.
+ */
+export const FORBIDDEN_SIGNED_STUB_SEGMENTS: readonly string[] = [
+  'plaintext',
+  'op_head',
+  'op_id',
+  'operation',
+  'story',
+  'thread',
+  'contribution',
+  'member',
+  'unread',
+  'activity',
+  'private_cid',
+  'private_key',
+  'root_key',
+  'key_material',
+  'secret',
+  'invite',
+  'recovery',
+  'media',
+  'attachment',
+  'body',
+  'title',
+  'search',
+  'embedding',
+];
+
+/** Every object key in `value`, at any depth (arrays are walked, not keyed). */
+function collectKeys(value: unknown, out: string[], depth = 0): void {
+  if (depth > 16 || value === null || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectKeys(item, out, depth + 1);
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    out.push(key);
+    collectKeys(child, out, depth + 1);
+  }
+}
+
+/** The forbidden §8.1 segments present in a signed stub (empty ⇒ clean). */
+export function forbiddenSignedStubKeys(signedStub: unknown): string[] {
+  const keys: string[] = [];
+  collectKeys(signedStub, keys);
+  const hits = new Set<string>();
+  for (const key of keys) {
+    const lower = key.toLowerCase();
+    for (const segment of FORBIDDEN_SIGNED_STUB_SEGMENTS) {
+      if (lower.includes(segment)) hits.add(key);
+    }
+  }
+  return [...hits].sort();
+}
+
+/**
+ * §21.1 — create a directory stub (and the P2P room shell it points at).
+ *
+ * `.strict()` is the enforcement of the §21.1 validation list: a request
+ * carrying a private CID, an operation head, or a member list is rejected
+ * because no such key exists in the shape, not because a handler remembered to
+ * check for one.  `detached` is absent from the enum on purpose — a detached
+ * room stores NO stub at all (§8.2, and the `private_room_stubs_not_detached`
+ * CHECK), so there is nothing for this endpoint to create.
+ */
+export const privateRoomCreateStubRequestSchema = z
+  .object({
+    directory_mode: z.enum(['listed', 'unlisted']),
+    display_name: displayNameSchema.optional(),
+    display_description: displayDescriptionSchema.optional(),
+    display_avatar_public_cid: publicCidSchema.optional(),
+    room_public_key: commitmentSchema,
+    manifest_key_commitment: commitmentSchema,
+    rendezvous_policy: rendezvousPolicySchema,
+    bootstrap_hints: z.array(bootstrapHintSchema).max(MAX_BOOTSTRAP_HINTS).optional(),
+    signed_stub: signedStubSchema,
+    stub_signature: commitmentSchema,
+  })
+  .strict();
+export type PrivateRoomCreateStubRequest = z.infer<typeof privateRoomCreateStubRequestSchema>;
+
+/**
+ * §21.3 — the ONLY mutable stub fields.  Everything §21.3 forbids (member list,
+ * private CIDs, op heads, content metadata, activity timestamps, unread counts)
+ * is absent from the shape and refused by `.strict()`.
+ *
+ * `directory_mode` is NOT updatable here: widening `unlisted → listed` would
+ * publish a room's display metadata through a PATCH, so promotion is a create-
+ * time decision and demotion is the explicit §21.4 `delist` action.
+ */
+export const privateRoomStubUpdateRequestSchema = z
+  .object({
+    display_name: displayNameSchema.nullable().optional(),
+    display_description: displayDescriptionSchema.nullable().optional(),
+    display_avatar_public_cid: publicCidSchema.nullable().optional(),
+    rendezvous_policy: rendezvousPolicySchema.optional(),
+    bootstrap_hints: z.array(bootstrapHintSchema).max(MAX_BOOTSTRAP_HINTS).optional(),
+    latest_manifest_commitment: commitmentSchema.nullable().optional(),
+    signed_stub: signedStubSchema.optional(),
+    stub_signature: commitmentSchema.optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, { message: 'no updatable field supplied' });
+export type PrivateRoomStubUpdateRequest = z.infer<typeof privateRoomStubUpdateRequestSchema>;
+
+/** A stored directory stub — the §8.2 allowed fields and nothing else. */
+export interface StoredPrivateRoomStub {
+  readonly stubId: string;
+  readonly roomServerId: string;
+  readonly directoryMode: 'listed' | 'unlisted';
+  readonly displayName: string | null;
+  readonly displayDescription: string | null;
+  readonly displayAvatarPublicCid: string | null;
+  readonly roomPublicKey: string;
+  readonly manifestKeyCommitment: string;
+  readonly latestManifestCommitment: string | null;
+  readonly rendezvousPolicy: RendezvousPolicy;
+  readonly bootstrapHints: readonly BootstrapHint[];
+  readonly signedStub: Record<string, unknown>;
+  readonly stubSignature: string;
+  readonly createdByAccountId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** The fields a create writes (ids/timestamps are the store's to mint). */
+export interface PrivateRoomStubInsertInput {
+  readonly stubId: string;
+  readonly roomServerId: string;
+  readonly directoryMode: 'listed' | 'unlisted';
+  readonly displayName: string | null;
+  readonly displayDescription: string | null;
+  readonly displayAvatarPublicCid: string | null;
+  readonly roomPublicKey: string;
+  readonly manifestKeyCommitment: string;
+  readonly rendezvousPolicy: RendezvousPolicy;
+  readonly bootstrapHints: readonly BootstrapHint[];
+  readonly signedStub: Record<string, unknown>;
+  readonly stubSignature: string;
+  readonly createdByAccountId: string | null;
+}
+
+/** The patchable subset, already normalised to storage shape. */
+export interface PrivateRoomStubPatch {
+  readonly displayName?: string | null;
+  readonly displayDescription?: string | null;
+  readonly displayAvatarPublicCid?: string | null;
+  readonly rendezvousPolicy?: RendezvousPolicy;
+  readonly bootstrapHints?: readonly BootstrapHint[];
+  readonly latestManifestCommitment?: string | null;
+  readonly signedStub?: Record<string, unknown>;
+  readonly stubSignature?: string;
+}
+
+/**
+ * The durable boundary for the stub service.  An in-memory adapter ships here;
+ * the gated Postgres adapter over `rooms` + `private_room_stubs` lives in
+ * `drizzle-store.ts`.
+ *
+ * `create` writes the P2P room SHELL and its stub as ONE unit: the shell exists
+ * only to give the stub a `room_server_id` to reference (the §8.3-allowed
+ * shell ⇄ room link), and a shell with no stub would be an orphan the directory
+ * can never reach or clean up.
+ */
+export interface PrivateRoomStubStore {
+  /** Mint the p2p room shell + its stub atomically. */
+  create(input: PrivateRoomStubInsertInput): Promise<StoredPrivateRoomStub>;
+  /** The stub for a room server id, or null when there is none. */
+  getByRoomId(roomServerId: string): Promise<StoredPrivateRoomStub | null>;
+  /** Apply a §21.3 patch; null when the stub is gone. */
+  update(roomServerId: string, patch: PrivateRoomStubPatch): Promise<StoredPrivateRoomStub | null>;
+  /**
+   * §21.4 delist — demote `listed → unlisted` and DROP the display metadata,
+   * keeping the bootstrap record itself so existing members can still resolve
+   * it.  Idempotent on an already-`unlisted` stub.  Null when there is no stub.
+   */
+  delist(roomServerId: string): Promise<StoredPrivateRoomStub | null>;
+  /**
+   * Drop the stub AND the room shell it points at.  Member-held content is
+   * untouched — the server never had any (§21.4) — and removing the shell is
+   * what keeps the deletion honest: a surviving shell row would still assert
+   * "this account created a private room at time T", a §8.1 activity trace
+   * outliving the action taken to erase the server's record.  Returns false
+   * when there was no stub to remove.
+   */
+  remove(roomServerId: string): Promise<boolean>;
+  /** The account that created the stub, for the §21.3/§21.4 owner check. */
+  ownerOf(roomServerId: string): Promise<string | null>;
+}
+
+/** The in-memory stub store (local/dev default, and the unit-test substrate). */
+export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
+  readonly #stubs = new Map<string, StoredPrivateRoomStub>();
+
+  constructor(private readonly now: () => number = () => Date.now()) {}
+
+  create(input: PrivateRoomStubInsertInput): Promise<StoredPrivateRoomStub> {
+    const at = new Date(this.now()).toISOString();
+    const stub: StoredPrivateRoomStub = {
+      ...input,
+      bootstrapHints: [...input.bootstrapHints],
+      latestManifestCommitment: null,
+      createdAt: at,
+      updatedAt: at,
+    };
+    this.#stubs.set(input.roomServerId, stub);
+    return Promise.resolve(stub);
+  }
+
+  getByRoomId(roomServerId: string): Promise<StoredPrivateRoomStub | null> {
+    return Promise.resolve(this.#stubs.get(roomServerId) ?? null);
+  }
+
+  update(roomServerId: string, patch: PrivateRoomStubPatch): Promise<StoredPrivateRoomStub | null> {
+    const current = this.#stubs.get(roomServerId);
+    if (!current) return Promise.resolve(null);
+    const next: StoredPrivateRoomStub = {
+      ...current,
+      ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
+      ...(patch.displayDescription !== undefined
+        ? { displayDescription: patch.displayDescription }
+        : {}),
+      ...(patch.displayAvatarPublicCid !== undefined
+        ? { displayAvatarPublicCid: patch.displayAvatarPublicCid }
+        : {}),
+      ...(patch.rendezvousPolicy !== undefined ? { rendezvousPolicy: patch.rendezvousPolicy } : {}),
+      ...(patch.bootstrapHints !== undefined ? { bootstrapHints: [...patch.bootstrapHints] } : {}),
+      ...(patch.latestManifestCommitment !== undefined
+        ? { latestManifestCommitment: patch.latestManifestCommitment }
+        : {}),
+      ...(patch.signedStub !== undefined ? { signedStub: patch.signedStub } : {}),
+      ...(patch.stubSignature !== undefined ? { stubSignature: patch.stubSignature } : {}),
+      updatedAt: new Date(this.now()).toISOString(),
+    };
+    this.#stubs.set(roomServerId, next);
+    return Promise.resolve(next);
+  }
+
+  delist(roomServerId: string): Promise<StoredPrivateRoomStub | null> {
+    const current = this.#stubs.get(roomServerId);
+    if (!current) return Promise.resolve(null);
+    const next: StoredPrivateRoomStub = {
+      ...current,
+      directoryMode: 'unlisted',
+      displayName: null,
+      displayDescription: null,
+      displayAvatarPublicCid: null,
+      updatedAt: new Date(this.now()).toISOString(),
+    };
+    this.#stubs.set(roomServerId, next);
+    return Promise.resolve(next);
+  }
+
+  remove(roomServerId: string): Promise<boolean> {
+    return Promise.resolve(this.#stubs.delete(roomServerId));
+  }
+
+  ownerOf(roomServerId: string): Promise<string | null> {
+    return Promise.resolve(this.#stubs.get(roomServerId)?.createdByAccountId ?? null);
+  }
+}

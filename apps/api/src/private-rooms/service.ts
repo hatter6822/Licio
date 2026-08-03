@@ -1,0 +1,333 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-S.1.2 / §21.1–§21.4 — the directory-stub service.
+//
+// What the server is here: a courier for a signed, member-authored bootstrap
+// record.  What it is NOT: an authority over the room.  It verifies no room
+// signature (it holds no room key — PRIV-API-RENDEZVOUS-1), decides no
+// membership, and learns nothing about the room's contents.  The §11.4 rule
+// holds verbatim — no platform role can read, add members to, moderate, recover,
+// or unlock a P2P room; the only thing staff can do here is DELIST a listed
+// directory record.
+//
+// Three server-side bounds the design requires regardless of client input:
+//
+//   • Display metadata is `listed`-ONLY.  An `unlisted` room that shipped a
+//     name would defeat its own mode, so the service refuses the request rather
+//     than silently dropping the field — a silent drop would leave the client
+//     believing a name it can see locally is also what the directory serves.
+//   • `unlisted` bootstrap requires the §21.2 invite-derived blind token, and a
+//     token mismatch is INDISTINGUISHABLE from an unknown room (the §15.3.1
+//     no-existence-oracle property, applied to the directory).
+//   • The §8.1 forbidden key classes are refused inside `signed_stub`, the one
+//     free-form field a column allowlist cannot see into.
+import { createDbClient } from '@licio/db';
+import { createLogger } from '../lib/logger.js';
+import { pgNoticeLogLevel } from '../lib/pg-notices.js';
+import { DrizzlePrivateRoomStubStore } from './drizzle-store.js';
+import {
+  forbiddenSignedStubKeys,
+  InMemoryPrivateRoomStubStore,
+  type PrivateRoomCreateStubRequest,
+  type PrivateRoomStubStore,
+  type PrivateRoomStubUpdateRequest,
+  type StoredPrivateRoomStub,
+} from './stores.js';
+
+/** The rendezvous endpoints a bootstrapping peer needs (§21.1 response). */
+export const BOOTSTRAP_ENDPOINTS: readonly string[] = [
+  '/v1/private-rendezvous/announce',
+  '/v1/private-rendezvous/poll',
+  '/v1/private-rendezvous/signal',
+  '/v1/private-rendezvous/signal/poll',
+];
+
+/** Why a stub operation was refused.  `not_found` is deliberately reused for a
+ *  bad bootstrap token (no existence oracle). */
+export type StubFailure =
+  | 'not_found'
+  | 'forbidden'
+  | 'display_requires_listed'
+  | 'forbidden_stub_field'
+  | 'unlisted_requires_token';
+
+export type StubResult<T> = { ok: true; value: T } | { ok: false; reason: StubFailure };
+
+/** The §21.1 create response. */
+export interface CreateStubResponse {
+  readonly room_server_id: string;
+  readonly stub_id: string;
+  readonly bootstrap_endpoints: readonly string[];
+  readonly created_at: string;
+}
+
+/** The §21.2 bootstrap projection.  Display fields appear only for a `listed`
+ *  room; everything else is a commitment or a bootstrap policy. */
+export interface BootstrapResponse {
+  readonly room_server_id: string;
+  readonly directory_mode: 'listed' | 'unlisted';
+  readonly display_name: string | null;
+  readonly display_description: string | null;
+  readonly display_avatar_public_cid: string | null;
+  readonly room_public_key: string;
+  readonly manifest_key_commitment: string;
+  readonly latest_manifest_commitment: string | null;
+  readonly rendezvous_policy: string;
+  readonly bootstrap_hints: readonly { kind: string; value: string }[];
+  readonly bootstrap_endpoints: readonly string[];
+  readonly signed_stub: Record<string, unknown>;
+  readonly stub_signature: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+/**
+ * Constant-time string comparison for the §21.2 bootstrap token.
+ *
+ * A length-then-`===` compare leaks the shared prefix through timing, which for
+ * a capability check is the difference between guessing a token and deriving it
+ * byte by byte.  Both operands are bounded base64url by the wire schema, so the
+ * fixed-length XOR fold below is exact.
+ */
+function constantTimeEquals(a: string, b: string): boolean {
+  const max = Math.max(a.length, b.length);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < max; i += 1) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+/** Aggregate-only counters — no room, account, or token identity (§27.2). */
+export interface PrivateRoomStubMetrics {
+  created: number;
+  bootstrapReads: number;
+  bootstrapRefusals: number;
+  updated: number;
+  delisted: number;
+  removed: number;
+}
+
+export class PrivateRoomStubService {
+  readonly #metrics: PrivateRoomStubMetrics = {
+    created: 0,
+    bootstrapReads: 0,
+    bootstrapRefusals: 0,
+    updated: 0,
+    delisted: 0,
+    removed: 0,
+  };
+
+  constructor(
+    private readonly store: PrivateRoomStubStore,
+    private readonly newId: () => string = () => crypto.randomUUID(),
+  ) {}
+
+  /** §21.1 — mint the P2P room shell + its directory stub. */
+  async create(
+    request: PrivateRoomCreateStubRequest,
+    accountId: string,
+  ): Promise<StubResult<CreateStubResponse>> {
+    const hasDisplay =
+      request.display_name !== undefined ||
+      request.display_description !== undefined ||
+      request.display_avatar_public_cid !== undefined;
+    if (request.directory_mode !== 'listed' && hasDisplay) {
+      return { ok: false, reason: 'display_requires_listed' };
+    }
+    if (forbiddenSignedStubKeys(request.signed_stub).length > 0) {
+      return { ok: false, reason: 'forbidden_stub_field' };
+    }
+    // An `unlisted` room's bootstrap read is gated on a token the client commits
+    // to HERE.  Without it the room would be unreachable by anyone who was not
+    // already a member, so this is refused at create rather than discovered
+    // later as a permanently-404ing stub.
+    if (
+      request.directory_mode === 'unlisted' &&
+      typeof request.signed_stub['bootstrap_blind_id'] !== 'string'
+    ) {
+      return { ok: false, reason: 'unlisted_requires_token' };
+    }
+
+    const stub = await this.store.create({
+      stubId: this.newId(),
+      roomServerId: this.newId(),
+      directoryMode: request.directory_mode,
+      displayName: request.display_name ?? null,
+      displayDescription: request.display_description ?? null,
+      displayAvatarPublicCid: request.display_avatar_public_cid ?? null,
+      roomPublicKey: request.room_public_key,
+      manifestKeyCommitment: request.manifest_key_commitment,
+      rendezvousPolicy: request.rendezvous_policy,
+      bootstrapHints: request.bootstrap_hints ?? [],
+      signedStub: request.signed_stub,
+      stubSignature: request.stub_signature,
+      createdByAccountId: accountId,
+    });
+    this.#metrics.created += 1;
+    return {
+      ok: true,
+      value: {
+        room_server_id: stub.roomServerId,
+        stub_id: stub.stubId,
+        bootstrap_endpoints: BOOTSTRAP_ENDPOINTS,
+        created_at: stub.createdAt,
+      },
+    };
+  }
+
+  /**
+   * §21.2 — read a bootstrap record.  `listed` is open; `unlisted` requires the
+   * invite-derived blind token, and a wrong or missing token yields the SAME
+   * `not_found` an unknown room does, so the endpoint is not an oracle for
+   * which room ids exist.
+   */
+  async bootstrap(
+    roomServerId: string,
+    token: string | undefined,
+  ): Promise<StubResult<BootstrapResponse>> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (!stub) {
+      this.#metrics.bootstrapRefusals += 1;
+      return { ok: false, reason: 'not_found' };
+    }
+    if (stub.directoryMode === 'unlisted') {
+      const expected = stub.signedStub['bootstrap_blind_id'];
+      if (typeof expected !== 'string' || token === undefined) {
+        this.#metrics.bootstrapRefusals += 1;
+        return { ok: false, reason: 'not_found' };
+      }
+      if (!constantTimeEquals(expected, token)) {
+        this.#metrics.bootstrapRefusals += 1;
+        return { ok: false, reason: 'not_found' };
+      }
+    }
+    this.#metrics.bootstrapReads += 1;
+    return { ok: true, value: this.#project(stub) };
+  }
+
+  /** §21.3 — patch the mutable stub fields (creator only). */
+  async update(
+    roomServerId: string,
+    request: PrivateRoomStubUpdateRequest,
+    accountId: string,
+  ): Promise<StubResult<BootstrapResponse>> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (!stub) return { ok: false, reason: 'not_found' };
+    if (stub.createdByAccountId !== accountId) return { ok: false, reason: 'forbidden' };
+    const setsDisplay =
+      (request.display_name !== undefined && request.display_name !== null) ||
+      (request.display_description !== undefined && request.display_description !== null) ||
+      (request.display_avatar_public_cid !== undefined &&
+        request.display_avatar_public_cid !== null);
+    if (stub.directoryMode !== 'listed' && setsDisplay) {
+      return { ok: false, reason: 'display_requires_listed' };
+    }
+    if (request.signed_stub !== undefined && forbiddenSignedStubKeys(request.signed_stub).length) {
+      return { ok: false, reason: 'forbidden_stub_field' };
+    }
+    const next = await this.store.update(roomServerId, {
+      ...(request.display_name !== undefined ? { displayName: request.display_name } : {}),
+      ...(request.display_description !== undefined
+        ? { displayDescription: request.display_description }
+        : {}),
+      ...(request.display_avatar_public_cid !== undefined
+        ? { displayAvatarPublicCid: request.display_avatar_public_cid }
+        : {}),
+      ...(request.rendezvous_policy !== undefined
+        ? { rendezvousPolicy: request.rendezvous_policy }
+        : {}),
+      ...(request.bootstrap_hints !== undefined ? { bootstrapHints: request.bootstrap_hints } : {}),
+      ...(request.latest_manifest_commitment !== undefined
+        ? { latestManifestCommitment: request.latest_manifest_commitment }
+        : {}),
+      ...(request.signed_stub !== undefined ? { signedStub: request.signed_stub } : {}),
+      ...(request.stub_signature !== undefined ? { stubSignature: request.stub_signature } : {}),
+    });
+    if (!next) return { ok: false, reason: 'not_found' };
+    this.#metrics.updated += 1;
+    return { ok: true, value: this.#project(next) };
+  }
+
+  /** §21.4 — demote a `listed` record to `unlisted` and drop its display fields. */
+  async delist(roomServerId: string, accountId: string): Promise<StubResult<BootstrapResponse>> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (!stub) return { ok: false, reason: 'not_found' };
+    if (stub.createdByAccountId !== accountId) return { ok: false, reason: 'forbidden' };
+    const next = await this.store.delist(roomServerId);
+    if (!next) return { ok: false, reason: 'not_found' };
+    this.#metrics.delisted += 1;
+    return { ok: true, value: this.#project(next) };
+  }
+
+  /**
+   * §21.4 — remove the directory record.  This deletes LICIO'S BOOTSTRAP RECORD
+   * and nothing else: member devices keep every byte of the room, because the
+   * server never held any.  The route's copy says exactly that.
+   */
+  async remove(roomServerId: string, accountId: string): Promise<StubResult<{ removed: true }>> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (!stub) return { ok: false, reason: 'not_found' };
+    if (stub.createdByAccountId !== accountId) return { ok: false, reason: 'forbidden' };
+    const removed = await this.store.remove(roomServerId);
+    if (!removed) return { ok: false, reason: 'not_found' };
+    this.#metrics.removed += 1;
+    return { ok: true, value: { removed: true } };
+  }
+
+  /** A snapshot of the aggregate-only counters (no room identity). */
+  metrics(): PrivateRoomStubMetrics {
+    return { ...this.#metrics };
+  }
+
+  #project(stub: StoredPrivateRoomStub): BootstrapResponse {
+    return {
+      room_server_id: stub.roomServerId,
+      directory_mode: stub.directoryMode,
+      display_name: stub.displayName,
+      display_description: stub.displayDescription,
+      display_avatar_public_cid: stub.displayAvatarPublicCid,
+      room_public_key: stub.roomPublicKey,
+      manifest_key_commitment: stub.manifestKeyCommitment,
+      latest_manifest_commitment: stub.latestManifestCommitment,
+      rendezvous_policy: stub.rendezvousPolicy,
+      bootstrap_hints: stub.bootstrapHints.map((h) => ({ kind: h.kind, value: h.value })),
+      bootstrap_endpoints: BOOTSTRAP_ENDPOINTS,
+      signed_stub: stub.signedStub,
+      stub_signature: stub.stubSignature,
+      created_at: stub.createdAt,
+      updated_at: stub.updatedAt,
+    };
+  }
+}
+
+function buildStore(): PrivateRoomStubStore {
+  const dbUrl = process.env['DATABASE_URL'];
+  if (!dbUrl) return new InMemoryPrivateRoomStubStore();
+  // `onNotice` for the same reason every other store passes one: the db wrapper
+  // always installs its own handler, so omitting the sink DISCARDS every notice
+  // from this store rather than falling back to postgres.js's console default.
+  const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
+  return new DrizzlePrivateRoomStubStore(
+    createDbClient(dbUrl, {
+      onNotice: (notice) =>
+        logger[pgNoticeLogLevel(notice.severity)](
+          { pgNotice: notice },
+          'postgres notice (private room stubs)',
+        ),
+    }),
+  );
+}
+
+let service: PrivateRoomStubService | undefined;
+
+/** The process-wide stub service (created lazily; Postgres when configured). */
+export function getPrivateRoomStubService(): PrivateRoomStubService {
+  if (!service) service = new PrivateRoomStubService(buildStore());
+  return service;
+}
+
+/** Replace the singleton (tests / an explicit binding). */
+export function setPrivateRoomStubService(next: PrivateRoomStubService): void {
+  service = next;
+}

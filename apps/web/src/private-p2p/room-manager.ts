@@ -701,6 +701,66 @@ export class PrivateRoomSession {
   }
 
   /**
+   * Build the SIGNED body of this room's §8.2 directory stub (PRIVATE_SPEC
+   * §21.1), for a creator who wants the room reachable by id rather than only
+   * by out-of-band invite.
+   *
+   * Everything it publishes is a COMMITMENT the room already stands behind —
+   * the founder device's signing public key, the manifest commitment, and (for
+   * an `unlisted` room) a bootstrap blind id.  No key material, no content, no
+   * member, no operation head.  The body is canonically encoded and Ed25519-
+   * signed by this device, so any member can verify the directory record was
+   * authored by the room rather than by the server that stores it — which is
+   * the whole reason the server keeps `signed_stub` verbatim instead of
+   * interpreting it.
+   *
+   * The bootstrap blind id is derived from the room's epoch-0 rendezvous key
+   * through a labeled HKDF, so unlike the §15.3 rendezvous blind ids it does
+   * NOT rotate: an invite handed out today must still resolve the record
+   * tomorrow, and after the next membership change.  The cost is that a removed
+   * member keeps a token that resolves a record of commitments and policy — no
+   * content, no keys, and nothing they did not already know, since they were in
+   * the room.  Rotating it would break every outstanding invite to protect
+   * information the ex-member already has.
+   */
+  async directoryStubPayload(): Promise<{
+    readonly roomPublicKey: string;
+    readonly manifestKeyCommitment: string;
+    readonly signedStub: Record<string, unknown>;
+    readonly stubSignature: string;
+    readonly bootstrapBlindId: string;
+  }> {
+    const genesis = this.session.epochs[0];
+    if (!genesis) throw new Error('room session carries no epoch keys');
+    const keys = await this.p2p.deriveRoomEpochKeys(
+      genesis.roomEpochSecret,
+      this.session.roomIdCommitment,
+    );
+    const bootstrapBlindId = this.p2p.toBase64Url(
+      await this.p2p.hmacSha256(
+        keys.rendezvousKey,
+        this.p2p.canonical(['licio.private.bootstrap.v1', this.session.roomIdCommitment]),
+      ),
+    );
+    const roomPublicKey = this.session.signingPublicKey;
+    const manifestKeyCommitment = this.p2p.toBase64Url(this.session.manifestCommitment);
+    // Declared as canonical-encodable rather than `Record<string, unknown>` so
+    // the SIGNED bytes and the transmitted object cannot drift: a field the
+    // encoder would reject is a compile error here, not a signature every
+    // member fails to verify.
+    const signedStub = {
+      schema: 'licio.private.directory_stub.v1',
+      room_public_key: roomPublicKey,
+      manifest_key_commitment: manifestKeyCommitment,
+      bootstrap_blind_id: bootstrapBlindId,
+    } as const satisfies Record<string, string>;
+    const stubSignature = this.p2p.toBase64Url(
+      await this.p2p.signEd25519(this.session.signingPrivateKey, this.p2p.canonical(signedStub)),
+    );
+    return { roomPublicKey, manifestKeyCommitment, signedStub, stubSignature, bootstrapBlindId };
+  }
+
+  /**
    * Establish a LIVE WebRTC connection to another current-epoch member and begin
    * syncing this room over it (WS-S.4.3).  Discovers the peer via the server-blind
    * §15.2 rendezvous (the rendezvous key IS the capability), seals SDP/ICE under the
