@@ -49,6 +49,25 @@ function freshService(): PrivateRoomStubService {
 // request type, so the helpers are typed rather than cast: `as any` is barred
 // outright by the project's no-`any` rule, and reaching for it here would have
 // hidden the fact that nothing actually required it.
+/**
+ * A body for a DIFFERENT room.
+ *
+ * Registration is idempotent per `(account, room_public_key)` — that is what
+ * makes a retry converge — so a test that wants two RECORDS has to describe two
+ * ROOMS. Passing this explicitly keeps the common fixture deterministic and
+ * makes "these are separate rooms" visible at the call site.
+ */
+let roomKeySeq = 0;
+function anotherRoom(): { signed_stub: PrivateRoomCreateStubRequest['signed_stub'] } {
+  roomKeySeq += 1;
+  return {
+    signed_stub: {
+      ...SIGNED_STUB,
+      room_public_key: `${SIGNED_STUB.room_public_key.slice(0, 38)}${String(roomKeySeq).padStart(5, '0')}`,
+    },
+  };
+}
+
 function listedRequest(
   over: Partial<PrivateRoomCreateStubRequest> = {},
 ): PrivateRoomCreateStubRequest {
@@ -163,7 +182,7 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
   it('never projects the capability, in any mode', async () => {
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);
-    const unlisted = await svc.create(unlistedRequest(), ACCOUNT);
+    const unlisted = await svc.create(unlistedRequest(anotherRoom()), ACCOUNT);
     if (!listed.ok || !unlisted.ok) throw new Error('create failed');
 
     // The open read a `listed` room serves used to hand out `bootstrap_blind_id`
@@ -418,7 +437,7 @@ describe('non-owner refusals — the oracle rule, in one place', () => {
   it('answers not_found for an UNLISTED record and forbidden for a listed one', async () => {
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);
-    const unlisted = await svc.create(unlistedRequest(), ACCOUNT);
+    const unlisted = await svc.create(unlistedRequest(anotherRoom()), ACCOUNT);
     if (!listed.ok || !unlisted.ok) throw new Error('create failed');
 
     // An unlisted record's EXISTENCE is what the blind token protects, so a
@@ -610,7 +629,7 @@ describe('§4.2 directory — a listed room is one that can actually be found', 
   it('enumerates listed rooms and NEVER an unlisted one', async () => {
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);
-    const hidden = await svc.create(unlistedRequest(), ACCOUNT);
+    const hidden = await svc.create(unlistedRequest(anotherRoom()), ACCOUNT);
     if (!listed.ok || !hidden.ok) throw new Error('create failed');
 
     const page = await svc.listDirectory({});
@@ -643,7 +662,7 @@ describe('§4.2 directory — a listed room is one that can actually be found', 
     const svc = freshService();
     const ids: string[] = [];
     for (let i = 0; i < 5; i += 1) {
-      const created = await svc.create(listedRequest(), ACCOUNT);
+      const created = await svc.create(listedRequest(anotherRoom()), ACCOUNT);
       if (!created.ok) throw new Error('create failed');
       ids.push(created.value.room_server_id);
     }
@@ -689,7 +708,7 @@ describe('§4.2 directory — a listed room is one that can actually be found', 
 describe('owner reads — paged, and complete where completeness is the point', () => {
   it('pages `/mine` while the EXPORT still returns everything', async () => {
     const svc = freshService();
-    for (let i = 0; i < 3; i += 1) await svc.create(listedRequest(), ACCOUNT);
+    for (let i = 0; i < 3; i += 1) await svc.create(listedRequest(anotherRoom()), ACCOUNT);
 
     const first = await svc.listForAccountPage(ACCOUNT, { limit: 2 });
     expect(first.stubs).toHaveLength(2);
@@ -714,7 +733,7 @@ describe('§11.4 — an abusive LISTED name has an intake', () => {
   it('reports a listed record as publicly listed, and an unlisted one as not', async () => {
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);
-    const unlisted = await svc.create(unlistedRequest(), ACCOUNT);
+    const unlisted = await svc.create(unlistedRequest(anotherRoom()), ACCOUNT);
     if (!listed.ok || !unlisted.ok) throw new Error('create failed');
 
     // A listed room publishes its name to anyone browsing, so answering this
@@ -728,6 +747,27 @@ describe('§11.4 — an abusive LISTED name has an intake', () => {
     // …and it stops being reportable the moment it is delisted.
     await svc.delist(listed.value.room_server_id, ACCOUNT);
     expect(await svc.isPubliclyListed(listed.value.room_server_id)).toBe(false);
+  });
+});
+
+describe('registration is IDEMPOTENT per account per room', () => {
+  it('adopts the existing record instead of minting a second', async () => {
+    const svc = freshService();
+    const first = await svc.create(listedRequest(), ACCOUNT);
+    const again = await svc.create(listedRequest(), ACCOUNT);
+    if (!first.ok || !again.ok) throw new Error('create failed');
+    // A check-then-create is a TOCTOU; the store answers with the row that is
+    // already there, so a retry converges rather than accumulating.
+    expect(again.value.room_server_id).toBe(first.value.room_server_id);
+    expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(1);
+  });
+
+  it('is per ACCOUNT — another account registering the same room is its own record', async () => {
+    const svc = freshService();
+    const mine = await svc.create(listedRequest(), ACCOUNT);
+    const theirs = await svc.create(listedRequest(), OTHER_ACCOUNT);
+    if (!mine.ok || !theirs.ok) throw new Error('create failed');
+    expect(theirs.value.room_server_id).not.toBe(mine.value.room_server_id);
   });
 });
 
@@ -764,7 +804,7 @@ describe('Art. 15 — the export discloses exactly what the purge removes', () =
   it("exports every stub the account created, and none of anyone else's", async () => {
     const svc = freshService();
     await svc.create(listedRequest(), ACCOUNT);
-    await svc.create(unlistedRequest(), ACCOUNT);
+    await svc.create(unlistedRequest(anotherRoom()), ACCOUNT);
     await svc.create(listedRequest(), OTHER_ACCOUNT);
 
     const mine = await svc.exportForAccount(ACCOUNT);
@@ -772,7 +812,7 @@ describe('Art. 15 — the export discloses exactly what the purge removes', () =
     expect(mine.map((row) => row.directory_mode).sort()).toEqual(['listed', 'unlisted']);
     // The account's own signed body IS its own data — this is the one place it
     // belongs, because the account's device authored it.
-    expect(mine[0]?.signed_stub).toEqual(SIGNED_STUB);
+    expect(mine.map((row) => row.signed_stub)).toContainEqual(SIGNED_STUB);
     // …and so is the capability, which the purge deletes with the row. Never
     // projected to a READER; Art. 15 asks what is HELD about the account, and
     // it is also what makes the archive actionable — with it they can resolve
@@ -783,7 +823,7 @@ describe('Art. 15 — the export discloses exactly what the purge removes', () =
   it('exports nothing once the purge has run — the two agree by construction', async () => {
     const svc = freshService();
     await svc.create(listedRequest(), ACCOUNT);
-    await svc.create(unlistedRequest(), ACCOUNT);
+    await svc.create(unlistedRequest(anotherRoom()), ACCOUNT);
     expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(2);
 
     expect(await svc.purgeForAccount(ACCOUNT)).toBe(2);

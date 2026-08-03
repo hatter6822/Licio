@@ -112,6 +112,18 @@ export const privateRoomStubs = pgTable(
      *  not just by convention. */
     uniqueIndex('private_room_stubs_room_uq').on(t.roomServerId),
     /**
+     * ONE record per account per ROOM.
+     *
+     * `room_public_key` is the room's founder signing key, so this is "an
+     * account may register a given room once". Registration checked first and
+     * created second, which is a TOCTOU: two tabs, or a retry overlapping a
+     * still-running POST, both read "nothing there" and both insert — leaving a
+     * duplicate that recovery picks between arbitrarily and an orphan that is
+     * publicly listed if that was its mode. A check cannot fix a check; the
+     * constraint can, and the create adopts the existing row on conflict.
+     */
+    uniqueIndex('private_room_stubs_account_room_uq').on(t.createdByAccountId, t.roomPublicKey),
+    /**
      * The §4.2 public directory's keyset, in the order it reads.
      *
      * The endpoint is UNAUTHENTICATED and budgeted at 300/min, and `LIMIT` does

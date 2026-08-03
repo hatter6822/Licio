@@ -362,6 +362,17 @@ export function createPrivateRoomsRoutes() {
       const { status, body } = refuse(result.reason);
       return c.json(body, status);
     }
+    // NEVER CACHED, and never keyed without the capability.
+    //
+    // A shared or browser HTTP cache would otherwise store a successful
+    // capability-gated read against a URL that no longer carries the token —
+    // the capability moved to a header precisely so it stays out of the URL —
+    // and serve that 200 to a later request that presented nothing. The
+    // service-worker exclusion does not reach the browser's own cache or an
+    // upstream proxy. `Vary` is belt-and-braces for anything that ignores
+    // `no-store` but honours a key.
+    c.header('Cache-Control', 'no-store, private');
+    c.header('Vary', BOOTSTRAP_TOKEN_HEADER);
     return c.json(result.value, 200);
   });
 

@@ -436,6 +436,17 @@ export async function buildCaseReview(
         (CONSOLE_ACTIONS as readonly string[]).includes(a) &&
         actionValidForTarget(a as ConsoleAction, theCase.targetType),
     ),
+    // §11.4's single power over a P2P room, offered only where it applies AND to
+    // a reviewer who holds it: the same bar the endpoint enforces (platform
+    // admin with per-session MFA), so the console never renders a control that
+    // deterministically fails.
+    directory_delistable:
+      theCase.targetType === 'room' &&
+      theCase.targetId !== null &&
+      actor.platformRoles.includes('admin') &&
+      actor.mfaActive &&
+      actor.mfaVerified &&
+      (await services.isPubliclyListedRoom?.(theCase.targetId)) === true,
   };
 }
 

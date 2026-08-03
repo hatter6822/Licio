@@ -138,8 +138,31 @@ export function DirectoryRecordPanel({
       // (a retry of DELETE stops at the same 404 before reaching the cleanup).
       const status = err instanceof ApiClientError ? err.status : undefined;
       if (status === 404) {
-        setState({ kind: 'absent' });
-        await session.clearDirectoryStub();
+        // A 404 says "no record YOU can reach", not "no record". §21.2 collapses
+        // an unknown room, a wrong token and a malformed id into one answer, so
+        // a stale or corrupted local token produces exactly this — and clearing
+        // the handle on it would destroy the only copy of a capability a device
+        // admitted after epoch 0 cannot re-derive, taking the directory
+        // reference out of every invite that device makes afterwards.
+        //
+        // Only the OWNER-SCOPED lookup can tell the two apart, so it decides.
+        // A non-owner keeps the handle and is told the record cannot be reached.
+        const stillThere =
+          accountId === null
+            ? null
+            : await findMyPrivateRoomStub({ roomServerId }).catch(() => null);
+        if (accountId !== null && stillThere === null) {
+          setState({ kind: 'absent' });
+          await session.clearDirectoryStub();
+        } else {
+          setState({ kind: 'unreadable' });
+          setError(
+            t(
+              'privateRoom.record.unreachable',
+              'Licio’s record for this room could not be opened with the key this device holds. It may still exist — ask another member for a fresh invite.',
+            ),
+          );
+        }
       } else {
         setState({ kind: 'unreadable' });
         setError(
@@ -152,7 +175,7 @@ export function DirectoryRecordPanel({
     } finally {
       setBusy(null);
     }
-  }, [roomServerId, token, t, session, accept]);
+  }, [roomServerId, token, t, session, accept, accountId]);
 
   useEffect(() => {
     void read();

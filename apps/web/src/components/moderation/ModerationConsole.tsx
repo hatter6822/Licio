@@ -29,6 +29,7 @@ import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
 import { verifyTotp } from '../../lib/auth-api.js';
 import { saveBlob } from '../../lib/privacy-api.js';
+import { delistPrivateRoomStub } from '../../lib/private-rooms-api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyEvidenceDecision,
@@ -664,6 +665,34 @@ function CaseReviewDialog({
       }),
   });
 
+  /**
+   * §11.4/§21.4 — the staff delist, from the case that reported the listing.
+   *
+   * Deliberately NOT `applyModerationAction`: that palette carries doctrine
+   * steward capabilities, and this power belongs to platform staff as such. The
+   * endpoint audits it inside the moderation unit, so the record lands with the
+   * demotion or neither does.
+   */
+  const delist = useMutation({
+    mutationFn: (roomServerId: string) => delistPrivateRoomStub(roomServerId),
+    onSuccess: () => {
+      toast({
+        message: t(
+          'console.delistDone',
+          'The room no longer advertises a public name. Its members still have the room.',
+        ),
+        tone: 'success',
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.modQueue('default') });
+      onClose();
+    },
+    onError: () =>
+      toast({
+        message: t('console.delistFailed', 'The listing could not be removed.'),
+        tone: 'error',
+      }),
+  });
+
   // WS-J.2.3b revert.  The reason is asked for SEPARATELY, never inherited from
   // the action palette above: the server records this field as the reason for
   // the REVERSAL in the action and the audit trail, so reusing the palette's
@@ -1012,6 +1041,30 @@ function CaseReviewDialog({
                 {t('console.apply', 'Apply action')}
               </Button>
             </div>
+            {/* §11.4 — the ONE remedy for an abusive public room listing, beside
+                the palette rather than inside it: the palette holds doctrine
+                STEWARD capabilities, and this is granted to platform staff as
+                such. Reports about a listed room already reach this queue, so
+                without it the intake had no enforcement to reach. */}
+            {data.directory_delistable && data.target_id !== null ? (
+              <div className="flex flex-col gap-2 border-line border-t pt-3">
+                <p className="text-ink-muted text-xs">
+                  {t(
+                    'console.delistBody',
+                    'This case is about a private room that publishes a public name. Delisting stops it advertising itself; members keep the room, and Licio cannot read, moderate or remove it.',
+                  )}
+                </p>
+                <div className="flex justify-end">
+                  <Button
+                    variant="secondary"
+                    loading={delist.isPending}
+                    onClick={() => delist.mutate(data.target_id as string)}
+                  >
+                    {t('console.delist', 'Delist this room’s public name')}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </section>
         </div>
       ) : null}

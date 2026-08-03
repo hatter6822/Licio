@@ -50,6 +50,11 @@ function shellIdentity(): { name: string; slug: string } {
   return { name: `Private room ${opaque}`, slug: `p2p-${opaque}` };
 }
 
+/** Postgres' unique-violation SQLSTATE, as postgres.js surfaces it. */
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
+}
+
 type StubRow = typeof privateRoomStubs.$inferSelect;
 
 function toStub(row: StubRow): StoredPrivateRoomStub {
@@ -80,6 +85,19 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
   constructor(private readonly db: DbExecutor) {}
 
   async create(input: PrivateRoomStubInsertInput): Promise<StoredPrivateRoomStub> {
+    // ADOPT on conflict, rather than failing or duplicating.
+    //
+    // `private_room_stubs_account_room_uq` makes "one record per account per
+    // room" a database fact, so a retry overlapping a still-running POST is a
+    // unique violation rather than a second row. Answering it with the row that
+    // is already there is what makes registration idempotent: the client's
+    // retry converges on the record it was trying to create.
+    if (input.createdByAccountId !== null) {
+      const existing = await this.findForAccount(input.createdByAccountId, {
+        roomPublicKey: input.signedStub.room_public_key,
+      });
+      if (existing) return existing;
+    }
     const { name, slug } = shellIdentity();
     // An EXPLICIT millisecond timestamp, not the column's `defaultNow()`.
     // Postgres stamps microseconds; `toStub` serializes through
@@ -89,58 +107,70 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
     // be skipped permanently, not merely reordered. Writing the value the cursor
     // will later carry removes the mismatch at the source.
     const createdAt = new Date();
-    return await this.db.transaction(async (tx) => {
-      // The four §4.1 axes are set TOGETHER: the `rooms_storage_authority_coherence`,
-      // `rooms_p2p_requires_directory_mode`, `rooms_p2p_visibility_private`, and
-      // `rooms_p2p_join_model_invite` CHECKs reject any partial combination, so the
-      // database refuses an incoherent P2P room rather than trusting this call site.
-      await tx.insert(rooms).values({
-        roomId: input.roomServerId,
-        name,
-        slug,
-        description: null,
-        roomType: 'global_topic',
-        visibility: 'private',
-        joinModel: 'invite',
-        postingPolicy: 'all_members',
-        storageMode: 'p2p',
-        authorityModel: 'room_keys',
-        directoryMode: input.directoryMode,
-        p2pStubId: input.stubId,
-        createdBy: input.createdByAccountId,
-        governanceMode: 'ordinary',
-        charterSummary: null,
-        typeMetadata: {},
-        latestActivityAt: null,
-      });
-      const inserted = await tx
-        .insert(privateRoomStubs)
-        .values({
-          stubId: input.stubId,
-          roomServerId: input.roomServerId,
+    return await this.db
+      .transaction(async (tx) => {
+        // The four §4.1 axes are set TOGETHER: the `rooms_storage_authority_coherence`,
+        // `rooms_p2p_requires_directory_mode`, `rooms_p2p_visibility_private`, and
+        // `rooms_p2p_join_model_invite` CHECKs reject any partial combination, so the
+        // database refuses an incoherent P2P room rather than trusting this call site.
+        await tx.insert(rooms).values({
+          roomId: input.roomServerId,
+          name,
+          slug,
+          description: null,
+          roomType: 'global_topic',
+          visibility: 'private',
+          joinModel: 'invite',
+          postingPolicy: 'all_members',
+          storageMode: 'p2p',
+          authorityModel: 'room_keys',
           directoryMode: input.directoryMode,
-          displayName: input.displayName,
-          displayDescription: input.displayDescription,
-          displayAvatarPublicCid: input.displayAvatarPublicCid,
-          // DERIVED from the signed body, never sent separately: two copies of
-          // one commitment is two copies that can disagree.
+          p2pStubId: input.stubId,
+          createdBy: input.createdByAccountId,
+          governanceMode: 'ordinary',
+          charterSummary: null,
+          typeMetadata: {},
+          latestActivityAt: null,
+        });
+        const inserted = await tx
+          .insert(privateRoomStubs)
+          .values({
+            stubId: input.stubId,
+            roomServerId: input.roomServerId,
+            directoryMode: input.directoryMode,
+            displayName: input.displayName,
+            displayDescription: input.displayDescription,
+            displayAvatarPublicCid: input.displayAvatarPublicCid,
+            // DERIVED from the signed body, never sent separately: two copies of
+            // one commitment is two copies that can disagree.
+            roomPublicKey: input.signedStub.room_public_key,
+            manifestKeyCommitment: input.signedStub.manifest_key_commitment,
+            latestManifestCommitment: null,
+            rendezvousPolicy: input.rendezvousPolicy,
+            bootstrapHints: [...input.bootstrapHints],
+            signedStub: input.signedStub,
+            stubSignature: input.stubSignature,
+            bootstrapBlindId: input.bootstrapBlindId,
+            createdByAccountId: input.createdByAccountId,
+            createdAt,
+            updatedAt: createdAt,
+          })
+          .returning();
+        const row = inserted[0];
+        if (!row) throw new Error('private room stub insert returned no row');
+        return toStub(row);
+      })
+      .catch(async (error: unknown) => {
+        // The RACE the pre-check cannot close: both callers read "nothing there"
+        // and both insert. The loser sees 23505 and adopts the winner's row,
+        // which is the same answer it would have got a moment earlier.
+        if (!isUniqueViolation(error) || input.createdByAccountId === null) throw error;
+        const existing = await this.findForAccount(input.createdByAccountId, {
           roomPublicKey: input.signedStub.room_public_key,
-          manifestKeyCommitment: input.signedStub.manifest_key_commitment,
-          latestManifestCommitment: null,
-          rendezvousPolicy: input.rendezvousPolicy,
-          bootstrapHints: [...input.bootstrapHints],
-          signedStub: input.signedStub,
-          stubSignature: input.stubSignature,
-          bootstrapBlindId: input.bootstrapBlindId,
-          createdByAccountId: input.createdByAccountId,
-          createdAt,
-          updatedAt: createdAt,
-        })
-        .returning();
-      const row = inserted[0];
-      if (!row) throw new Error('private room stub insert returned no row');
-      return toStub(row);
-    });
+        });
+        if (!existing) throw error;
+        return existing;
+      });
   }
 
   async getByRoomId(roomServerId: string): Promise<StoredPrivateRoomStub | null> {

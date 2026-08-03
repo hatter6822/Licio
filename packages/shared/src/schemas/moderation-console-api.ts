@@ -298,6 +298,22 @@ export const caseReviewResponseSchema = z
     side_by_side: sideBySideViewSchema.nullable(),
     /** The console actions the requesting reviewer's role may take here. */
     available_actions: z.array(consoleActionSchema),
+    /**
+     * WS-S §11.4 — this case targets a PUBLICLY LISTED Private P2P room, and the
+     * requesting reviewer is platform staff who could delist it.
+     *
+     * Not a `ConsoleAction`, deliberately. The console actions are doctrine
+     * STEWARD capabilities transcribed from `STEWARD_ROLES.md`, and §11.4 grants
+     * this power to platform staff as such rather than to a safety or integrity
+     * lane — adding it to that enum would put a capability in the doctrine
+     * vocabulary that the doctrine document does not grant.
+     *
+     * It exists because reports about a listed room reach this queue, and a
+     * queue whose only available remedy lives on another surface is intake
+     * disconnected from enforcement. False for every other case, including one a
+     * reviewer without platform staff could not act on.
+     */
+    directory_delistable: z.boolean(),
   })
   .strict();
 export type CaseReviewResponse = z.infer<typeof caseReviewResponseSchema>;

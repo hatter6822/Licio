@@ -562,6 +562,17 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore, InMem
   constructor(private readonly now: () => number = () => Date.now()) {}
 
   create(input: PrivateRoomStubInsertInput): Promise<StoredPrivateRoomStub> {
+    // ONE record per account per room — the same constraint the Postgres unique
+    // index enforces, so both adapters answer a retry the same way: with the row
+    // that is already there.
+    if (input.createdByAccountId !== null) {
+      const existing = [...this.#stubs.values()].find(
+        (stub) =>
+          stub.createdByAccountId === input.createdByAccountId &&
+          stub.roomPublicKey === input.signedStub.room_public_key,
+      );
+      if (existing) return Promise.resolve(existing);
+    }
     const at = new Date(this.now()).toISOString();
     const stub: StoredPrivateRoomStub = {
       ...input,

@@ -196,6 +196,7 @@ const caseReview: CaseReviewResponse = {
     edited_after_report: true,
   },
   available_actions: ['warn', 'hide', 'remove'],
+  directory_delistable: false,
 };
 
 const appealQueue: AppealQueueResponse = {
@@ -507,6 +508,7 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
         evidence_urls: ['https://example.com/evidence-1'],
       })),
       available_actions: ['clear', 'escalate'],
+      directory_delistable: false,
     });
     vi.mocked(api.applyModerationAction).mockResolvedValue({
       action_id: '00000000-0000-4000-8000-0000000000ac',

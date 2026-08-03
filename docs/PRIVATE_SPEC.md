@@ -2120,6 +2120,12 @@ own column, and the reader presents the same value in the
 compares the two in constant time. It learns nothing from either: the value is
 an HMAC output over material it does not hold.
 
+The bootstrap response carries `Cache-Control: no-store, private` and
+`Vary: X-Licio-Bootstrap-Token`. A shared or browser cache would otherwise store
+a capability-gated 200 against a URL that no longer carries the token — the
+capability moved to a header precisely so it stays out of the URL — and serve it
+to a later request that presented nothing.
+
 A header rather than a query parameter, because a URL is the one part of a
 request that is written down everywhere — proxy logs, browser history, the
 client's own dev console — and this capability does not rotate: one logged line
@@ -2292,7 +2298,12 @@ POST /v1/private-rooms/:roomServerId/delist
 
 A report about a publicly LISTED room is accepted through the ordinary `room`
 report target, because staff delisting is the remedy §11.4 specifies and it
-needs an intake. A listed record publishes its name to anyone browsing, so
+needs an intake — and the moderation console offers that delist on such a case,
+so the intake reaches the enforcement. It sits BESIDE the action palette rather
+than inside it: the palette holds doctrine steward capabilities transcribed from
+`STEWARD_ROLES.md`, and §11.4 grants this power to platform staff as such, so
+adding it there would put a capability in the doctrine vocabulary that the
+doctrine document does not grant. A listed record publishes its name to anyone browsing, so
 accepting the report reveals nothing already private. An `unlisted` room is
 refused identically to an unknown id: its existence is what the blind token
 protects, and it publishes no name to be abusive with.

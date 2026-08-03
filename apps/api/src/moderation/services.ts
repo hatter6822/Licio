@@ -101,6 +101,15 @@ export interface ModerationServices {
    * recorded as one that did.
    */
   delistListedRoom?: (roomServerId: string) => Promise<boolean>;
+  /**
+   * Is this room's §21 directory record publicly LISTED?
+   *
+   * Read-only, and the case review's only question about the private plane: it
+   * decides whether §11.4's delist is offered on a room case at all. Injected
+   * for the same reason `delistListedRoom` is — moderation does not reach into
+   * the private-rooms domain. Absent ⇒ never offered, which is fail-closed.
+   */
+  isPubliclyListedRoom?: (roomServerId: string) => Promise<boolean>;
   /** The audit trail's tamper-evidence key + identifier ref (WS-J.2.5, migration 0118).
    *
    *  Present by DEFAULT — in dev and test as well as production — because a chain that

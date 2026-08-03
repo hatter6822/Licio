@@ -1286,6 +1286,9 @@ await moderationServices.reloadConfig();
 // production-only one.
 moderationServices.delistListedRoom = async (roomServerId: string) =>
   (await getPrivateRoomStubService().delistListed(roomServerId)) !== null;
+// …and the read that decides whether the console offers it at all.
+moderationServices.isPubliclyListedRoom = async (roomServerId: string) =>
+  await getPrivateRoomStubService().isPubliclyListed(roomServerId);
 setModerationServices(moderationServices);
 // WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing
 // filters read this (ranking reads it via `services.forum`).  One wiring point.

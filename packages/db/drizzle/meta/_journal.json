@@ -855,6 +855,13 @@
       "when": 1783728000046,
       "tag": "0122_aggregation_window_active_index",
       "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1783728000047,
+      "tag": "0123_private_stub_account_room_unique",
+      "breakpoints": true
     }
   ]
 }
