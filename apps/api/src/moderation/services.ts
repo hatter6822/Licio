@@ -90,6 +90,16 @@ export interface ModerationServices {
    * same question about what a failed unit leaves behind.
    */
   transactor: ModerationTransactor;
+  /**
+   * The WS-S §21.4 demotion a moderation unit performs, wired at boot.
+   *
+   * Held on the services rather than imported, so moderation never reaches into
+   * the private-rooms domain to construct its store — the same rule `content`
+   * follows. Absent ⇒ the unit reports "nothing matched", which is the
+   * fail-closed answer: a staff delist that cannot reach the store must not be
+   * recorded as one that did.
+   */
+  delistListedRoom?: (roomServerId: string) => Promise<boolean>;
   /** The audit trail's tamper-evidence key + identifier ref (WS-J.2.5, migration 0118).
    *
    *  Present by DEFAULT — in dev and test as well as production — because a chain that
@@ -190,6 +200,12 @@ export function createInMemoryModerationServices(
           applyContentState: (...args) => services.content.applyContentState(...args),
           applyAccountState: (...args) => services.content.applyAccountState(...args),
         },
+        // Same reasoning as `content`: the in-memory unit shares the process's own
+        // stub store, and a fold over Maps has no partial commit to protect
+        // against — but the SHAPE must exist on both sides, or the atomicity the
+        // Postgres unit provides would be a property only production has.
+        delistListedRoom: async (roomServerId) =>
+          (await services.delistListedRoom?.(roomServerId)) ?? false,
         audit: (input) => appendAudit(services.auditChain, input),
       },
       [caseStore, actionStore, noticeStore, appealStore, incidentStore, auditStore],

@@ -255,12 +255,14 @@ describe('review fixes — the scan, the token invariant, and staff delisting', 
     const created = await svc.create(listedRequest({ display_name: 'Abusive name' }), ACCOUNT);
     if (!created.ok) throw new Error('create failed');
     const room = created.value.room_server_id;
-    // A non-owner without the staff arm still cannot.
+    // A non-owner cannot through the ordinary path.
     expect((await svc.delist(room, OTHER_ACCOUNT)).ok).toBe(false);
-    // §11.4: staff hold exactly this one power over a P2P room.
-    const staffed = await svc.delist(room, OTHER_ACCOUNT, { staff: true });
-    expect(staffed.ok).toBe(true);
-    expect(staffed.ok && staffed.value.display_name).toBe(null);
+    // §11.4: staff hold exactly this one power, and it is exercised through the
+    // AUDITED unit — there is no flag on the ordinary path that would let it
+    // happen without the record.
+    const staffed = await svc.delistListed(room);
+    expect(staffed).not.toBeNull();
+    expect(staffed?.display_name).toBe(null);
   });
 
   it('does NOT let staff delete or patch — delisting is the whole of the power', async () => {
@@ -437,44 +439,39 @@ describe('non-owner refusals — the oracle rule, in one place', () => {
   });
 });
 
-describe('delist — what the audit trail is told', () => {
-  it('reports staff_action only when staff authority was ACTUALLY used', async () => {
+describe('§21.4 delist — the owner arm, and the audited staff arm', () => {
+  it('is idempotent for the OWNER and needs no record', async () => {
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);
     if (!listed.ok) throw new Error('create failed');
-
-    // The CREATOR takes the owner arm even holding staff powers, so an audit
-    // entry saying staff acted against somebody else's record would be false.
-    const own = await svc.delist(listed.value.room_server_id, ACCOUNT, { staff: true });
-    expect(own.ok && own.value.staff_action).toBe(false);
-
-    // …and an idempotent owner delist of an already-unlisted record demotes
-    // nothing, so it must not record a `listed → unlisted` that did not happen.
-    const again = await svc.delist(listed.value.room_server_id, ACCOUNT, { staff: true });
-    expect(again.ok && again.value.staff_action).toBe(false);
+    expect((await svc.delist(listed.value.room_server_id, ACCOUNT)).ok).toBe(true);
+    // Again, on an already-unlisted record: still fine. No platform power is
+    // being exercised, so there is nothing to record.
+    expect((await svc.delist(listed.value.room_server_id, ACCOUNT)).ok).toBe(true);
   });
 
-  it('does not attribute to staff a delist the owner performed first', async () => {
-    // The staff arm's write is conditional on the record still being LISTED, so
-    // the write decides — a read moments earlier can observe `listed` while the
-    // owner delists in between, and an idempotent write would then succeed and
-    // be recorded as staff moderation of a transition somebody else made.
+  it('offers NO unaudited staff path — a non-owner is refused here', async () => {
+    // §11.4's single platform power has to commit with its audit record, so it
+    // lives in the moderation unit (`delistListed`) and not behind a flag on
+    // this method. A second, unaudited path would be a way to exercise that
+    // power without the record.
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);
     if (!listed.ok) throw new Error('create failed');
-    await svc.delist(listed.value.room_server_id, ACCOUNT);
-    const staff = await svc.delist(listed.value.room_server_id, OTHER_ACCOUNT, { staff: true });
-    // Same `not_found` a non-owner already gets for a record that is not listed.
-    expect(staff.ok).toBe(false);
-    expect(staff.ok === false && staff.reason).toBe('not_found');
+    const other = await svc.delist(listed.value.room_server_id, OTHER_ACCOUNT);
+    expect(other.ok).toBe(false);
   });
 
-  it('reports staff_action for a non-owner acting on a listed record', async () => {
+  it('delistListed demotes only a LISTED record, so the write proves there was one', async () => {
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);
     if (!listed.ok) throw new Error('create failed');
-    const staff = await svc.delist(listed.value.room_server_id, OTHER_ACCOUNT, { staff: true });
-    expect(staff.ok && staff.value.staff_action).toBe(true);
+
+    expect(await svc.delistListed(listed.value.room_server_id)).not.toBeNull();
+    // Again: nothing matches, which is how the unit learns the owner got there
+    // first and no staff demotion should be recorded.
+    expect(await svc.delistListed(listed.value.room_server_id)).toBeNull();
+    expect(await svc.delistListed('00000000-0000-4000-8000-999999999999')).toBeNull();
   });
 });
 

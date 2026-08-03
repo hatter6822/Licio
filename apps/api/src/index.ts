@@ -312,6 +312,7 @@ import {
   startRendezvousScheduler,
 } from './private-rendezvous/scheduler.js';
 import { getRendezvousService } from './private-rendezvous/service.js';
+import { DrizzlePrivateRoomStubStore } from './private-rooms/drizzle-store.js';
 import { getPrivateRoomStubService } from './private-rooms/service.js';
 import { loadPwattRuntimeConfig, loadTriggerThreshold } from './pwatt/config.js';
 import {
@@ -1212,6 +1213,14 @@ if (db) {
     db,
     () => moderationServices.auditChain,
     enforcementOver,
+    // The §21.4 demotion, bound to the unit's own handle — so a staff delist and
+    // its audit row commit together or not at all. Moderation declares that it
+    // needs this; the composition root is the only place that knows both
+    // domains, exactly as with the enforcement writes above.
+    (exec) => async (roomServerId) =>
+      (await new DrizzlePrivateRoomStubStore(exec).delist(roomServerId, {
+        requireListed: true,
+      })) !== null,
   );
   moderationServices.cases = stores.cases;
   moderationServices.reports = stores.reports;
@@ -1267,6 +1276,12 @@ moderationServices.reviewerQueues = async (id) => {
   return u ? actorQueues(u.roles, u.stewardRoles) : [];
 };
 await moderationServices.reloadConfig();
+// The in-memory moderation unit's §21.4 binding (dev/test). Production replaces
+// the transactor with one bound to a real transaction; this keeps the SHAPE
+// identical on both sides, so the delist route has one code path rather than a
+// production-only one.
+moderationServices.delistListedRoom = async (roomServerId: string) =>
+  (await getPrivateRoomStubService().delistListed(roomServerId)) !== null;
 setModerationServices(moderationServices);
 // WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing
 // filters read this (ranking reads it via `services.forum`).  One wiring point.

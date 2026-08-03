@@ -195,6 +195,19 @@ export const aggregationWindows = pgTable(
   (t) => [
     primaryKey({ columns: [t.itemId, t.windowStart, t.windowSize] }),
     index('aggregation_windows_start_idx').on(t.windowStart),
+    /**
+     * The WS-H.7.4 landscape's read: one window, busiest first.
+     *
+     * `window_start` alone leaves the planner fetching every row in the hour and
+     * sorting it by `event_count` before the LIMIT applies — and the landscape
+     * calls it with growing limits while it scans past restricted stories, so
+     * one Civic Map load repeated that full-hour sort several times. PARTIAL on
+     * `event_count > 0`, because a zero row is not a landscape node and has no
+     * business occupying the index.
+     */
+    index('aggregation_windows_active_idx')
+      .on(t.windowStart, t.windowSize, t.eventCount.desc(), t.itemId)
+      .where(sql`${t.eventCount} > 0`),
     check(
       'aggregation_windows_nonneg',
       sql`${t.uniqueActiveUsers} >= 0 and ${t.sourceOpens} >= 0 and ${t.contextOpens} >= 0 and ${t.returnVisits} >= 0 and ${t.eventCount} >= 0`,

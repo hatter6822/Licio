@@ -26,7 +26,6 @@ import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { perAccountRateLimit, rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
-import { writeAudit } from '../moderation/audit.js';
 import { getModerationServices } from '../moderation/services.js';
 import {
   DIRECTORY_DEFAULT_LIMIT,
@@ -428,86 +427,63 @@ export function createPrivateRoomsRoutes() {
       // not need MFA to stop advertising their own room.
       const staff = auth.roles.includes('admin') && auth.mfaActive && auth.mfaVerified;
 
-      // AUDIT FIRST for the staff arm, and refuse the action if it cannot be
-      // written.
+      // THE STAFF ARM RUNS AS ONE UNIT with its audit record.
       //
       // §11.4 makes delist the single power staff hold over a P2P room and
-      // requires every use of it to be recorded, so the failure to eliminate is
-      // "demotion committed, no record". Checking `writeAudit`'s result
-      // afterwards cannot: by then the demotion has committed and its display
-      // metadata is gone, so there is nothing to roll back to match. The
-      // moderation audit and the stub store hold separate connections and
-      // cannot share a transaction, so the ORDER carries the guarantee.
+      // requires every use of it to be recorded. Ordering alone could not
+      // deliver that: audit-then-act leaves a permanent record of a transition a
+      // store failure prevented, act-then-audit leaves an irreversible demotion
+      // with no record, and a compensating write is itself best-effort. Inside
+      // the moderation transaction, `tx.audit` throwing takes the demotion down
+      // and a store failure takes the record down — neither lands alone.
+      //
+      // The demotion is CONDITIONAL on the record still being listed, so the
+      // write is what establishes there was a public listing to remove: an owner
+      // delisting in the same instant makes the unit match nothing, and no
+      // record is written for a demotion staff did not perform.
       if (staff) {
-        const audited = await writeAudit(getModerationServices(), {
-          actorUserId: auth.userId,
-          // The doctrine-steward roles do not cover this: §11.4 gives the power
-          // to platform staff as such, not to a safety/appeals lane.
-          actorRole: null,
-          action: 'private_room_stub_delisted',
-          targetType: 'private_room_stub',
-          targetId: params.data.roomServerId,
-          priorState: 'listed',
-          nextState: 'unlisted',
-          reversible: false,
-          notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
+        const mod = getModerationServices();
+        const demoted = await mod.transactor.run(async (tx) => {
+          if (!(await tx.delistListedRoom(params.data.roomServerId))) return false;
+          await tx.audit({
+            actorUserId: auth.userId,
+            // The doctrine-steward roles do not cover this: §11.4 gives the
+            // power to platform staff as such, not to a safety/appeals lane.
+            actorRole: null,
+            action: 'private_room_stub_delisted',
+            targetType: 'private_room_stub',
+            targetId: params.data.roomServerId,
+            priorState: 'listed',
+            nextState: 'unlisted',
+            reversible: false,
+            notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
+          });
+          return true;
         });
-        if (audited === null) {
-          return c.json(
-            {
-              error: {
-                code: 'audit_unavailable',
-                message:
-                  'This action is recorded before it is taken, and the record could not be written. Nothing was changed.',
-              },
-            },
-            503,
-          );
+        if (demoted) {
+          // A CONFIRMATION, not a projection. The record is `unlisted` now, so
+          // staff hold no capability for it — §11.4 gives them power over the
+          // public LISTING and nothing over the record, and returning the
+          // bootstrap body would hand them exactly what the blind token gates.
+          return c.json({ room_server_id: params.data.roomServerId, delisted: true }, 200);
         }
+        // Nothing matched: unknown room, or the owner delisted first. Same
+        // `not_found` a non-owner already gets for a record that is not listed,
+        // so a staff caller learns nothing an ordinary one would not.
+        return c.json(notFound, 404);
       }
 
+      // The OWNER arm: no platform power is exercised, so no record is required
+      // and the ordinary path applies.
       const result = await getPrivateRoomStubService().delist(
         params.data.roomServerId,
         auth.userId,
-        { staff },
       );
       if (!result.ok) {
-        // Audited a moment ago, then matched nothing — the owner delisted in
-        // between. Say so, rather than leaving an entry asserting a demotion
-        // that did not occur.
-        if (staff) {
-          await writeAudit(getModerationServices(), {
-            actorUserId: auth.userId,
-            actorRole: null,
-            action: 'private_room_stub_delist_noop',
-            targetType: 'private_room_stub',
-            targetId: params.data.roomServerId,
-            reversible: false,
-            notes:
-              'The recorded staff delist took no effect: the record was already unlisted or gone.',
-          });
-        }
         const { status, body } = refuse(result.reason);
         return c.json(body, status);
       }
-      // A creator who is ALSO an admin takes the owner arm, which needs no
-      // record — so the entry written on the `staff` guess above describes an
-      // action that was not a staff action. It is COMPENSATED rather than
-      // omitted, for the same reason as the no-op above: the entry exists, and
-      // the trail should say what it turned out to be.
-      if (staff && !result.value.staff_action) {
-        await writeAudit(getModerationServices(), {
-          actorUserId: auth.userId,
-          actorRole: null,
-          action: 'private_room_stub_delist_by_owner',
-          targetType: 'private_room_stub',
-          targetId: params.data.roomServerId,
-          reversible: false,
-          notes: 'The recorded staff delist was in fact the owner delisting their own room.',
-        });
-      }
-      const { staff_action: _internal, ...body } = result.value;
-      return c.json(body, 200);
+      return c.json(result.value, 200);
     },
   );
 

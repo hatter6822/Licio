@@ -2253,15 +2253,23 @@ bound — a field whose name says "commitment" and whose schema says "up to 512
 characters" is a content channel, and the strict object and the §8.1 key scan
 see only legal field NAMES.
 
-**Every staff delist is recorded BEFORE it is taken.** The moderation audit and
-the stub store hold separate connections, so they cannot share a transaction;
-the ORDER carries the guarantee instead. An append that fails refuses the action
-(503, nothing changed), because the demotion is irreversible and a record
-written afterwards could not be rolled back to match. The residual is the
-opposite direction — an entry for a demotion that the owner performed in the
-same instant, or that was the owner's own — and both are compensated by a
-following entry rather than left standing: an over-recorded trail is readable
-and correctable, while an under-recorded one hides the use of a power.
+**A staff delist and its audit record are ONE UNIT.** Ordering could not carry
+that guarantee: audit-then-act leaves a permanent record of a transition a store
+failure prevented, act-then-audit leaves an irreversible demotion with no
+record, and a compensating write is itself best-effort. So the demotion runs
+inside the WS-J.2.3 moderation transaction — the audit append throwing takes it
+down, and a store failure takes the record down, so neither lands alone. The
+demotion is CONDITIONAL on the record still being listed, which makes the write
+itself the proof that there was a public listing to remove: an owner delisting
+in the same instant matches nothing, and no record is written for a demotion
+staff did not perform.
+
+There is deliberately NO second, unaudited delist path for staff. The service's
+ordinary `delist` is owner-only; §11.4's single platform power is reachable only
+through the audited unit, so it cannot be exercised by a future caller passing a
+flag. The staff response is a CONFIRMATION rather than the bootstrap projection:
+after the demotion the record is `unlisted`, and staff hold no capability for
+it — returning the body would hand them exactly what the blind token gates.
 
 ### 21.4 Delete/delist stub
 

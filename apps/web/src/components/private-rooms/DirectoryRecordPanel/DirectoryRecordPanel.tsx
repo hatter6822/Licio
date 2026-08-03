@@ -91,6 +91,30 @@ export function DirectoryRecordPanel({
   /** Ownership is per ACCOUNT, so the lookup is keyed to the signed-in one. */
   const accountId = useAuthStore((auth) => auth.user?.id ?? null);
 
+  /**
+   * Accept a record ONLY if the room signed it — for every response, not just
+   * the read.
+   *
+   * A PATCH or a delist answers with the same server-couriered body a GET does,
+   * so verifying the read alone left an owner shown, and acting on, a forged
+   * record until the next full read. One funnel means a mutation cannot be the
+   * unverified door.
+   */
+  const accept = useCallback(
+    async (record: BootstrapStub): Promise<void> => {
+      if (
+        record.signed_stub === null ||
+        record.stub_signature === null ||
+        !(await session.verifyDirectoryRecord(record.signed_stub, record.stub_signature))
+      ) {
+        setState({ kind: 'unverified' });
+        return;
+      }
+      setState({ kind: 'present', record });
+    },
+    [session],
+  );
+
   const read = useCallback(async (): Promise<void> => {
     if (roomServerId === undefined || token === undefined) {
       setState({ kind: 'absent' });
@@ -99,24 +123,12 @@ export function DirectoryRecordPanel({
     setBusy('refresh');
     setError(null);
     try {
-      const fetched = await fetchPrivateRoomBootstrap(roomServerId, token);
       // VERIFY before believing it. The server stores `signed_stub` verbatim and
       // cannot check it — it holds no room key — so the signature is worth
-      // exactly what the client's willingness to read it is worth. Nothing read
-      // it until now, which made both the room's signature and the server's
-      // refusal to let a PATCH change the signing identity decoration.
-      //
-      // Fail CLOSED: a record that does not verify is not shown at all, because
-      // the commitments in it are what a member would bootstrap from.
-      if (
-        fetched.signed_stub === null ||
-        fetched.stub_signature === null ||
-        !(await session.verifyDirectoryRecord(fetched.signed_stub, fetched.stub_signature))
-      ) {
-        setState({ kind: 'unverified' });
-        return;
-      }
-      setState({ kind: 'present', record: fetched });
+      // exactly what the client's willingness to read it is worth. Fail CLOSED:
+      // a record that does not verify is not shown at all, because the
+      // commitments in it are what a member would bootstrap from.
+      await accept(await fetchPrivateRoomBootstrap(roomServerId, token));
     } catch (err) {
       // A 404 is DECISIVE: §21.2 collapses unknown-room, wrong-token and
       // malformed-id into it, so with a capability in hand it means the record
@@ -139,7 +151,7 @@ export function DirectoryRecordPanel({
     } finally {
       setBusy(null);
     }
-  }, [roomServerId, token, t, session]);
+  }, [roomServerId, token, t, session, accept]);
 
   useEffect(() => {
     void read();
@@ -397,7 +409,7 @@ export function DirectoryRecordPanel({
                             displayDescription:
                               editing.description.trim() === '' ? null : editing.description.trim(),
                           });
-                          setState({ kind: 'present', record: next });
+                          await accept(next);
                           setEditing(null);
                           setStatus(
                             t('privateRoom.record.edited', 'Updated what Licio publishes.'),
@@ -451,7 +463,7 @@ export function DirectoryRecordPanel({
                       const next = await updatePrivateRoomStub(roomServerId ?? '', {
                         latestManifestCommitment: session.manifestCommitmentB64,
                       });
-                      setState({ kind: 'present', record: next });
+                      await accept(next);
                       setStatus(
                         t('privateRoom.record.pushed', 'Updated the record’s manifest commitment.'),
                       );
@@ -471,7 +483,7 @@ export function DirectoryRecordPanel({
                     onClick={() =>
                       void run('delist', async () => {
                         const next = await delistPrivateRoomStub(roomServerId ?? '');
-                        setState({ kind: 'present', record: next });
+                        await accept(next);
                         setStatus(
                           t(
                             'privateRoom.record.delisted',

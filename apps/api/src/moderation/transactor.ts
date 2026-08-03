@@ -113,6 +113,25 @@ export interface ModerationTx {
    *  row has to commit with it or there is no second chance to write one. */
   readonly appeals: ModerationAppealStore;
   /**
+   * The WS-S §21.4 directory DEMOTION, bound to this transaction.
+   *
+   * The only private-room write a moderation unit may make, and the only one it
+   * needs: §11.4 grants staff exactly one power over a P2P room, and this is it.
+   * It arrives from the composition root for the same reason `content` does —
+   * moderation does not reach into another domain to construct its store.
+   *
+   * It is here because ordering could not carry the guarantee alone. Writing the
+   * audit first refuses an unrecorded demotion, but leaves the opposite hole: a
+   * store failure after the append leaves a permanent record of a transition
+   * that never happened, and the compensating write is best-effort itself. With
+   * the demotion inside the unit, `audit` throwing takes it down and a store
+   * failure takes the record down — neither can land alone.
+   *
+   * Returns false when nothing matched, which is the raced case: the owner
+   * delisted first, so there was no listing for staff to remove.
+   */
+  delistListedRoom(roomServerId: string): Promise<boolean>;
+  /**
    * Append this unit's audit record, chained, inside this transaction.
    *
    * THROWS on failure, and that is the point: the state change has not committed yet, so

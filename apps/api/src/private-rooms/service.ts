@@ -379,53 +379,26 @@ export class PrivateRoomStubService {
   }
 
   /**
-   * §21.4 — demote a `listed` record to `unlisted` and drop its display fields.
+   * §21.4 — the OWNER demotes their own record: `listed → unlisted`, display
+   * fields dropped.
    *
-   * The creator may always delist their own record. PLATFORM STAFF may also
-   * delist ANY listed record, and that is not an oversight in the ownership
-   * check — §11.4 grants staff exactly one power over a P2P room, and this is
-   * it. A listed stub publishes a name, description and avatar to anyone with
-   * the id; if the creator will not remove abusive display metadata, nobody
-   * else could either, since no other delist path exists. Note the shape of the
-   * power: staff can stop the room ADVERTISING itself, and can do nothing to
-   * the room — no content, no membership, no keys, and the record stays
-   * resolvable for the members who already hold its token.
+   * Owner-only, and idempotent for them. The STAFF arm is not here: §11.4's
+   * single platform power over a P2P room has to commit with its audit record,
+   * so it runs inside the moderation unit through `delistListed` instead.
+   * Keeping a second, unaudited path in this service would be a way to exercise
+   * that power without the record, reachable by the next caller who passed a
+   * flag.
    */
-  async delist(
-    roomServerId: string,
-    accountId: string,
-    options: { readonly staff?: boolean } = {},
-  ): Promise<StubResult<BootstrapResponse & { readonly staff_action: boolean }>> {
+  async delist(roomServerId: string, accountId: string): Promise<StubResult<BootstrapResponse>> {
     const stub = await this.store.getByRoomId(roomServerId);
     if (!stub) return { ok: false, reason: 'not_found' };
-    const owner = stub.createdByAccountId === accountId;
-    if (!owner && options.staff !== true) return PrivateRoomStubService.#refuseNonOwner(stub);
-    // A STAFF caller may only act on a LISTED record.
-    //
-    // Delist is idempotent for the owner, which is right — but for staff that
-    // idempotence was a capability bypass: an admin who merely KNEW an
-    // unlisted `room_server_id` could call this and receive the full bootstrap
-    // projection (signed stub, hints, commitments) that §21.2 gates behind the
-    // blind token they do not hold. §11.4 gives staff power over the PUBLIC
-    // directory listing, not over the record. So a non-owner staff caller
-    // targeting an already-unlisted stub gets the same `not_found` an unknown
-    // room does — no oracle, no projection.
-    if (!owner && stub.directoryMode !== 'listed') return { ok: false, reason: 'not_found' };
-    // The staff arm's write is CONDITIONAL on the record still being listed, so
-    // the write itself decides whether staff authority was used.
-    //
-    // Reading the mode and then writing are two moments: the owner can delist in
-    // between, and the idempotent write would still succeed — attributing to
-    // staff a demotion the owner had already performed, in a tamper-evident
-    // trail. A conditional write that matches nothing answers `not_found`, which
-    // is what a non-owner already gets for a record that is not listed.
-    const next = await this.store.delist(roomServerId, { requireListed: !owner });
+    if (stub.createdByAccountId !== accountId) {
+      return PrivateRoomStubService.#refuseNonOwner(stub);
+    }
+    const next = await this.store.delist(roomServerId);
     if (!next) return { ok: false, reason: 'not_found' };
     this.#metrics.delisted += 1;
-    // Whether STAFF AUTHORITY was actually used — not whether the caller holds
-    // it. A creator who is also an admin takes the owner arm, and an audit
-    // saying staff acted against somebody else's record would be false.
-    return { ok: true, value: { ...this.#project(next), staff_action: !owner } };
+    return { ok: true, value: this.#project(next) };
   }
 
   /**
@@ -603,6 +576,23 @@ export class PrivateRoomStubService {
   async isPubliclyListed(roomServerId: string): Promise<boolean> {
     const stub = await this.store.getByRoomId(roomServerId);
     return stub?.directoryMode === 'listed';
+  }
+
+  /**
+   * The §21.4 demotion a MODERATION UNIT performs — conditional on the record
+   * still being listed, and carrying no ownership check.
+   *
+   * Authorization happened at the route (platform admin + per-session MFA); what
+   * this adds is the atomicity: it is called from inside the moderation
+   * transaction, so the audit append and the demotion commit together or not at
+   * all. Null when nothing matched, which is the raced case — the owner delisted
+   * first, so there was no listing for staff to remove.
+   */
+  async delistListed(roomServerId: string): Promise<BootstrapResponse | null> {
+    const next = await this.store.delist(roomServerId, { requireListed: true });
+    if (!next) return null;
+    this.#metrics.delisted += 1;
+    return this.#project(next);
   }
 
   /** A snapshot of the aggregate-only counters (no room identity). */

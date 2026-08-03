@@ -86,6 +86,9 @@ import type { ModerationTransactor, ModerationTx } from './transactor.js';
 
 /** Binds the enforcement writes to one executor (see `ModerationTx.content`). */
 type TxEnforcement = (exec: Db) => ModerationTx['content'];
+/** The §21.4 directory demotion, bound to a transaction — supplied by the
+ *  composition root, which is the only place that knows both domains. */
+type TxDirectory = (exec: Db) => ModerationTx['delistListedRoom'];
 
 // The base client OR an open transaction, the same seam the forum/ingestion adapters
 // take.  Without it these stores can only ever run standalone — which is what kept the
@@ -1877,11 +1880,18 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
   readonly #db: Db;
   readonly #auditChain: () => AuditChainDeps;
   readonly #enforcementOver: TxEnforcement;
+  readonly #directoryOver: TxDirectory;
 
-  constructor(db: Db, auditChain: () => AuditChainDeps, enforcementOver: TxEnforcement) {
+  constructor(
+    db: Db,
+    auditChain: () => AuditChainDeps,
+    enforcementOver: TxEnforcement,
+    directoryOver: TxDirectory,
+  ) {
     this.#db = db;
     this.#auditChain = auditChain;
     this.#enforcementOver = enforcementOver;
+    this.#directoryOver = directoryOver;
   }
 
   async run<T>(work: (tx: ModerationTx) => Promise<T>): Promise<T> {
@@ -1901,6 +1911,7 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
         // Supplied by the composition root: moderation declares that it needs the
         // enforcement bound to THIS handle, and never constructs another domain's store.
         content: this.#enforcementOver(tx),
+        delistListedRoom: this.#directoryOver(tx),
         audit: async (input) => {
           // SERIALISE the chain append, rather than colliding and retrying.
           //
@@ -1941,9 +1952,10 @@ export function createDrizzleModerationStores(
   db: Db,
   auditChain: () => AuditChainDeps,
   enforcementOver: TxEnforcement,
+  directoryOver: TxDirectory,
 ): DrizzleModerationStores {
   return {
-    transactor: new DrizzleModerationTransactor(db, auditChain, enforcementOver),
+    transactor: new DrizzleModerationTransactor(db, auditChain, enforcementOver, directoryOver),
     cases: new DrizzleModerationCaseStore(db),
     reports: new DrizzleModerationReportStore(db),
     actions: new DrizzleModerationActionStore(db),

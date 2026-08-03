@@ -848,6 +848,13 @@
       "when": 1783728000045,
       "tag": "0121_private_stub_directory_index",
       "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1783728000046,
+      "tag": "0122_aggregation_window_active_index",
+      "breakpoints": true
     }
   ]
 }
