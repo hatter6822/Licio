@@ -101,16 +101,17 @@ export function DirectoryRecordPanel({
    * unverified door.
    */
   const accept = useCallback(
-    async (record: BootstrapStub): Promise<void> => {
+    async (record: BootstrapStub): Promise<boolean> => {
       if (
         record.signed_stub === null ||
         record.stub_signature === null ||
         !(await session.verifyDirectoryRecord(record.signed_stub, record.stub_signature))
       ) {
         setState({ kind: 'unverified' });
-        return;
+        return false;
       }
       setState({ kind: 'present', record });
+      return true;
     },
     [session],
   );
@@ -270,6 +271,30 @@ export function DirectoryRecordPanel({
                   onClick={() =>
                     void run('register', async () => {
                       const payload = await session.directoryStubPayload();
+                      // ADOPT BEFORE CREATING. An earlier attempt can have
+                      // committed with both its response and its reconciliation
+                      // lost, and nothing about creation is keyed on the room —
+                      // so a retry that succeeds mints a SECOND record and
+                      // orphans the first, publicly listed if that was its mode.
+                      // Asking first makes the retry idempotent in the only way
+                      // available: by finding what is already there.
+                      const existing = await findMyPrivateRoomStub({
+                        roomPublicKey: payload.roomPublicKey,
+                      });
+                      if (existing !== null) {
+                        await session.attachDirectoryStub({
+                          roomServerId: existing.room_server_id,
+                          bootstrapBlindId: payload.bootstrapBlindId,
+                        });
+                        setStatus(
+                          t(
+                            'privateRoom.record.recovered',
+                            'Licio already held a record for this room, and this device is now using it.',
+                          ),
+                        );
+                        await read();
+                        return;
+                      }
                       let created: Awaited<ReturnType<typeof createPrivateRoomStub>> | null = null;
                       try {
                         created = await createPrivateRoomStub({
@@ -409,7 +434,10 @@ export function DirectoryRecordPanel({
                             displayDescription:
                               editing.description.trim() === '' ? null : editing.description.trim(),
                           });
-                          await accept(next);
+                          // A response that does not verify is not a success:
+                          // announcing one beside the forged-record warning
+                          // would have the user believe the change landed.
+                          if (!(await accept(next))) return;
                           setEditing(null);
                           setStatus(
                             t('privateRoom.record.edited', 'Updated what Licio publishes.'),
@@ -463,7 +491,7 @@ export function DirectoryRecordPanel({
                       const next = await updatePrivateRoomStub(roomServerId ?? '', {
                         latestManifestCommitment: session.manifestCommitmentB64,
                       });
-                      await accept(next);
+                      if (!(await accept(next))) return;
                       setStatus(
                         t('privateRoom.record.pushed', 'Updated the record’s manifest commitment.'),
                       );
@@ -483,7 +511,7 @@ export function DirectoryRecordPanel({
                     onClick={() =>
                       void run('delist', async () => {
                         const next = await delistPrivateRoomStub(roomServerId ?? '');
-                        await accept(next);
+                        if (!(await accept(next))) return;
                         setStatus(
                           t(
                             'privateRoom.record.delisted',

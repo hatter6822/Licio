@@ -525,6 +525,10 @@ describe('§8.2 bootstrap hints — pointers, not a value channel', () => {
       { kind: 'member_relay', value: 'wss://relay.example/?payload=some-room-content' },
       { kind: 'member_relay', value: 'wss://user:secret@relay.example/' },
       { kind: 'member_relay', value: 'file:///etc/passwd' },
+      // The parts a "no query, no fragment" rule leaves free: an arbitrary path
+      // carries a payload just as well.
+      { kind: 'member_relay', value: `https://relay.example/${'A'.repeat(60)}` },
+      { kind: 'member_relay', value: 'https://relay.example/a/b' },
     ]) {
       expect(
         privateRoomCreateStubRequestSchema.safeParse(rawRequest({ bootstrap_hints: [hint] }))
@@ -552,8 +556,15 @@ describe('§8.2 bootstrap hints — pointers, not a value channel', () => {
     for (const hint of [
       { kind: 'licio_blind', value: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A' },
       { kind: 'manual', value: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8' },
-      { kind: 'member_relay', value: 'wss://relay.example/p2p' },
-      { kind: 'member_relay', value: 'https://relay.example' },
+      { kind: 'member_relay', value: 'wss://relay.example' },
+      { kind: 'member_relay', value: 'https://relay.example/' },
+      { kind: 'member_relay', value: 'wss://relay.example:8443' },
+      // At most ONE path segment, and it is a blind id — the only pointer a
+      // relay endpoint needs to carry.
+      {
+        kind: 'member_relay',
+        value: 'wss://relay.example/PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A',
+      },
     ]) {
       expect(
         privateRoomCreateStubRequestSchema.safeParse(rawRequest({ bootstrap_hints: [hint] }))

@@ -18,6 +18,7 @@ import { useCallback, useEffect, useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { copyText } from '../../../lib/clipboard.js';
 import { type DirectoryEntry, listPrivateRoomDirectory } from '../../../lib/private-rooms-api.js';
+import { ReportSheet } from '../../safety/ReportSheet.js';
 import { Button } from '../../ui/Button/index.js';
 import { Card } from '../../ui/Card/index.js';
 import { EmptyState } from '../../ui/EmptyState/index.js';
@@ -30,6 +31,8 @@ export function PrivateRoomDirectory(): React.ReactElement {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  /** The listing a report sheet is open for, if any. */
+  const [reporting, setReporting] = useState<string | null>(null);
 
   const load = useCallback(
     async (after?: string) => {
@@ -107,7 +110,7 @@ export function PrivateRoomDirectory(): React.ReactElement {
                   <p className="text-ink-muted text-xs">{entry.display_description}</p>
                 ) : null}
                 <p className="break-all font-mono text-ink-muted text-xs">{entry.room_server_id}</p>
-                <div>
+                <div className="flex flex-wrap gap-2">
                   <Button
                     type="button"
                     variant="secondary"
@@ -117,12 +120,35 @@ export function PrivateRoomDirectory(): React.ReactElement {
                       ? t('privateRoom.directory.copied', 'Room id copied')
                       : t('privateRoom.directory.copy', 'Copy room id to request an invite')}
                   </Button>
+                  {/* REPORT, from the one surface where the listing appears.
+                      Staff delisting an abusive published name is the remedy
+                      §11.4 specifies, and the server accepts a report against a
+                      publicly listed room — but nothing in the client sent one,
+                      so the remedy had a route and no door. What is reportable
+                      here is the LISTING: the name and description on this
+                      card, which is all anyone outside the room can see. */}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setReporting(entry.room_server_id)}
+                  >
+                    {t('privateRoom.directory.report', 'Report this listing')}
+                  </Button>
                 </div>
               </div>
             </Card>
           </li>
         ))}
       </ul>
+
+      {reporting !== null ? (
+        <ReportSheet
+          open
+          onClose={() => setReporting(null)}
+          targetType="room"
+          targetId={reporting}
+        />
+      ) : null}
 
       {cursor !== null ? (
         <div>

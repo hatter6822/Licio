@@ -100,10 +100,28 @@ export type RendezvousPolicy = z.infer<typeof rendezvousPolicySchema>;
  */
 const blindHintValueSchema = base64UrlBytes(32, 'blind id or exchange code');
 
+/** A DNS host: bounded labels, no userinfo, nothing free-form. */
+const RELAY_HOST =
+  /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
+/** At most ONE path segment, and it is a 32-byte blind id — the only pointer a
+ *  relay endpoint needs to carry. */
+const RELAY_PATH = /^\/?$|^\/[A-Za-z0-9_-]{43}$/;
+
+/**
+ * A relay endpoint, as a GRAMMAR rather than as "a URL without a query".
+ *
+ * Refusing the query and fragment left the parts nobody looks at: a payload
+ * rides `https://relay.example/<hundreds of base64 characters>` just as well,
+ * and the value is persisted and re-served verbatim. So every component is
+ * constrained — scheme, a DNS-shaped host, an optional port, and a path that is
+ * either empty or a single 32-byte blind id. A hostname remains a narrow
+ * channel by necessity (a relay has to be namable), but it must resolve to be
+ * worth anything, which arbitrary base64 in a path does not.
+ */
 const relayHintValueSchema = z
   .string()
   .min(1)
-  .max(512)
+  .max(128)
   .refine((value) => {
     let url: URL;
     try {
@@ -111,14 +129,12 @@ const relayHintValueSchema = z
     } catch {
       return false;
     }
-    return (
-      (url.protocol === 'https:' || url.protocol === 'wss:') &&
-      url.username === '' &&
-      url.password === '' &&
-      url.search === '' &&
-      url.hash === ''
-    );
-  }, 'expected an https:// or wss:// endpoint with no credentials, query or fragment');
+    if (url.protocol !== 'https:' && url.protocol !== 'wss:') return false;
+    if (url.username !== '' || url.password !== '') return false;
+    if (url.search !== '' || url.hash !== '') return false;
+    if (url.port !== '' && !/^[0-9]{1,5}$/.test(url.port)) return false;
+    return RELAY_HOST.test(url.hostname) && RELAY_PATH.test(url.pathname);
+  }, 'expected https:// or wss:// with a DNS host and at most one blind-id path segment');
 
 const bootstrapHintSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('licio_blind'), value: blindHintValueSchema }).strict(),
@@ -363,7 +379,7 @@ export interface StoredPrivateRoomStub {
   readonly bootstrapHints: readonly BootstrapHint[];
   readonly signedStub: Record<string, unknown>;
   readonly stubSignature: string;
-  /** §21.2 — NEVER projected; compared in constant time against `?token=`. */
+  /** §21.2 — NEVER projected; compared in constant time against the `X-Licio-Bootstrap-Token` header. */
   readonly bootstrapBlindId: string;
   readonly createdByAccountId: string | null;
   readonly createdAt: string;

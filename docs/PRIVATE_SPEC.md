@@ -2066,7 +2066,7 @@ is a harvest: one anonymous GET per room yields a token that keeps resolving the
 record after its creator delists it, which is the precise state delisting
 exists to prevent. It is therefore its OWN column (migration `0120`), named in
 the §8.2 allowlist, absent from every response type, and compared in constant
-time against the `?token=` a reader presents. Signing it bought nothing —
+time against the the `X-Licio-Bootstrap-Token` header a reader presents. Signing it bought nothing —
 the signature is verified against `room_public_key`, which the signed body
 itself carries, so it means something only to a reader who already knows the
 room's key independently, i.e. a member, who holds the token. What the
@@ -2248,9 +2248,14 @@ verbatim through a column §8.2 permits precisely because a pointer is not
 content. Each kind now names what it can be — `licio_blind` and `manual` are
 32-byte base64url (a blind id, an out-of-band exchange code; NOT prose, and not
 a bounded string either: an HMAC output has one size, so anything else is a
-payload), and `member_relay` is an `https://` or `wss://` endpoint with no
-credentials, query or fragment, which is where a payload would otherwise ride a
-legitimate-looking URL.
+payload), and `member_relay` is a GRAMMAR rather than "a URL without a
+query": `https://` or `wss://`, a DNS-shaped host, an optional numeric port, and
+a path that is either empty or a single 32-byte blind id. Refusing only the
+query and fragment leaves the parts nobody looks at — a payload rides
+`https://relay.example/<hundreds of base64 characters>` just as well — and the
+value is persisted and re-served verbatim. A hostname remains a narrow channel
+by necessity, since a relay has to be namable, but it must RESOLVE to be worth
+anything, which arbitrary base64 in a path does not.
 
 The same rule governs the commitment fields. `room_public_key`,
 `manifest_key_commitment`, `bootstrap_blind_id` and `latest_manifest_commitment`

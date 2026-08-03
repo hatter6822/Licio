@@ -14,6 +14,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
+import { ToastProvider } from '../../ui/Toast/index.js';
 import { PrivateRoomDirectory } from './PrivateRoomDirectory.js';
 
 function page(
@@ -107,6 +108,23 @@ describe('PrivateRoomDirectory', () => {
     const button = screen.getByRole('button', { name: /copy room id/i });
     await userEvent.click(button);
     expect(screen.queryByRole('button', { name: /room id copied/i })).toBeNull();
+  });
+
+  it('offers a report on the surface where the listing appears', async () => {
+    // Staff delisting an abusive published name is the remedy §11.4 specifies,
+    // and the server accepts a report against a publicly listed room — but
+    // nothing in the client sent one, so the remedy had a route and no door.
+    mockPages(page([{ id: 'r1', name: 'Abusive name' }]));
+    // The sheet raises a toast on submit, so it needs the provider its other
+    // callers already render under.
+    render(
+      <ToastProvider>
+        <PrivateRoomDirectory />
+      </ToastProvider>,
+    );
+    await screen.findByText('Abusive name');
+    await userEvent.click(screen.getByRole('button', { name: /report this listing/i }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 
   it('has no accessibility violations', async () => {

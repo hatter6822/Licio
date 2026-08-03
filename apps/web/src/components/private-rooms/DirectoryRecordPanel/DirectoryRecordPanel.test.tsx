@@ -154,6 +154,10 @@ describe('DirectoryRecordPanel', () => {
     // Registration used to live only in the creation wizard, so a room whose
     // record was removed — or a `detached` room that never had one — could
     // never get one again.
+    // `/mine` answers "nothing owned" — registration ASKS before it creates, so
+    // a retry after a lost response adopts the existing record instead of
+    // minting a second one.
+    ownsRecord = false;
     mockApi(() => ({
       room_server_id: ROOM_SERVER_ID,
       stub_id: STUB.stubId,
@@ -205,6 +209,28 @@ describe('DirectoryRecordPanel', () => {
     // Fail CLOSED: nothing from the record is displayed, since its commitments
     // are what a member would bootstrap from.
     expect(screen.queryByText('Neighbourhood watch')).toBeNull();
+  });
+
+  it('ADOPTS an existing record instead of minting a second one', async () => {
+    // An earlier attempt can have committed with both its response and its
+    // reconciliation lost. Nothing about creation is keyed on the room, so a
+    // retry that just POSTs again orphans the first record — publicly listed, if
+    // that was its mode.
+    let posted = 0;
+    mockApi((url, init) => {
+      if (init?.method === 'POST' && url.includes('/v1/private-rooms')) posted += 1;
+      return {
+        room_server_id: ROOM_SERVER_ID,
+        stub_id: STUB.stubId,
+        bootstrap_endpoints: [],
+        created_at: '2026-08-02T00:00:00.000Z',
+      };
+    });
+    render(<DirectoryRecordPanel session={sessionDouble(undefined)} />);
+    await screen.findByText(/Licio holds no record of this room/i);
+    await userEvent.click(screen.getByRole('button', { name: /store a bootstrap record/i }));
+    expect(await screen.findByRole('status')).toHaveTextContent(/already held a record/i);
+    expect(posted).toBe(0);
   });
 
   it('does not offer registration on a device that joined later', async () => {
