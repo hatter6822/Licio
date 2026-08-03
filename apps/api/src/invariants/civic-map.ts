@@ -83,11 +83,15 @@ export async function buildCivicMap(
    *
    * The map is readable by any platform integrity steward, while the bridge
    * endpoint requires a steward role in the thread's own room (or platform
-   * admin) — so publishing every thread id offered controls that
-   * deterministically 404. Absent ⇒ no thread is actionable, which is the
+   * admin) AND a SCOI baseline for the story — so publishing every thread id
+   * offered controls that deterministically 404 or 422. Absent ⇒ no thread is actionable, which is the
    * fail-closed answer for a caller whose authority cannot be resolved.
    */
-  canBridge: (threadId: string, roomId: string | null) => Promise<boolean> = async () => false,
+  canBridge: (
+    threadId: string,
+    roomId: string | null,
+    storyId: string,
+  ) => Promise<boolean> = async () => false,
 ): Promise<CivicMapResponse | null> {
   const {
     nodes,
@@ -129,7 +133,9 @@ export async function buildCivicMap(
     const pending = (async () => {
       const threadId = threadByStory.get(storyId)?.threadId;
       if (threadId === undefined) return null;
-      return (await canBridge(threadId, byId.get(storyId)?.roomId ?? null)) ? threadId : null;
+      return (await canBridge(threadId, byId.get(storyId)?.roomId ?? null, storyId))
+        ? threadId
+        : null;
     })();
     authorized.set(storyId, pending);
     return pending;

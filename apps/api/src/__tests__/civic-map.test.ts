@@ -172,6 +172,34 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(byDefault?.basins.every((basin) => basin.thread_id === null)).toBe(true);
   });
 
+  it('passes the STORY to the authority resolver, not only the thread', async () => {
+    // The bridge endpoint needs a SCOI baseline, which is a property of the
+    // story rather than the thread — so a resolver that could only see the
+    // thread could not check it, and every published target would 422.
+    const seen: Array<{ threadId: string; roomId: string | null; storyId: string }> = [];
+    const rows = [
+      {
+        storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
+        title: 'A',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 9,
+      },
+      {
+        storyId: 'bbbbbbbb-2222-4222-8222-222222222222',
+        title: 'B',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 4,
+      },
+    ];
+    const { events, ingestion } = services(rows);
+    await buildCivicMap(events, ingestion, NOW, async (threadId, roomId, storyId) => {
+      seen.push({ threadId, roomId, storyId });
+      return true;
+    });
+    expect(seen.length).toBeGreaterThan(0);
+    for (const call of seen) expect(call.threadId).toBe(`thread-${call.storyId}`);
+  });
+
   it('bridges on a CONNECTING story, not on a basin peak', async () => {
     // Basins meet through their lower-level members: a peak about X joins a
     // peak about Z through an X/Y story, and the join is about Y. Opening on a

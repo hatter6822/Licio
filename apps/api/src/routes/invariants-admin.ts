@@ -467,12 +467,24 @@ export function createInvariantsAdminRoutes(
           resolveEvents(),
           resolveIngestion(),
           Date.now(),
-          async (_threadId, roomId) => {
+          async (threadId, roomId, storyId) => {
             if (roomId === null) return false;
             const room = await forum.rooms.getById(roomId);
             if (room === null || room.storageMode !== 'server') return false;
-            if (auth.roles.includes('admin')) return true;
-            return (await forum.rooms.stewardRolesFor(roomId, auth.userId)).length > 0;
+            const authorized = auth.roles.includes('admin')
+              ? true
+              : (await forum.rooms.stewardRolesFor(roomId, auth.userId)).length > 0;
+            if (!authorized) return false;
+            // …AND a SCOI baseline must exist. The bridge POST refuses with
+            // `422 no_scoi` when the conversation has interpretations from fewer
+            // than two lenses, so a target published without one is a control
+            // that fails every time it is used. `void threadId` — the baseline
+            // is a property of the STORY the thread belongs to.
+            void threadId;
+            const baseline =
+              (await latestScoiFor(resolveEvents(), storyId)) ??
+              (await recomputeScoiFor(resolveInvariants(), resolveEvents(), storyId));
+            return baseline !== null;
           },
         );
         return c.json({ landscape: map }, 200);

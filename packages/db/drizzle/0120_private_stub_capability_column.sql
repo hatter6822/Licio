@@ -59,3 +59,21 @@ DELETE FROM "rooms"
 -- guarantee §21.4's "delisting keeps the record resolvable" rests on.
 ALTER TABLE "private_room_stubs"
   ALTER COLUMN "bootstrap_blind_id" SET NOT NULL;
+--> statement-breakpoint
+
+-- TRUNCATE preserved timestamps to milliseconds, which is the resolution the
+-- cursors carry.
+--
+-- Postgres stores microseconds and `defaultNow()` produced them; the directory
+-- and owner keyset cursors serialize through `Date.toISOString()`, which is
+-- millisecond-resolution. A cursor built from a row at `…001500` compares as
+-- `…001000`, so a following row in the same millisecond is neither `<` nor `=`
+-- and is skipped — silently, and in both the paged `/mine` read and the DSAR
+-- export that iterates it, which is the one place a skipped row is a compliance
+-- failure rather than a display bug. New inserts already write an explicit
+-- millisecond value; this brings the preserved rows into the same resolution.
+UPDATE "private_room_stubs"
+  SET "created_at" = date_trunc('milliseconds', "created_at"),
+      "updated_at" = date_trunc('milliseconds', "updated_at")
+  WHERE "created_at" <> date_trunc('milliseconds', "created_at")
+     OR "updated_at" <> date_trunc('milliseconds', "updated_at");

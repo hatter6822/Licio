@@ -497,15 +497,20 @@ export function createPrivateRoomsRoutes() {
           // queue, with a case-scoped history that does not mention the
           // enforcement. The case transition, the demotion and the audit row are
           // one fact about one action, so they commit together.
+          // Only a case ABOUT THIS ROOM — and the VALIDATED id is the only one
+          // used afterwards. Declining to resolve a mismatched case while still
+          // stamping the audit row with its id would print an enforcement
+          // against another room into that case's history, permanently, while
+          // the intended case stayed open.
+          let matchedCase: string | undefined;
           if (caseId !== undefined) {
-            // Only a case ABOUT THIS ROOM. A stale or forged id for another
-            // target would silently drop someone else's report from the queue.
             const theCase = await tx.cases.getById(caseId);
             if (
               theCase !== null &&
               theCase.targetType === 'room' &&
               theCase.targetId === params.data.roomServerId
             ) {
+              matchedCase = caseId;
               await tx.cases.update(caseId, { status: 'resolved', resolvedActionId: null });
             }
           }
@@ -520,7 +525,7 @@ export function createPrivateRoomsRoutes() {
             priorState: 'listed',
             nextState: 'unlisted',
             reversible: false,
-            ...(caseId !== undefined ? { caseId } : {}),
+            ...(matchedCase !== undefined ? { caseId: matchedCase } : {}),
             notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
           });
           return true;

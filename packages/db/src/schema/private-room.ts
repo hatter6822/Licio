@@ -92,7 +92,10 @@ export const privateRoomStubs = pgTable(
     /**
      * §21.2 — the invite-derived capability that gates an `unlisted` bootstrap
      * read.  NEVER projected: it is compared, in constant time, against the
-     * `?token=` a reader presents, and appears in no response type.
+     * `X-Licio-Bootstrap-Token` HEADER a reader presents, and appears in no
+     * response type.  A header rather than a query parameter because a URL is
+     * written down in proxy logs, browser history and the client's own dev
+     * console, and this value does not rotate.
      *
      * NOT NULL because a stub without one is unresolvable for its members the
      * moment it is delisted — the §21.4 guarantee that delisting keeps the

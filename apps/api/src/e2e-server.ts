@@ -57,6 +57,7 @@ import {
   registerIngestionConsumers,
   setIngestionServices,
 } from './ingestion/services.js';
+import { InMemoryStoryStore } from './ingestion/stores.js';
 import {
   createInMemoryInvariantServices,
   registerInvariantConsumers,
@@ -82,6 +83,8 @@ import { createLogger } from './lib/logger.js';
 import { notFoundHandler } from './middleware/error-handler.js';
 import { RendezvousService, setRendezvousService } from './private-rendezvous/service.js';
 import { InMemoryRendezvousStore } from './private-rendezvous/stores.js';
+import { PrivateRoomStubService, setPrivateRoomStubService } from './private-rooms/service.js';
+import { InMemoryPrivateRoomStubStore } from './private-rooms/stores.js';
 import {
   createInMemoryRankingServices,
   refreshStoryFeatures,
@@ -179,6 +182,22 @@ forumServices.agentModerator = createRoomAgentModerator({
   }),
 });
 setForumServices(forumServices);
+
+// WS-H.7.4 — which rooms the Civic Map's landscape may hydrate a story from.
+//
+// `getPublicByIds` requires the owning ROOM to be publicly readable, because a
+// `public` story can sit in a PRIVATE room where the ordinary read bar needs
+// membership. The in-memory story store does not own rooms, so the binding
+// arrives from the composition root — and this is one, exactly as `index.ts` is.
+// Its default is fail-closed, so without this the landscape answers `null` for a
+// harness that does contain public stories, and the BFF specs cannot exercise
+// the surface they serve.
+if (ingestionServices.stories instanceof InMemoryStoryStore) {
+  ingestionServices.stories.publicRoom = async (roomId) => {
+    const room = await forumServices.rooms.getById(roomId);
+    return room !== null && room.visibility === 'public' && room.storageMode === 'server';
+  };
+}
 registerForumConsumers(eventServices, ingestionServices, forumServices);
 
 const invariantServices = createInMemoryInvariantServices(
@@ -240,6 +259,12 @@ forumServices.debateJudge = buildDebateJudgeRunner(forumServices.now);
 // (500s on the first announce).  Overriding here keeps the rendezvous truly in-memory, like every
 // other harness service, so the two-browser private-room E2E signals over a working endpoint.
 setRendezvousService(new RendezvousService(new InMemoryRendezvousStore()));
+
+// WS-S §21 — the SAME hazard for the directory-stub service: `getPrivateRoomStubService()`
+// binds the Drizzle store whenever `DATABASE_URL` is set, and this harness always sets a dummy
+// one, so the first directory GET or registration POST would 500 against a database that does
+// not exist.  Force the in-memory adapter, like every other harness service.
+setPrivateRoomStubService(new PrivateRoomStubService(new InMemoryPrivateRoomStubStore()));
 
 // WS-R.12 — same dummy-DATABASE_URL hazard for the LCAP ingestion server: `getLcapIngestServer()`
 // would otherwise bind the Drizzle store and 500 on the service worker's background C0-sync `/pulse`.
