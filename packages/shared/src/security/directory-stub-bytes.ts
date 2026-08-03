@@ -108,3 +108,53 @@ export function isSignedDirectoryStubBody(
     typeof body['manifest_key_commitment'] === 'string'
   );
 }
+
+/**
+ * The bytes a REGISTRATION proof covers — the stub body's identity plus the
+ * account claiming it.
+ *
+ * The stub signature alone proves nothing about who is registering: it is
+ * static, and the pair it belongs to is SERVED — publicly for a `listed` record,
+ * and to any invitee for an unlisted one. So an observer could replay it after
+ * the owner removed their record, claim the room-key uniqueness under their own
+ * account, and publish whatever display metadata they liked.
+ *
+ * Binding the ACCOUNT into a separate proof closes that without a round trip and
+ * without publishing anything: the proof is verified and discarded, never
+ * stored and never served, so replaying it under a different account fails and
+ * the creator's account id stays out of the public body.
+ *
+ * The account id is the SERVER's — taken from the session, never from the
+ * request — so a caller cannot sign for someone else's account.
+ */
+export interface DirectoryRegistrationProofBody {
+  readonly room_public_key: string;
+  readonly manifest_key_commitment: string;
+  readonly account_id: string;
+}
+
+export function canonicalRegistrationProofBytes(body: DirectoryRegistrationProofBody): Uint8Array {
+  const entries = (
+    [
+      ['schema', 'licio.private.directory_registration.v1'],
+      ['account_id', body.account_id],
+      ['room_public_key', body.room_public_key],
+      ['manifest_key_commitment', body.manifest_key_commitment],
+    ] as const
+  ).map(([key, value]) => ({ key: text(key), value: text(value) }));
+  entries.sort((a, b) => compareBytes(a.key, b.key));
+
+  const head = argument(5, entries.length);
+  let size = head.length;
+  for (const entry of entries) size += entry.key.length + entry.value.length;
+  const out = new Uint8Array(size);
+  out.set(head, 0);
+  let at = head.length;
+  for (const entry of entries) {
+    out.set(entry.key, at);
+    at += entry.key.length;
+    out.set(entry.value, at);
+    at += entry.value.length;
+  }
+  return out;
+}

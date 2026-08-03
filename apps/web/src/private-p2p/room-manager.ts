@@ -24,6 +24,7 @@ import type {
   RoomReducerState,
   SafetyNumber,
 } from '@licio/private-p2p';
+import { canonicalRegistrationProofBytes } from '@licio/shared';
 import type { StoredDirectoryStub } from './session-store.js';
 
 /**
@@ -924,12 +925,15 @@ export class PrivateRoomSession {
    * the room.  Rotating it would break every outstanding invite to protect
    * information the ex-member already has.
    */
-  async directoryStubPayload(): Promise<{
+  async directoryStubPayload(accountId?: string): Promise<{
     readonly roomPublicKey: string;
     readonly manifestKeyCommitment: string;
     readonly signedStub: Record<string, unknown>;
     readonly stubSignature: string;
     readonly bootstrapBlindId: string;
+    /** Present when an `accountId` was given — registration needs it, and the
+     *  invite path (which only reads the capability) does not. */
+    readonly registrationProof?: string;
   }> {
     // The GENESIS epoch specifically, found by number rather than by position.
     //
@@ -981,7 +985,34 @@ export class PrivateRoomSession {
     const stubSignature = this.p2p.toBase64Url(
       await this.p2p.signEd25519(this.session.signingPrivateKey, this.p2p.canonical(signedStub)),
     );
-    return { roomPublicKey, manifestKeyCommitment, signedStub, stubSignature, bootstrapBlindId };
+    // …and a proof of CURRENT possession, bound to the account registering.
+    //
+    // The signature above covers a body that is SERVED — publicly for a listed
+    // record, to every invitee for an unlisted one — so replaying it says only
+    // that the replayer has seen a record. This one covers the account too, is
+    // never stored and never served, and is what stops an observer claiming the
+    // room's key after the owner removes their record.
+    const registrationProof =
+      accountId === undefined
+        ? undefined
+        : this.p2p.toBase64Url(
+            await this.p2p.signEd25519(
+              this.session.signingPrivateKey,
+              canonicalRegistrationProofBytes({
+                room_public_key: roomPublicKey,
+                manifest_key_commitment: manifestKeyCommitment,
+                account_id: accountId,
+              }),
+            ),
+          );
+    return {
+      roomPublicKey,
+      manifestKeyCommitment,
+      signedStub,
+      stubSignature,
+      bootstrapBlindId,
+      ...(registrationProof === undefined ? {} : { registrationProof }),
+    };
   }
 
   /**

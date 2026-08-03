@@ -103,6 +103,8 @@ export interface CreateStubRequest {
    *  not sent separately — two copies of one commitment can disagree. */
   readonly signedStub: Record<string, unknown>;
   readonly stubSignature: string;
+  /** Ed25519 by the room key over `(room key, commitment, account)` — never stored. */
+  readonly registrationProof: string;
   /** §21.2 — the capability, sent beside the signed body rather than inside it.
    *  The server stores it in a column it never projects. */
   readonly bootstrapBlindId: string;
@@ -128,6 +130,10 @@ export async function createPrivateRoomStub(
       ...(request.bootstrapHints !== undefined ? { bootstrap_hints: request.bootstrapHints } : {}),
       signed_stub: request.signedStub,
       stub_signature: request.stubSignature,
+      // Proof of CURRENT possession, bound to the signed-in account: the stub
+      // signature is static and public, so replaying it proves only that the
+      // replayer saw a record.
+      registration_proof: request.registrationProof,
       bootstrap_blind_id: request.bootstrapBlindId,
     }),
   });

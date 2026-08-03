@@ -326,7 +326,12 @@ export function DirectoryRecordPanel({
                   disabled={busy !== null}
                   onClick={() =>
                     void run('register', async () => {
-                      const payload = await session.directoryStubPayload();
+                      // Bound to the ACCOUNT: a published pair replayed by
+                      // someone else proves nothing.
+                      const payload = await session.directoryStubPayload(accountId ?? undefined);
+                      if (payload.registrationProof === undefined) {
+                        throw new Error('registration requires a signed-in account');
+                      }
                       // ADOPT BEFORE CREATING. An earlier attempt can have
                       // committed with both its response and its reconciliation
                       // lost, and nothing about creation is keyed on the room —
@@ -358,6 +363,7 @@ export function DirectoryRecordPanel({
                           rendezvousPolicy: 'licio_blind',
                           signedStub: payload.signedStub,
                           stubSignature: payload.stubSignature,
+                          registrationProof: payload.registrationProof,
                           bootstrapBlindId: payload.bootstrapBlindId,
                         });
                         await session.attachDirectoryStub({

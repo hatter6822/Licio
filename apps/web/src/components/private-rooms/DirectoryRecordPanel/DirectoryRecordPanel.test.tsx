@@ -80,6 +80,7 @@ function sessionDouble(
       stubSignature:
         'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
       bootstrapBlindId: TOKEN,
+      registrationProof: 'cmVnaXN0cmF0aW9uLXByb29m',
     }),
   } as unknown as PrivateRoomSession;
 }

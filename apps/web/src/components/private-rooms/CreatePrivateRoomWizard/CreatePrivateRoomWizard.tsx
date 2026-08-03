@@ -107,6 +107,8 @@ export function CreatePrivateRoomWizard({
   // who cannot register one, `detached` is not a weaker choice, it is the only
   // true one.
   const signedIn = useAuthStore((state) => state.status === 'authenticated');
+  /** The account the record is registered UNDER — the proof is bound to it. */
+  const accountId = useAuthStore((state) => state.user?.id ?? null);
   /**
    * A restricted account may not PUBLISH, so `listed` is not offered.
    *
@@ -201,7 +203,12 @@ export function CreatePrivateRoomWizard({
         /** Did a request actually go out? Nothing to reconcile if it did not. */
         let posted = false;
         try {
-          const payload = await session.directoryStubPayload();
+          // The ACCOUNT registering: the server binds the proof to it, so a
+          // published pair replayed by anyone else is useless.
+          const payload = await session.directoryStubPayload(accountId ?? undefined);
+          if (payload.registrationProof === undefined) {
+            throw new Error('registration requires a signed-in account');
+          }
           posted = true;
           created = await createPrivateRoomStub({
             directoryMode: directory,
@@ -212,6 +219,7 @@ export function CreatePrivateRoomWizard({
             rendezvousPolicy: 'licio_blind',
             signedStub: payload.signedStub,
             stubSignature: payload.stubSignature,
+            registrationProof: payload.registrationProof,
             bootstrapBlindId: payload.bootstrapBlindId,
           });
           // PERSIST the server-minted id. It is the only handle for every later

@@ -23,7 +23,11 @@
 // caller might read as success.
 
 import { webcrypto } from 'node:crypto';
-import { canonicalDirectoryStubBytes, isSignedDirectoryStubBody } from '@licio/shared';
+import {
+  canonicalDirectoryStubBytes,
+  canonicalRegistrationProofBytes,
+  isSignedDirectoryStubBody,
+} from '@licio/shared';
 
 const ED25519 = { name: 'Ed25519' } as const;
 const ED25519_PUBLIC_KEY_BYTES = 32;
@@ -56,6 +60,43 @@ function fromBase64Url(value: string): Uint8Array<ArrayBuffer> | null {
  * is not verifiable HERE — which is why v1 bodies are never accepted on the
  * create path (they exist only as rows the capability migration preserved).
  */
+/**
+ * Whether `proof` is a valid Ed25519 signature by the room's key over
+ * `(room key, manifest commitment, ACCOUNT)`.
+ *
+ * The stub signature alone cannot answer "does this caller hold the room?": it
+ * is static, and the pair it belongs to is SERVED — publicly for a `listed`
+ * record, to any invitee for an unlisted one. An observer could replay it after
+ * the owner removed their record and take the room-key uniqueness under their
+ * own account. Binding the account into a proof that is verified and DISCARDED
+ * — never stored, never served — makes a replay under another account fail
+ * without publishing the creator's account id.
+ */
+export async function verifyRegistrationProof(
+  body: Record<string, unknown>,
+  proof: string,
+  accountId: string,
+): Promise<boolean> {
+  if (!isSignedDirectoryStubBody(body)) return false;
+  const publicKeyBytes = fromBase64Url(body.room_public_key);
+  const proofBytes = fromBase64Url(proof);
+  if (publicKeyBytes?.length !== ED25519_PUBLIC_KEY_BYTES) return false;
+  if (proofBytes?.length !== ED25519_SIGNATURE_BYTES) return false;
+  try {
+    const key = await webcrypto.subtle.importKey('raw', publicKeyBytes, ED25519, false, ['verify']);
+    const message = canonicalRegistrationProofBytes({
+      room_public_key: body.room_public_key,
+      manifest_key_commitment: body.manifest_key_commitment,
+      account_id: accountId,
+    });
+    const messageBytes = new Uint8Array(new ArrayBuffer(message.byteLength));
+    messageBytes.set(message);
+    return await webcrypto.subtle.verify(ED25519, key, proofBytes, messageBytes);
+  } catch {
+    return false;
+  }
+}
+
 export async function verifyDirectoryStubSignature(
   body: Record<string, unknown>,
   stubSignature: string,

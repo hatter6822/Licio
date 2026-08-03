@@ -304,6 +304,16 @@ export const privateRoomCreateStubRequestSchema = z
     signed_stub: signedStubSchema,
     stub_signature: signatureSchema,
     /**
+     * Ed25519 by the ROOM's key over `(room key, manifest commitment, the
+     * REGISTERING ACCOUNT)` — proof of CURRENT possession.
+     *
+     * The stub signature is static and PUBLIC (a `listed` record serves the pair
+     * to anyone; an unlisted one to any invitee), so replaying it is evidence
+     * only that the replayer has seen a record. This is never stored and never
+     * served: it is checked against the session's account and discarded.
+     */
+    registration_proof: signatureSchema,
+    /**
      * §21.2 — the bootstrap capability, sent ALONGSIDE the signed body rather
      * than inside it, and stored in its own never-projected column.
      */

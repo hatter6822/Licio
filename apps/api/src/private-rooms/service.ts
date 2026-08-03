@@ -35,7 +35,7 @@ import {
   RoomAlreadyRegisteredError,
   type StoredPrivateRoomStub,
 } from './stores.js';
-import { verifyDirectoryStubSignature } from './stub-signature.js';
+import { verifyDirectoryStubSignature, verifyRegistrationProof } from './stub-signature.js';
 
 /** The rendezvous endpoints a bootstrapping peer needs (§21.1 response). */
 export const BOOTSTRAP_ENDPOINTS: readonly string[] = [
@@ -265,6 +265,23 @@ export class PrivateRoomStubService {
     // shape — cannot be verified and so cannot be registered; those rows exist
     // only because the capability migration preserved them.
     if (!(await verifyDirectoryStubSignature(request.signed_stub, request.stub_signature))) {
+      return { ok: false, reason: 'signature_invalid' };
+    }
+    // …AND a proof of CURRENT possession, bound to this account.
+    //
+    // The stub signature is static and PUBLIC — a `listed` record serves the
+    // pair to anyone, an unlisted one to any invitee — so replaying it proves
+    // only that the replayer has seen a record. After the owner removes theirs,
+    // that would be enough to take the room-key uniqueness under another
+    // account, publish arbitrary display metadata, and lock the room's own
+    // creator out permanently.
+    //
+    // The proof covers the account the SERVER resolved from the session, so it
+    // cannot be signed for someone else's, and it is discarded rather than
+    // stored: nothing about the creator's account reaches the public body.
+    if (
+      !(await verifyRegistrationProof(request.signed_stub, request.registration_proof, accountId))
+    ) {
       return { ok: false, reason: 'signature_invalid' };
     }
 

@@ -339,8 +339,8 @@ in `package.json`, so an override placed there is silently ignored.
 | `brace-expansion ^5.0.9` | GHSA-mh99-v99m-4gvg (unbounded-expansion OOM) lists EVERY prior release vulnerable (`<=5.0.7`), and the follow-up GHSA-rgw5-rvv9-x895 extends that to `<5.0.9` — 5.0.8's mitigation is bypassable, so 5.0.9 is the first patched version and there is still no backported 1.x/2.x fix | the advisories gain a backported fix, or nothing resolves brace-expansion below 5.0.9 |
 | `filelist ^2.0.2` | pairs with the pin above: the workbox dev chain (`…off-main-thread`→ejs→jake→filelist) pulled `minimatch@5`, whose CJS `require('brace-expansion')` expects the pre-5.x DEFAULT export and throws `expand is not a function` under 5.0.8.  filelist 2.x moves to `minimatch@^10.2.1`, which uses the patched line | jake ships a release depending on `filelist >= 2` |
 | `ws ^8.21.0` | patched line for viem→isows (old `ws@8.20.1` DoS advisory); no `ws` server runs here | viem/isows guarantees a patched `ws` |
-| `fast-uri ^3.1.4` | dev-only toolchain (ajv→workbox-build→vite-plugin-pwa); patches the 3.1.3 host-confusion advisory | ajv/workbox resolve `fast-uri >= 3.1.4` |
-| `undici ^7.28.0` | test-only (jsdom `fetch`); patches two 7.27.2 advisories | jsdom pins `undici >= 7.28.0` |
+| `fast-uri ^3.1.5` | dev-only toolchain (ajv→workbox-build→vite-plugin-pwa); 3.1.4 patched one host-confusion advisory and GHSA-7p8r-x3mc-p8w7 found another (a backslash authority introducer) | ajv/workbox resolve `fast-uri >= 3.1.5` |
+| `undici ^7.29.0` | test-only (jsdom `fetch`); 7.28.0 patched two 7.27.2 advisories and GHSA-4cwx-7wf7-3272 added a third (cross-user disclosure via degenerate private cache directives) | jsdom pins `undici >= 7.29.0` |
 | `esbuild ^0.28.1` | dev-only toolchain; dedupes onto one audited line | bump with the Vite major |
 | `@noble/curves 2.0.1` + `@noble/ciphers 2.1.1` (EXACT) | `ts-mls@1.6.2` declares them as exact peers (KAT cross-checks guard the pin) | `ts-mls` widens its `@noble/*` peer range |
 

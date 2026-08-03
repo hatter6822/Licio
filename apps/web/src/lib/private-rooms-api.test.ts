@@ -93,6 +93,7 @@ describe('createPrivateRoomStub (§21.1)', () => {
       },
       stubSignature:
         'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+      registrationProof: 'proof',
       bootstrapBlindId: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A',
     });
     // No `room_public_key`/`manifest_key_commitment`: the server DERIVES both
@@ -102,6 +103,9 @@ describe('createPrivateRoomStub (§21.1)', () => {
       'bootstrap_blind_id',
       'directory_mode',
       'display_name',
+      // Proof of CURRENT possession, bound to the account — verified and
+      // discarded, never stored and never served.
+      'registration_proof',
       'rendezvous_policy',
       'signed_stub',
       'stub_signature',
@@ -120,6 +124,7 @@ describe('createPrivateRoomStub (§21.1)', () => {
       },
       stubSignature:
         'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+      registrationProof: 'proof',
       bootstrapBlindId: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A',
     });
     const body = lastBody();
@@ -137,6 +142,7 @@ describe('createPrivateRoomStub (§21.1)', () => {
         signedStub: {},
         stubSignature:
           'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+        registrationProof: 'proof',
         bootstrapBlindId: 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A',
       }),
     ).rejects.toThrow();

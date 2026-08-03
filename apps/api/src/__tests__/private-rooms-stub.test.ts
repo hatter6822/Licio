@@ -15,7 +15,11 @@
 //   • the stub surface authenticates writes (§21.1) and leaves reads open.
 
 import { randomUUID } from 'node:crypto';
-import { canonicalDirectoryStubBytes, type SignedDirectoryStubBody } from '@licio/shared';
+import {
+  canonicalDirectoryStubBytes,
+  canonicalRegistrationProofBytes,
+  type SignedDirectoryStubBody,
+} from '@licio/shared';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import { PrivateRoomStubService, setPrivateRoomStubService } from '../private-rooms/service.js';
@@ -65,29 +69,71 @@ async function mintRoomKeys(count: number): Promise<void> {
   }
 }
 
-/** A genuinely signed §8.2 body for the NEXT room in the pool. */
-async function signedBody(keys: RoomKeys): Promise<{
-  signed_stub: SignedDirectoryStubBody;
-  stub_signature: string;
-}> {
+/** Sign `message` with a room key. */
+async function signWith(keys: RoomKeys, message: Uint8Array): Promise<string> {
   const { webcrypto } = await import('node:crypto');
-  const body = {
-    schema: 'licio.private.directory_stub.v2' as const,
-    room_public_key: keys.publicKey,
-    manifest_key_commitment: MANIFEST_COMMITMENT,
-  };
-  const message = canonicalDirectoryStubBytes(body);
   const bytes = new Uint8Array(new ArrayBuffer(message.byteLength));
   bytes.set(message);
   const signature = new Uint8Array(
     await webcrypto.subtle.sign({ name: 'Ed25519' }, keys.privateKey, bytes),
   );
-  return { signed_stub: body, stub_signature: Buffer.from(signature).toString('base64url') };
+  return Buffer.from(signature).toString('base64url');
+}
+
+/**
+ * A genuinely signed §8.2 body for the NEXT room in the pool, plus the
+ * account-bound registration proof.
+ *
+ * Both, because the stub signature is static and public — replaying it proves
+ * only that the replayer has seen a record — so registration also requires a
+ * proof over `(room key, commitment, ACCOUNT)`.
+ */
+async function signedBody(
+  keys: RoomKeys,
+  accountId: string = ACCOUNT,
+): Promise<{
+  signed_stub: SignedDirectoryStubBody;
+  stub_signature: string;
+  registration_proof: string;
+}> {
+  const body = {
+    schema: 'licio.private.directory_stub.v2' as const,
+    room_public_key: keys.publicKey,
+    manifest_key_commitment: MANIFEST_COMMITMENT,
+  };
+  return {
+    signed_stub: body,
+    stub_signature: await signWith(keys, canonicalDirectoryStubBytes(body)),
+    registration_proof: await signWith(
+      keys,
+      canonicalRegistrationProofBytes({
+        room_public_key: body.room_public_key,
+        manifest_key_commitment: body.manifest_key_commitment,
+        account_id: accountId,
+      }),
+    ),
+  };
 }
 
 /** The DEFAULT room every fixture uses unless a test asks for another. */
 let SIGNED_STUB: SignedDirectoryStubBody;
 let SIGNATURE: string;
+let REGISTRATION_PROOF: string;
+/** The default room's keys, for the cases that register under ANOTHER account:
+ *  the proof is account-bound, so it has to be signed for that account. */
+let DEFAULT_KEYS: RoomKeys;
+
+/** A registration proof over the default room, for `accountId`. */
+async function proofFor(accountId: string, keys: RoomKeys = DEFAULT_KEYS): Promise<string> {
+  return await signWith(
+    keys,
+    canonicalRegistrationProofBytes({
+      room_public_key: keys.publicKey,
+      manifest_key_commitment: MANIFEST_COMMITMENT,
+      account_id: accountId,
+    }),
+  );
+}
 
 /** Deterministic ids so a test can address the room it just created. */
 function freshService(): PrivateRoomStubService {
@@ -110,14 +156,33 @@ function freshService(): PrivateRoomStubService {
  * describe two ROOMS. Passing this explicitly keeps the common fixture
  * deterministic and makes "these are separate rooms" visible at the call site.
  */
-const PRESIGNED: Array<{ signed_stub: SignedDirectoryStubBody; stub_signature: string }> = [];
+const PRESIGNED: Array<{
+  signed_stub: SignedDirectoryStubBody;
+  stub_signature: string;
+  registration_proof: string;
+  keys: RoomKeys;
+}> = [];
 function anotherRoom(): {
   signed_stub: PrivateRoomCreateStubRequest['signed_stub'];
   stub_signature: string;
+  registration_proof: string;
 } {
   const next = PRESIGNED[roomKeyAt++];
   if (!next) throw new Error('room-key pool exhausted — mint more in beforeAll');
-  return next;
+  const { keys: _keys, ...request } = next;
+  return request;
+}
+
+/** The same, with the proof signed for `accountId` rather than the default. */
+async function anotherRoomFor(accountId: string): Promise<{
+  signed_stub: PrivateRoomCreateStubRequest['signed_stub'];
+  stub_signature: string;
+  registration_proof: string;
+}> {
+  const next = PRESIGNED[roomKeyAt++];
+  if (!next) throw new Error('room-key pool exhausted — mint more in beforeAll');
+  const { keys, ...request } = next;
+  return { ...request, registration_proof: await proofFor(accountId, keys) };
 }
 
 function listedRequest(
@@ -129,6 +194,7 @@ function listedRequest(
     rendezvous_policy: 'licio_blind',
     signed_stub: SIGNED_STUB,
     stub_signature: SIGNATURE,
+    registration_proof: REGISTRATION_PROOF,
     bootstrap_blind_id: TOKEN,
     ...over,
   };
@@ -142,6 +208,7 @@ function unlistedRequest(
     rendezvous_policy: 'licio_blind',
     signed_stub: SIGNED_STUB,
     stub_signature: SIGNATURE,
+    registration_proof: REGISTRATION_PROOF,
     bootstrap_blind_id: TOKEN,
     ...over,
   };
@@ -160,12 +227,14 @@ beforeAll(async () => {
   await mintRoomKeys(40);
   const first = ROOM_KEYS[roomKeyAt++];
   if (!first) throw new Error('no room keys');
+  DEFAULT_KEYS = first;
   const signed = await signedBody(first);
   SIGNED_STUB = signed.signed_stub;
   SIGNATURE = signed.stub_signature;
+  REGISTRATION_PROOF = signed.registration_proof;
   for (let at = roomKeyAt; at < ROOM_KEYS.length; at += 1) {
     const keys = ROOM_KEYS[at];
-    if (keys) PRESIGNED.push(await signedBody(keys));
+    if (keys) PRESIGNED.push({ ...(await signedBody(keys)), keys });
   }
   roomKeyAt = 0;
 });
@@ -364,7 +433,10 @@ describe('review fixes — the scan, the token invariant, and staff delisting', 
     const mine = await svc.create(listedRequest(), ACCOUNT);
     // A DIFFERENT room for the other account: one room has one record, so two
     // accounts holding records means two rooms.
-    const theirs = await svc.create(listedRequest(anotherRoom()), OTHER_ACCOUNT);
+    const theirs = await svc.create(
+      listedRequest(await anotherRoomFor(OTHER_ACCOUNT)),
+      OTHER_ACCOUNT,
+    );
     if (!mine.ok || !theirs.ok) throw new Error('create failed');
     expect(await svc.purgeForAccount(ACCOUNT)).toBe(1);
     expect((await svc.bootstrap(mine.value.room_server_id, TOKEN)).ok).toBe(false);
@@ -868,17 +940,20 @@ describe('registration proves POSSESSION of the room key', () => {
       room_public_key: publicKey,
       manifest_key_commitment: SIGNED_STUB.manifest_key_commitment,
     };
-    const message = canonicalDirectoryStubBytes(body);
-    const bytes = new Uint8Array(new ArrayBuffer(message.byteLength));
-    bytes.set(message);
-    const signature = new Uint8Array(
-      await webcrypto.subtle.sign({ name: 'Ed25519' }, pair.privateKey, bytes),
-    );
+    const keys: RoomKeys = { publicKey, privateKey: pair.privateKey };
     return {
       publicKey,
       request: listedRequest({
         signed_stub: body,
-        stub_signature: Buffer.from(signature).toString('base64url'),
+        stub_signature: await signWith(keys, canonicalDirectoryStubBytes(body)),
+        registration_proof: await signWith(
+          keys,
+          canonicalRegistrationProofBytes({
+            room_public_key: publicKey,
+            manifest_key_commitment: body.manifest_key_commitment,
+            account_id: ACCOUNT,
+          }),
+        ),
       }),
     };
   }
@@ -888,6 +963,25 @@ describe('registration proves POSSESSION of the room key', () => {
     const { request } = await signedRequest();
     const created = await svc.create(request, ACCOUNT);
     expect(created.ok).toBe(true);
+  });
+
+  it('REFUSES a REPLAY of a published pair under another account', async () => {
+    // The stub signature is static and PUBLIC: a `listed` record serves the pair
+    // to anyone browsing, and an unlisted one to any invitee. Replaying it after
+    // the owner removes their record would otherwise take the room-key
+    // uniqueness under the replayer's account — with arbitrary display metadata,
+    // and permanently. The account-bound proof is what makes the replay useless.
+    const svc = freshService();
+    const { request } = await signedRequest();
+    const created = await svc.create(request, ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    await svc.remove(created.value.room_server_id, ACCOUNT);
+
+    // The observer has everything the record published, and signs nothing.
+    expect(await svc.create(request, OTHER_ACCOUNT)).toEqual({
+      ok: false,
+      reason: 'signature_invalid',
+    });
   });
 
   it('REFUSES a squat: the founder key is public, the signature is the only proof', async () => {
@@ -989,7 +1083,12 @@ describe('ONE record per room — adopted by its owner, refused to anyone else',
     // a different key.
     const svc = freshService();
     const mine = await svc.create(listedRequest(), ACCOUNT);
-    const theirs = await svc.create(listedRequest(), OTHER_ACCOUNT);
+    // A VALID proof for the other account — otherwise this would be refused for
+    // the signature rather than for the room, and the test would prove neither.
+    const theirs = await svc.create(
+      listedRequest({ registration_proof: await proofFor(OTHER_ACCOUNT) }),
+      OTHER_ACCOUNT,
+    );
     if (!mine.ok) throw new Error('create failed');
     expect(theirs).toEqual({ ok: false, reason: 'room_already_registered' });
     // …and the first record is untouched — a refusal must not disturb it.
@@ -1106,7 +1205,12 @@ describe('the targeted owner lookup', () => {
 
   it('answers null for another account’s record rather than finding it', async () => {
     const svc = freshService();
-    const theirs = await svc.create(listedRequest(), OTHER_ACCOUNT);
+    // The proof is ACCOUNT-BOUND, so a record registered by another account is
+    // signed for that account.
+    const theirs = await svc.create(
+      listedRequest({ registration_proof: await proofFor(OTHER_ACCOUNT) }),
+      OTHER_ACCOUNT,
+    );
     if (!theirs.ok) throw new Error('create failed');
     expect(
       await svc.findOwnedStub(ACCOUNT, { roomServerId: theirs.value.room_server_id }),
