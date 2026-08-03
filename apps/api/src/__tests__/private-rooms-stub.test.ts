@@ -52,10 +52,10 @@ function freshService(): PrivateRoomStubService {
 /**
  * A body for a DIFFERENT room.
  *
- * Registration is idempotent per `(account, room_public_key)` — that is what
- * makes a retry converge — so a test that wants two RECORDS has to describe two
- * ROOMS. Passing this explicitly keeps the common fixture deterministic and
- * makes "these are separate rooms" visible at the call site.
+ * A room has ONE record, and re-registering it adopts rather than mints — that
+ * is what makes a retry converge — so a test that wants two RECORDS has to
+ * describe two ROOMS. Passing this explicitly keeps the common fixture
+ * deterministic and makes "these are separate rooms" visible at the call site.
  */
 let roomKeySeq = 0;
 function anotherRoom(): { signed_stub: PrivateRoomCreateStubRequest['signed_stub'] } {
@@ -296,7 +296,9 @@ describe('review fixes — the scan, the token invariant, and staff delisting', 
   it('purges every stub an account created (the hard-deletion hook)', async () => {
     const svc = freshService();
     const mine = await svc.create(listedRequest(), ACCOUNT);
-    const theirs = await svc.create(listedRequest(), OTHER_ACCOUNT);
+    // A DIFFERENT room for the other account: one room has one record, so two
+    // accounts holding records means two rooms.
+    const theirs = await svc.create(listedRequest(anotherRoom()), OTHER_ACCOUNT);
     if (!mine.ok || !theirs.ok) throw new Error('create failed');
     expect(await svc.purgeForAccount(ACCOUNT)).toBe(1);
     expect((await svc.bootstrap(mine.value.room_server_id, TOKEN)).ok).toBe(false);
@@ -750,7 +752,7 @@ describe('§11.4 — an abusive LISTED name has an intake', () => {
   });
 });
 
-describe('registration is IDEMPOTENT per account per room', () => {
+describe('ONE record per room — adopted by its owner, refused to anyone else', () => {
   it('adopts the existing record instead of minting a second', async () => {
     const svc = freshService();
     const first = await svc.create(listedRequest(), ACCOUNT);
@@ -762,12 +764,24 @@ describe('registration is IDEMPOTENT per account per room', () => {
     expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(1);
   });
 
-  it('is per ACCOUNT — another account registering the same room is its own record', async () => {
+  it('REFUSES another account registering a room that already has a record', async () => {
+    // The record is the ROOM's public handle, not an account's possession: its
+    // `room_server_id` is what invites carry and what the §4.2 directory
+    // publishes. A second record lists the same room twice, under two ids and
+    // two bootstrap capabilities, and a member who resolves the wrong one
+    // reaches a shell nobody else is using.
+    //
+    // It needed no race: a founder DEVICE signed into a second account holds
+    // the same epoch-0 key, and the old `(account, room)` uniqueness made that
+    // a different key.
     const svc = freshService();
     const mine = await svc.create(listedRequest(), ACCOUNT);
     const theirs = await svc.create(listedRequest(), OTHER_ACCOUNT);
-    if (!mine.ok || !theirs.ok) throw new Error('create failed');
-    expect(theirs.value.room_server_id).not.toBe(mine.value.room_server_id);
+    if (!mine.ok) throw new Error('create failed');
+    expect(theirs).toEqual({ ok: false, reason: 'room_already_registered' });
+    // …and the first record is untouched — a refusal must not disturb it.
+    expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(1);
+    expect(await svc.exportForAccount(OTHER_ACCOUNT)).toHaveLength(0);
   });
 });
 
@@ -784,6 +798,10 @@ describe('a reported listing is captured before it can be edited', () => {
     expect(await svc.listingSnapshot(listed.value.room_server_id)).toEqual({
       display_name: 'Abusive name',
       display_description: 'Abusive text',
+      // The row's own mtime rides along: the capture is claimed as "the listing
+      // as reported", and only this makes that claim checkable when a retry
+      // records it later (§21.3 lets members edit the text in place).
+      updated_at: expect.any(String),
     });
     // An unlisted room publishes nothing to capture; an unknown id answers the
     // same, so this cannot become an existence oracle either.

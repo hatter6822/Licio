@@ -891,10 +891,16 @@ export async function assembleEngagementLandscape(
   const topicsById = new Map<string, readonly string[]>();
   const byId = new Map<string, StoryRecord>();
   let examined = 0;
-  // Complete UNTIL a bound stops the walk: the loop below breaks either because
-  // the window ran out (complete) or because the node cap / scan ceiling was
-  // reached (not).
-  let complete = false;
+  // TWO independent facts, and the answer is the conjunction of both.
+  //
+  // Deriving completeness from the LAST break alone was wrong in the case
+  // between the bounds: a window of 101–199 active stories fills the node cap
+  // inside a batch that is itself short, so the walk ended at the window AND
+  // dropped rows — and reporting the short batch as "complete" suppressed the
+  // partial-scan warning over a map that was missing stories. The window
+  // running out and every candidate being included are different questions.
+  let exhausted = false;
+  let capped = false;
   for (let scanned = 0; scanned < LANDSCAPE_SCAN_CEILING; scanned += LANDSCAPE_SCAN_BATCH) {
     const active = await events.windowStore.listActiveInWindow(
       windowStart,
@@ -913,29 +919,39 @@ export async function assembleEngagementLandscape(
     // duplicate node id, so the Civic Map answered 500 for a race that is only
     // reachable once restricted rows push the scan past its first batch.
     const page = active.slice(scanned).filter((row) => !topicsById.has(row.itemId));
-    examined += page.length;
     if (page.length === 0) {
       // The window had nothing further to offer — the walk ENDED rather than
       // being cut short.
-      complete = true;
+      exhausted = true;
       break;
     }
     const hydrated = await ingestion.stories.getPublicByIds(page.map((row) => row.itemId));
     for (const row of page) {
+      // Checked BEFORE the row is considered, so `capped` means "there was a
+      // candidate this scan did not look at" rather than "the last row happened
+      // to fill the cap" — the latter is a complete scan of a window that fits
+      // exactly.
+      if (nodes.length >= LANDSCAPE_NODES) {
+        capped = true;
+        break;
+      }
+      examined += 1;
       const story = hydrated.get(row.itemId);
       if (!story) continue;
       byId.set(row.itemId, story);
       nodes.push({ id: row.itemId, value: row.eventCount });
       topicsById.set(row.itemId, story.topicIds);
-      if (nodes.length >= LANDSCAPE_NODES) break;
     }
+    if (capped) break;
     if (active.length < scanned + LANDSCAPE_SCAN_BATCH) {
       // A short page IS the end of the window.
-      complete = true;
+      exhausted = true;
       break;
     }
-    if (nodes.length >= LANDSCAPE_NODES) break;
   }
+  // …and the scan ceiling exits the loop through neither branch, which is the
+  // third way to be incomplete.
+  const complete = exhausted && !capped;
 
   const edges: ReebEdge[] = [];
   for (let i = 0; i < nodes.length; i += 1) {

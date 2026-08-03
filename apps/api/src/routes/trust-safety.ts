@@ -250,19 +250,26 @@ export function createTrustSafetyRoutes() {
             resolvedContentKind,
             resolvedSubjectUserId,
           );
-          // ONCE PER CASE, keyed on the CASE'S OWN TRAIL.
+          // ONCE PER CASE, keyed on the CASE'S OWN TRAIL — and only while the
+          // text can still be claimed as the reported one.
           //
-          // The rule is "one capture per case" — §21.3 lets members edit the
+          // The rule is "one capture per case": §21.3 lets members edit the
           // published text, so a second capture would attach words the reporter
           // never saw to the same case, labelled as what they reported. Keying
           // that on THIS REQUEST's `idempotent` flag enforced something else,
           // though: `writeAudit` is the catching variant (it returns null on
           // failure), so a chain-append failure lost the evidence silently and
           // every retry then skipped the capture as "already done" — the one
-          // case that has no snapshot is the one that permanently cannot get
-          // one. The trail is the authority on whether a capture exists, so ask
-          // it.
-          const captured =
+          // case with no snapshot was the one that could never get one. The
+          // trail is the authority on whether a capture exists, so it decides.
+          //
+          // But a retry reads the listing as it is NOW, and this route cannot
+          // reconstruct what it was: the stub row is edited in place and keeps
+          // no history. So the row's `updated_at` decides whether the claim is
+          // true — unchanged since the report means what is here IS what was
+          // reported; edited since means the original is gone, and the trail
+          // says exactly that rather than presenting the new text as evidence.
+          const priorCapture =
             outcome.ok && listing !== null && outcome.response.idempotent
               ? (
                   await mod.audit.list({
@@ -272,7 +279,11 @@ export function createTrustSafetyRoutes() {
                   })
                 ).length > 0
               : false;
-          if (outcome.ok && listing !== null && !captured) {
+          const editedSinceReport =
+            outcome.ok && listing !== null
+              ? Date.parse(listing.updated_at) > Date.parse(outcome.response.created_at)
+              : false;
+          if (outcome.ok && listing !== null && !priorCapture) {
             // BEST EFFORT: the report has already committed, and losing the
             // capture must not un-take it.
             await writeAudit(mod, {
@@ -300,7 +311,9 @@ export function createTrustSafetyRoutes() {
               // staff could not review. The append clamps as a backstop; the
               // budget here is what keeps the evidence a deliberate excerpt
               // rather than an arbitrary cut mid-word.
-              notes: listingEvidenceNote(listing),
+              notes: editedSinceReport
+                ? 'Listing UNAVAILABLE — the published name/description were edited after this report was filed and before this capture could be stored, and the record keeps no history. What is published now is NOT what was reported.'
+                : listingEvidenceNote(listing),
             });
           }
           if (!outcome.ok) {

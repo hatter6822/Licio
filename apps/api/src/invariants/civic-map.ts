@@ -82,16 +82,20 @@ export async function buildCivicMap(
    * Decides whether THIS caller could open a bridge request on a given thread.
    *
    * The map is readable by any platform integrity steward, while the bridge
-   * endpoint requires a steward role in the thread's own room (or platform
-   * admin) AND a SCOI baseline for the story — so publishing every thread id
-   * offered controls that deterministically 404 or 422. Absent ⇒ no thread is actionable, which is the
+   * endpoint requires a steward role in the THREAD's own room (or platform
+   * admin), a conversation that still accepts contributions, no request already
+   * open, and a SCOI baseline — so publishing every thread id offered controls
+   * that deterministically fail. Absent ⇒ no thread is actionable, which is the
    * fail-closed answer for a caller whose authority cannot be resolved.
+   *
+   * It takes the THREAD ID ALONE, deliberately. Passing the room and story
+   * alongside it invited the caller to answer from what the MAP knows, and the
+   * map knows the story row's room — which is the room the conversation was
+   * submitted to, not the one it is in (WS-Q moves threads). The resolver reads
+   * the thread itself, so there is one source for every bar rather than two
+   * that agree until they do not.
    */
-  canBridge: (
-    threadId: string,
-    roomId: string | null,
-    storyId: string,
-  ) => Promise<boolean> = async () => false,
+  canBridge: (threadId: string) => Promise<boolean> = async () => false,
 ): Promise<CivicMapResponse | null> {
   const {
     nodes,
@@ -134,16 +138,7 @@ export async function buildCivicMap(
     const pending = (async () => {
       const thread = threadByStory.get(storyId);
       if (thread === undefined) return null;
-      // The THREAD's room, not the story's.
-      //
-      // A bridge request is authorized against the room the CONVERSATION sits
-      // in — that is the room whose stewards the endpoint asks about, and a
-      // thread moves between rooms (WS-Q) while the story row keeps the room it
-      // was submitted to. Asking about the story's room answers a different
-      // question in both directions: a steward of the thread's room was offered
-      // no target on a conversation they run, and a steward of the origin room
-      // was offered one on a conversation that has since moved out of it.
-      return (await canBridge(thread.threadId, thread.roomId, storyId)) ? thread.threadId : null;
+      return (await canBridge(thread.threadId)) ? thread.threadId : null;
     })();
     authorized.set(storyId, pending);
     return pending;

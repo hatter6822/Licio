@@ -115,17 +115,27 @@ export const privateRoomStubs = pgTable(
      *  not just by convention. */
     uniqueIndex('private_room_stubs_room_uq').on(t.roomServerId),
     /**
-     * ONE record per account per ROOM.
+     * ONE record per ROOM.
      *
-     * `room_public_key` is the room's founder signing key, so this is "an
-     * account may register a given room once". Registration checked first and
-     * created second, which is a TOCTOU: two tabs, or a retry overlapping a
-     * still-running POST, both read "nothing there" and both insert — leaving a
-     * duplicate that recovery picks between arbitrarily and an orphan that is
-     * publicly listed if that was its mode. A check cannot fix a check; the
-     * constraint can, and the create adopts the existing row on conflict.
+     * `room_public_key` is the room's founder signing key — the room's own
+     * identity, and what the record is verified against. The record is not an
+     * account's possession: its `room_server_id` is the handle every invite
+     * carries and the value the §4.2 directory publishes, so a second record
+     * for the same room lists it twice under two ids with two bootstrap
+     * capabilities, and a member who resolves the wrong one reaches a shell
+     * nobody else is using.
+     *
+     * Keying this on `(account, room)` — as it briefly was — answered a
+     * narrower question and let a founder DEVICE signed into a second account
+     * register the same room again with no race at all.
+     *
+     * It is also the TOCTOU backstop registration needs: a check cannot fix a
+     * check, and two tabs both read "nothing there" and both insert. The
+     * service refuses another account's room (`room_already_registered`) and
+     * ADOPTS the caller's own row on conflict, which is what makes a retry
+     * idempotent rather than merely refused.
      */
-    uniqueIndex('private_room_stubs_account_room_uq').on(t.createdByAccountId, t.roomPublicKey),
+    uniqueIndex('private_room_stubs_room_key_uq').on(t.roomPublicKey),
     /**
      * The §4.2 public directory's keyset, in the order it reads.
      *

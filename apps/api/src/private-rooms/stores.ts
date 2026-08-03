@@ -517,6 +517,17 @@ export interface PrivateRoomStubStore {
     accountId: string,
     target: { readonly roomServerId?: string; readonly roomPublicKey?: string },
   ): Promise<StoredPrivateRoomStub | null>;
+  /**
+   * The record for a ROOM, whoever created it.
+   *
+   * One room has one directory record: its `room_server_id` is the handle every
+   * invite carries and the §4.2 directory lists, so a second record publishes
+   * the same room twice under two ids and two bootstrap capabilities. The room
+   * key is the room's identity, so this is the question registration must ask
+   * before creating — `findForAccount` answers a narrower one ("do *I* own a
+   * record here") and returns null for the very case that must be refused.
+   */
+  findByRoomKey(roomPublicKey: string): Promise<StoredPrivateRoomStub | null>;
   listForAccount(
     accountId: string,
     options?: {
@@ -675,6 +686,11 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore, InMem
       }
     }
     return Promise.resolve(removed);
+  }
+
+  findByRoomKey(roomPublicKey: string): Promise<StoredPrivateRoomStub | null> {
+    const found = [...this.#stubs.values()].find((stub) => stub.roomPublicKey === roomPublicKey);
+    return Promise.resolve(found === undefined ? null : { ...found });
   }
 
   findForAccount(

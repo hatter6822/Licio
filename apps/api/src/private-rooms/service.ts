@@ -47,6 +47,9 @@ export const BOOTSTRAP_ENDPOINTS: readonly string[] = [
 export type StubFailure =
   | 'not_found'
   | 'forbidden'
+  /** Another ACCOUNT already registered a directory record for this room.
+   *  One room, one record — see `create`. */
+  | 'room_already_registered'
   | 'display_requires_listed'
   | 'forbidden_stub_field'
   | 'identity_change'
@@ -226,6 +229,24 @@ export class PrivateRoomStubService {
     // NOT NULL column, so a stub without one cannot be constructed. The same
     // goes for the commitments, which are derived from the signed body rather
     // than sent beside it.
+
+    // ONE RECORD PER ROOM, not per account.
+    //
+    // The record IS the room's public handle: its `room_server_id` is what
+    // invites carry and what the §4.2 directory lists. A second record for the
+    // same room publishes the room twice, under two ids, with two bootstrap
+    // capabilities — and a member who resolves the wrong one reaches a shell no
+    // other member is using. The room key is the room's identity, so it is the
+    // key this uniqueness is on.
+    //
+    // The same account re-registering ADOPTS (that is what makes a retry, or a
+    // second tab, idempotent). A different account is refused: it is not that
+    // the caller lacks a right, it is that the room already has its record —
+    // and only the account holding it can delist or remove it (§21.3/§21.4).
+    const forRoom = await this.store.findByRoomKey(request.signed_stub.room_public_key);
+    if (forRoom !== null && forRoom.createdByAccountId !== accountId) {
+      return { ok: false, reason: 'room_already_registered' };
+    }
 
     const stub = await this.store.create({
       stubId: this.newId(),
@@ -599,12 +620,24 @@ export class PrivateRoomStubService {
    * asking them to act on nothing. Null for an unlisted or unknown room, which
    * publish nothing to capture.
    */
-  async listingSnapshot(
-    roomServerId: string,
-  ): Promise<{ display_name: string | null; display_description: string | null } | null> {
+  async listingSnapshot(roomServerId: string): Promise<{
+    display_name: string | null;
+    display_description: string | null;
+    /** When the record last changed.
+     *
+     *  Carried WITH the text because §21.3 lets members edit it: a consumer
+     *  recording this as "the listing as reported" can only make that claim if
+     *  the row has not changed since the report it belongs to, and this is what
+     *  lets it check rather than assume. */
+    updated_at: string;
+  } | null> {
     const stub = await this.store.getByRoomId(roomServerId);
     if (stub?.directoryMode !== 'listed') return null;
-    return { display_name: stub.displayName, display_description: stub.displayDescription };
+    return {
+      display_name: stub.displayName,
+      display_description: stub.displayDescription,
+      updated_at: stub.updatedAt,
+    };
   }
 
   /**

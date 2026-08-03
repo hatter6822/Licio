@@ -298,10 +298,40 @@ describe('DirectoryRecordPanel', () => {
     const session = sessionDouble(STUB);
     (session as unknown as { clearDirectoryStub: unknown }).clearDirectoryStub = cleared;
     render(<DirectoryRecordPanel session={session} />);
-    // The panel still SAYS this account has no record — that is what the lookup
-    // proves, and it is what re-registration answers.
-    expect(await screen.findByText(/Licio holds no record of this room/i)).toBeInTheDocument();
+    // It says what the lookup actually proves — this ACCOUNT holds no record —
+    // and does NOT claim the room has none…
+    expect(await screen.findByText(/This account holds no Licio record/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Licio holds no record of this room/i)).toBeNull();
+    // …so no registration is offered: on a founder device signed into a second
+    // account that minted a DUPLICATE record for a room that already had one.
+    expect(screen.queryByRole('button', { name: /register/i })).toBeNull();
     expect(cleared).not.toHaveBeenCalled();
+  });
+
+  it('lets the holder FORGET an unreadable record explicitly, and then register', async () => {
+    // The read cannot tell "removed" from "belongs to another account", so it
+    // must not guess — but the owner whose record another device removed would
+    // then hold a key to nothing forever. Asserting it is a local act.
+    const cleared = vi.fn().mockResolvedValue(undefined);
+    ownsRecord = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/private-rooms/mine')) {
+        return new Response(JSON.stringify({ stubs: [], next_cursor: null }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: { code: 'not_found', message: 'gone' } }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const session = sessionDouble(STUB);
+    (session as unknown as { clearDirectoryStub: unknown }).clearDirectoryStub = cleared;
+    render(<DirectoryRecordPanel session={session} />);
+    await userEvent.click(await screen.findByRole('button', { name: /Forget this record/i }));
+    await waitFor(() => expect(cleared).toHaveBeenCalled());
   });
 
   it('repairs a failed cleanup on retry: the server 404 IS the record being gone', async () => {

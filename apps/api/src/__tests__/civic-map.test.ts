@@ -192,42 +192,14 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(byDefault?.basins.every((basin) => basin.thread_id === null)).toBe(true);
   });
 
-  it('passes the STORY to the authority resolver, not only the thread', async () => {
-    // The bridge endpoint needs a SCOI baseline, which is a property of the
-    // story rather than the thread — so a resolver that could only see the
-    // thread could not check it, and every published target would 422.
-    const seen: Array<{ threadId: string; roomId: string | null; storyId: string }> = [];
-    const rows = [
-      {
-        storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
-        title: 'A',
-        topicIds: [TOPIC_A?.id ?? ''],
-        events: 9,
-      },
-      {
-        storyId: 'bbbbbbbb-2222-4222-8222-222222222222',
-        title: 'B',
-        topicIds: [TOPIC_A?.id ?? ''],
-        events: 4,
-      },
-    ];
-    const { events, ingestion } = services(rows);
-    await buildCivicMap(events, ingestion, NOW, async (threadId, roomId, storyId) => {
-      seen.push({ threadId, roomId, storyId });
-      return true;
-    });
-    expect(seen.length).toBeGreaterThan(0);
-    for (const call of seen) expect(call.threadId).toBe(`thread-${call.storyId}`);
-  });
-
-  it('authorizes against the room the CONVERSATION is in, not the story\u2019s', async () => {
-    // The bridge endpoint reads the THREAD's room to find its stewards, and a
-    // thread moves between rooms (WS-Q) while the story row keeps the room it
-    // was submitted to. Resolving authority from the story's room offers a
-    // target to the stewards of the room the conversation LEFT, and withholds
-    // it from the ones who actually run it \u2014 in a fixture where the two
-    // differ, the map published nothing a steward could act on at all.
-    const seen: (string | null)[] = [];
+  it('hands the resolver a THREAD id and nothing else', async () => {
+    // The resolver used to be handed the room and story alongside it, which
+    // invited it to answer from what the MAP knows — and the map knows the
+    // STORY row's room, not the room the conversation is in (WS-Q moves
+    // threads). `bridgeEligibility` reads the thread itself, so the map cannot
+    // hand it a stale room at all; what it must pass is the thread of the
+    // node's own shell, not one derived from the story id.
+    const seen: string[] = [];
     const rows: FakeStory[] = [
       {
         storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
@@ -247,12 +219,14 @@ describe('buildCivicMap (WS-H.7.4)', () => {
       },
     ];
     const { events, ingestion } = services(rows);
-    await buildCivicMap(events, ingestion, NOW, async (_threadId, roomId) => {
-      seen.push(roomId);
+    await buildCivicMap(events, ingestion, NOW, async (threadId) => {
+      seen.push(threadId);
       return true;
     });
     expect(seen.length).toBeGreaterThan(0);
-    for (const roomId of seen) expect(roomId).toBe('current-room');
+    for (const threadId of seen) expect(threadId).toMatch(/^thread-/);
+    // Memoized per story: one resolution per node, however many saddles sample it.
+    expect(new Set(seen).size).toBe(seen.length);
   });
 
   it('reports whether the window was scanned to its END', async () => {
@@ -272,6 +246,25 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     const map = await buildCivicMap(events, ingestion, NOW, async () => true);
     expect(map?.scan.complete).toBe(true);
     expect(map?.scan.examined).toBe(1);
+  });
+
+  it('calls a NODE-CAPPED window incomplete even when the batch was short', async () => {
+    // The case between the two bounds: 101–199 active stories fill the 100-node
+    // cap inside a batch that is itself shorter than the scan batch, so the walk
+    // ended at the window AND dropped stories. Reading the short batch as "the
+    // end" reported a bounded map as complete and suppressed the very warning
+    // the field exists for.
+    const rows = Array.from({ length: 150 }, (_, i) =>
+      story(`${i.toString(16).padStart(8, '0')}-1111-4111-8111-111111111111`, 150 - i, [
+        TOPIC_A?.id ?? '',
+      ]),
+    );
+    const { events, ingestion } = services(rows);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
+    expect(map?.basins).toBeDefined();
+    expect(map?.scan.complete).toBe(false);
+    // Exactly the cap was drawn — the rest were never looked at.
+    expect(map?.scan.examined).toBe(100);
   });
 
   it('bridges on a CONNECTING story, not on a basin peak', async () => {

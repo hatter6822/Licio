@@ -890,6 +890,35 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
       });
     }
 
+    // A STORED baseline for each: the map consults `latestScoiFor` and never
+    // recomputes (a read that persists a year-retained row per node is what the
+    // shared eligibility check exists to prevent), so a story with no stored
+    // measurement is simply not offered.
+    for (const storyId of [peakA.storyId, peakB.storyId, connector.storyId]) {
+      const outputs = await fixture.invariants.scoi.computeBatch(
+        [{ targetType: 'story', targetId: storyId }],
+        hourWindow(Date.now()),
+      );
+      for (const o of outputs) {
+        await fixture.events.invariantStore.upsert({
+          invariantType: o.invariantType,
+          targetType: o.target.targetType,
+          targetId: o.target.targetId,
+          timeWindow: o.window,
+          version: o.version,
+          scoreVector: o.score_vector,
+          explanationSummary: o.explanationSummary,
+          confidence: o.confidence,
+          coverage: o.coverage,
+          reasonCodes: o.reason_codes,
+          fallbackUsed: o.fallback_used,
+          versionMetadata: null,
+          shadowMode: true,
+          createdAt: new Date().toISOString(),
+        });
+      }
+    }
+
     const read = async (): Promise<Array<string | null>> => {
       const response = await adminRequest(fixture, analyst.cookie, '/reeb/landscape');
       expect(response.status).toBe(200);

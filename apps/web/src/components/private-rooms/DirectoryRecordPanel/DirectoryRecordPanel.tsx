@@ -49,7 +49,7 @@ export interface DirectoryRecordPanelProps {
   session: PrivateRoomSession;
 }
 
-type Action = 'refresh' | 'push' | 'delist' | 'remove' | 'register' | 'display' | null;
+type Action = 'refresh' | 'push' | 'delist' | 'remove' | 'register' | 'display' | 'forget' | null;
 
 /** What the server currently holds for this room, as far as this panel knows. */
 type RecordState =
@@ -161,20 +161,28 @@ export function DirectoryRecordPanel({
             : await findMyPrivateRoomStub({ roomServerId })
                 .then((found) => ({ ok: true as const, found }))
                 .catch(() => ({ ok: false as const }));
-        if (lookup.ok && lookup.found === null) {
-          // This ACCOUNT has no record here — the state re-registration
-          // answers. The handle stays: it is the only capability for whatever
-          // record another account may still own.
-          setState({ kind: 'absent' });
-        } else {
-          setState({ kind: 'unreadable' });
-          setError(
-            t(
-              'privateRoom.record.unreachable',
-              'Licio’s record for this room could not be opened with the key this device holds. It may still exist — ask another member for a fresh invite.',
-            ),
-          );
-        }
+        // NEVER `absent` from a failed read. `absent` is a claim about the
+        // ROOM; the lookup answers about the ACCOUNT, and a founder device
+        // signed into a second account satisfies "this account owns no record"
+        // while the record stands — offering registration there minted a
+        // duplicate for a room that already had one.
+        //
+        // `absent` is reached the two ways it can be KNOWN: no stored handle at
+        // all (a detached room, or one never registered), and after a removal
+        // this device performed, which clears the handle. Everything else is
+        // unreadable, with the lookup deciding only how to say so.
+        setState({ kind: 'unreadable' });
+        setError(
+          lookup.ok && lookup.found === null
+            ? t(
+                'privateRoom.record.notYours',
+                'This account holds no Licio record for this room, and the key on this device did not open one. If the record was removed, forget it here to register a new one.',
+              )
+            : t(
+                'privateRoom.record.unreachable',
+                'Licio’s record for this room could not be opened with the key this device holds. It may still exist — ask another member for a fresh invite.',
+              ),
+        );
       } else {
         setState({ kind: 'unreadable' });
         setError(
@@ -612,6 +620,39 @@ export function DirectoryRecordPanel({
           <p className="text-error-on-soft text-sm" role="alert">
             {error}
           </p>
+        ) : null}
+        {/* THE EXPLICIT WAY OUT of an unreadable handle.
+            The read cannot tell "this record was removed" from "this record
+            belongs to another account", so it must not GUESS — and the owner
+            whose record a second device removed would otherwise be stuck
+            holding a key to nothing with no way to register a new one. This
+            asks them to assert it: forgetting is a local act on this device,
+            and afterwards the panel offers registration because the handle is
+            genuinely gone rather than because a lookup was read as proof. */}
+        {state.kind === 'unreadable' && roomServerId !== undefined ? (
+          <div>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy !== null}
+              onClick={() =>
+                void run('forget', async () => {
+                  await session.clearDirectoryStub();
+                  setStatus(
+                    t(
+                      'privateRoom.record.forgotten',
+                      'This device no longer holds a pointer to Licio’s record for this room.',
+                    ),
+                  );
+                  await read();
+                })
+              }
+            >
+              {busy === 'forget'
+                ? t('privateRoom.record.forgetting', 'Forgetting…')
+                : t('privateRoom.record.forget', 'Forget this record on this device')}
+            </Button>
+          </div>
         ) : null}
         {status !== null ? (
           <p className="text-success-on-soft text-sm" role="status">

@@ -162,7 +162,7 @@ const notFound = {
  * (§15.3.1 applied to the directory): distinguishing them would turn the
  * endpoint into an oracle for which room ids exist.
  */
-function refuse(reason: StubFailure): { status: 403 | 404 | 422; body: unknown } {
+function refuse(reason: StubFailure): { status: 403 | 404 | 409 | 422; body: unknown } {
   switch (reason) {
     case 'not_found':
       return { status: 404, body: notFound };
@@ -195,6 +195,17 @@ function refuse(reason: StubFailure): { status: 403 | 404 | 422; body: unknown }
             code: 'unlisted_requires_token',
             message:
               'An unlisted room needs a bootstrap_blind_id in its signed stub — without one no invited member could ever resolve it.',
+          },
+        },
+      };
+    case 'room_already_registered':
+      return {
+        status: 409,
+        body: {
+          error: {
+            code: 'room_already_registered',
+            message:
+              'Licio already holds a directory record for this room. One room has one record — ask the account that registered it to change or remove it.',
           },
         },
       };

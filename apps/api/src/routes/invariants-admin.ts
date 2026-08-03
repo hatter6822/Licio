@@ -41,6 +41,7 @@ import { type EventPipelineServices, getEventPipelineServices } from '../events/
 import { type ForumServices, getForumServices } from '../forum/services.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { getIngestionServices, type IngestionServices } from '../ingestion/services.js';
+import { type BridgeEligibilityDeps, bridgeEligibility } from '../invariants/bridge-eligibility.js';
 import { buildCivicMap } from '../invariants/civic-map.js';
 import {
   INVARIANTS_CONFIG_KEYS,
@@ -48,11 +49,7 @@ import {
   validateInvariantsConfigValue,
 } from '../invariants/config.js';
 import { runRealtimeTier } from '../invariants/scheduler.js';
-import {
-  bridgeCandidatesFor,
-  latestScoiFor,
-  recomputeScoiFor,
-} from '../invariants/scoi-actions.js';
+import { bridgeCandidatesFor, latestScoiFor } from '../invariants/scoi-actions.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
@@ -521,36 +518,40 @@ export function createInvariantsAdminRoutes(
         // ROLE_INTEGRITY power; ACTING on a room's conversation is not, so a
         // thread id published here without that check would render a control
         // that deterministically 404s.
-        const forum = resolveForum();
+        // ONE eligibility check, shared with the POST below (`bridgeEligibility`).
+        //
+        // Every bar the endpoint enforces — the THREAD's room, this caller's
+        // authority over it, a conversation that still accepts contributions, no
+        // request already open, a SCOI baseline — is asked here through the same
+        // function, so a target published on this map is one the endpoint
+        // accepts. Re-deriving them here is what shipped three rounds of
+        // controls that deterministically failed.
+        //
+        // `recompute: false` is the difference that belongs to a READ: the map
+        // asks about every node in the landscape, and a recompute persists a
+        // computation plus its run metadata for 365 days. That turned one GET
+        // into a burst of durable degraded rows, repeated on every refresh. A
+        // story with no stored measurement is simply not offered — and the
+        // endpoint, which is about to act on ONE thread, may still compute it.
+        const eligibility: BridgeEligibilityDeps = {
+          forum: resolveForum(),
+          ingestion: resolveIngestion(),
+          events: resolveEvents(),
+          invariants: resolveInvariants(),
+        };
         const map = await buildCivicMap(
           resolveEvents(),
           resolveIngestion(),
           Date.now(),
-          async (threadId, roomId, storyId) => {
-            if (roomId === null) return false;
-            const room = await forum.rooms.getById(roomId);
-            if (room === null || room.storageMode !== 'server') return false;
-            const authorized = auth.roles.includes('admin')
-              ? true
-              : (await forum.rooms.stewardRolesFor(roomId, auth.userId)).length > 0;
-            if (!authorized) return false;
-            // …AND a SCOI baseline must exist. The bridge POST refuses with
-            // `422 no_scoi` when the conversation has interpretations from fewer
-            // than two lenses, so a target published without one is a control
-            // that fails every time it is used. `void threadId` — the baseline
-            // is a property of the STORY the thread belongs to.
-            // …and no request may already be OPEN on it. The POST answers
-            // `409 already_open`, and the map is not re-fetched after a
-            // successful bridge, so the button stayed live and every later click
-            // failed the same way. Checked first: it is a single indexed read,
-            // and a baseline recompute is not.
-            const invariants = resolveInvariants();
-            if (await invariants.bridgeAttempts.openForThread(threadId)) return false;
-            const baseline =
-              (await latestScoiFor(resolveEvents(), storyId)) ??
-              (await recomputeScoiFor(invariants, resolveEvents(), storyId));
-            return baseline !== null;
-          },
+          async (threadId) =>
+            (
+              await bridgeEligibility(
+                eligibility,
+                threadId,
+                { userId: auth.userId, roles: auth.roles },
+                { recompute: false },
+              )
+            ).ok,
         );
         return c.json({ landscape: map }, 200);
       })
@@ -568,36 +569,42 @@ export function createInvariantsAdminRoutes(
         }
         const forum = resolveForum();
         const ingestion = resolveIngestion();
-        const thread = await ingestion.stories.getThreadById(threadId);
-        if (!thread) return c.json(deny('not_found', 'No such thread'), 404);
-        // Bridge requests are ROOM-scoped: a roomless (global) thread has no
-        // steward surface at all, for admin included — without this the admin
-        // arm would open a bridge request the grants check made unreachable.
-        // The room must also still EXIST and be SERVER-hosted (codex: an
-        // orphaned/migration-drift thread whose room row is gone — or points at
-        // a member-hosted p2p stub — has no steward or report surface;
-        // mirroring the reports route's guard).
-        const bridgeRoom = thread.roomId === null ? null : await forum.rooms.getById(thread.roomId);
-        if (bridgeRoom === null || bridgeRoom.storageMode !== 'server') {
-          return c.json(deny('not_found', 'No such thread'), 404);
-        }
-        const roles = await forum.rooms.stewardRolesFor(thread.roomId, auth.userId);
-        // Same admin arm as the room SCOI reports above.
-        if (roles.length === 0 && !auth.roles.includes('admin')) {
-          return c.json(deny('not_found', 'No such thread'), 404);
-        }
-        const events = resolveEvents();
         const invariants = resolveInvariants();
-        const existing = await invariants.bridgeAttempts.openForThread(threadId);
-        if (existing) {
-          return c.json(deny('already_open', 'A bridge request is already open'), 409);
-        }
-        const baseline =
-          (await latestScoiFor(events, thread.storyId)) ??
-          (await recomputeScoiFor(invariants, events, thread.storyId));
-        if (!baseline) {
+        // THE SAME CHECK THE MAP ASKS, and the only place either asks it. Every
+        // bar below used to live here and be re-derived there; each divergence
+        // shipped as a published control that could only fail.
+        //
+        // `recompute: true`: this caller is about to act on ONE thread, so
+        // computing and persisting a missing SCOI baseline is work it is
+        // entitled to spend — unlike the map, which asks about every node.
+        const verdict = await bridgeEligibility(
+          { forum, ingestion, events: resolveEvents(), invariants },
+          threadId,
+          { userId: auth.userId, roles: auth.roles },
+          { recompute: true },
+        );
+        if (!verdict.ok) {
+          // `not_found` covers an unknown thread, a roomless/orphaned/p2p one,
+          // and a caller with no authority over the room — one answer, so no
+          // refusal here becomes an existence oracle.
+          if (verdict.reason === 'not_found') {
+            return c.json(deny('not_found', 'No such thread'), 404);
+          }
+          if (verdict.reason === 'thread_closed') {
+            return c.json(
+              deny(
+                'thread_closed',
+                'This conversation no longer accepts contributions, so a bridge request could not be answered',
+              ),
+              409,
+            );
+          }
+          if (verdict.reason === 'already_open') {
+            return c.json(deny('already_open', 'A bridge request is already open'), 409);
+          }
           return c.json(deny('no_scoi', 'No SCOI measurement available to baseline against'), 422);
         }
+        const { thread, baseline } = verdict;
         const candidates = await bridgeCandidatesFor(forum, ingestion, threadId);
         const attemptId = crypto.randomUUID();
         await invariants.bridgeAttempts.insert({
