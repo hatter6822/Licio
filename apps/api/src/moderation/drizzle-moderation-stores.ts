@@ -53,7 +53,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { keysetAfterRow } from '../lib/keyset.js';
-import { isUniqueViolation } from '../lib/pg-errors.js';
+import { isUniqueViolation, uniqueViolationConstraint } from '../lib/pg-errors.js';
 import { appendAudit } from './audit.js';
 import type { AuditChainDeps } from './audit-chain.js';
 import type {
@@ -83,6 +83,7 @@ import type {
   ReviewerStatusRecord,
   ReviewerStatusStore,
 } from './stores.js';
+import { DuplicateAuditKeyError } from './stores.js';
 import type { ModerationTransactor, ModerationTx } from './transactor.js';
 
 /** Binds the enforcement writes to one executor (see `ModerationTx.content`). */
@@ -999,10 +1000,22 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
           reportIds: full.reportIds,
           coApproverUserId: full.coApproverUserId,
           notes: full.notes,
+          idempotencyKey: full.idempotencyKey ?? null,
         });
       });
       return full;
     } catch (error) {
+      // A collision on the AT-MOST-ONCE key is settled, not contended: retrying
+      // it would spin until the budget ran out, since the winner's row is
+      // exactly what makes this one refuse. It is reported as its own outcome so
+      // the retry loop never sees it (`writeAudit` turns it into the no-op it
+      // is).
+      if (
+        isUniqueViolation(error) &&
+        uniqueViolationConstraint(error) === 'moderation_audit_idempotency_uq'
+      ) {
+        throw new DuplicateAuditKeyError(full.idempotencyKey ?? '');
+      }
       // A collision on the fork-proof parent/genesis indexes means a concurrent writer
       // took this slot: the caller re-reads the head and retries.  Anything else is a
       // real failure and must not be swallowed as contention.

@@ -38,6 +38,7 @@ import type { ForumServices } from '../forum/services.js';
 import type { AuditEntryInput } from '../identity/audit.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import type { StoryStore } from '../ingestion/stores.js';
 import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { deterministicEventId } from '../pwatt/scoring.js';
 import { INVARIANT_CARDS, validateAllCards } from './cards.js';
@@ -92,6 +93,17 @@ export interface InvariantTx {
   readonly bridgeAttempts: BridgeAttemptStore;
   /** The audit append, bound to the SAME handle as the write above. */
   readonly audit: (input: AuditEntryInput) => Promise<unknown>;
+  /**
+   * The thread read, bound to that handle too.
+   *
+   * A bridge attempt is only writable while its conversation still ACCEPTS
+   * contributions, and reading that through a separately-composed store leaves
+   * the window the check exists to close: the archive commits between the read
+   * and the insert, and the attempt lands anyway — unanswerable, and blocking
+   * the thread's open-row slot for good. A predicate the write depends on has
+   * to be read where the write happens.
+   */
+  readonly threads: Pick<StoryStore, 'getThreadById'>;
 }
 
 export interface InvariantPlatformServices {
@@ -179,6 +191,9 @@ export function createInMemoryInvariantServices(
         return services.bridgeAttempts;
       },
       audit: (input) => identity.audit.append(input),
+      get threads(): Pick<StoryStore, 'getThreadById'> {
+        return ingestion.stories;
+      },
     },
     () => (services.bridgeAttempts instanceof InMemoryBridgeAttemptStore ? [bridgeAttempts] : []),
   );

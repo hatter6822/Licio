@@ -591,16 +591,34 @@ describe('§21.3 — a record cannot change who signed it', () => {
     const svc = freshService();
     const created = await svc.create(listedRequest(), ACCOUNT);
     if (!created.ok) throw new Error('create failed');
+    // The room's OWN signature, not merely a 64-byte string: a PATCH replaces
+    // the pair every member verifies at bootstrap, so it has to verify here for
+    // the same reason a create does.
+    const result = await svc.update(
+      created.value.room_server_id,
+      { signed_stub: SIGNED_STUB, stub_signature: SIGNATURE },
+      ACCOUNT,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('REFUSES a replacement body the room did not sign', async () => {
+    // The schema checks the signature's SIZE, which is a different question:
+    // without this, a buggy or malicious client could leave the room's key
+    // attached to a body nobody signed, and every member would then reject the
+    // record at bootstrap — broken by its own creator.
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
     const result = await svc.update(
       created.value.room_server_id,
       {
         signed_stub: SIGNED_STUB,
-        stub_signature:
-          'bj9hfDw3s1fYlzBBPvvBHWfz8IBZGDm3EXZMiRTV54EBt0iB5ZM5iXKxzspGUyoOixlFO34poTRTcGW0df_Xkg',
+        stub_signature: Buffer.from(new Uint8Array(64).fill(9)).toString('base64url'),
       },
       ACCOUNT,
     );
-    expect(result.ok).toBe(true);
+    expect(result).toEqual({ ok: false, reason: 'signature_invalid' });
   });
 });
 

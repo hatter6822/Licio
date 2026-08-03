@@ -625,16 +625,19 @@ export function createInvariantsAdminRoutes(
         // live request behind: the map withheld the target, every retry said
         // `already_open`, and the durable action had no record at all.
         const opened = await invariants.transact(async (tx) => {
-          // RE-READ the conversation INSIDE the unit.
+          // RE-READ the conversation THROUGH THE UNIT's handle.
           //
           // `bridgeEligibility` answered before the candidate lookup, and a
           // thread can be archived or restricted in between — after which the
           // insert still lands, `createContribution` refuses every possible
           // answer to it, and there is no cancelled state, so the open-row
           // uniqueness then blocks any future request on that thread forever.
-          // The state that gates the write is read in the same transaction as
-          // the write.
-          const current = await ingestion.stories.getThreadById(threadId);
+          //
+          // `tx.threads`, not the container's store: a re-read through a
+          // separately-composed store runs OUTSIDE this transaction and leaves
+          // exactly the window it was added to close. The predicate the write
+          // depends on is read where the write happens.
+          const current = await tx.threads.getThreadById(threadId);
           if (current === null || !acceptsContributions(current)) return null;
           const attempt = await tx.bridgeAttempts.insertIfNoneOpen({
             attemptId: crypto.randomUUID(),

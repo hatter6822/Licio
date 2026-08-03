@@ -125,6 +125,10 @@ export interface ModerationAuditRecord {
   coApproverUserId: string | null;
   notes: string | null;
   createdAt: string;
+  /** Set when this row must exist AT MOST ONCE (the §21 listing capture is
+   *  `listing-evidence:<caseId>`); NULL for every ordinary row. The partial
+   *  unique index decides, so two concurrent writers cannot both land. */
+  idempotencyKey?: string | null;
 }
 
 export interface AccountBlockRecord {
@@ -435,6 +439,21 @@ export interface AuditQueryFilter {
   afterAuditId?: string;
   limit: number;
   offset?: number;
+}
+
+/**
+ * The audit row this key names already exists.
+ *
+ * A distinct outcome from a chain-fork conflict, which is why it is an error
+ * rather than the `null` that means "retry against the new head": a duplicate
+ * key is settled, and retrying it would spin. `writeAudit` catches it, so the
+ * caller sees the no-op it is.
+ */
+export class DuplicateAuditKeyError extends Error {
+  constructor(readonly key: string) {
+    super(`an audit row already exists for idempotency key '${key}'`);
+    this.name = 'DuplicateAuditKeyError';
+  }
 }
 
 export interface ModerationAuditStore {
@@ -1074,6 +1093,22 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore, InMem
     entry: ModerationAuditRecord,
     hashOf: (staged: ModerationAuditRecord) => string,
   ): Promise<ModerationAuditRecord | null> {
+    // AT MOST ONCE, where the caller asked for it — the same partial unique the
+    // SQL adapter has (`moderation_audit_idempotency_uq`). A row that already
+    // carries this key is the answer; a second one is refused rather than
+    // appended, and the caller is told nothing landed because nothing needed to.
+    //
+    // Distinct from the chain conflict below, and it must NOT be reported as
+    // one: the retry loop treats null as "the parent slot was taken, read the
+    // new head and try again", which for a duplicate key would loop until it
+    // gave up. So this throws, and `writeAudit` (the catching variant) turns it
+    // into the no-op it is.
+    if (
+      entry.idempotencyKey != null &&
+      this.#rows.some((r) => r.idempotencyKey === entry.idempotencyKey)
+    ) {
+      throw new DuplicateAuditKeyError(entry.idempotencyKey);
+    }
     // The in-memory stand-in for the fork-proof partial unique.  A single-threaded fold
     // cannot actually race, but the CONTRACT has to be the same one the SQL adapter
     // offers, or the retry loop is exercised by only one of them.

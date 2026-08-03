@@ -247,9 +247,24 @@ export const moderationAudit = pgTable(
       onDelete: 'set null',
     }),
     notes: text('notes'),
+    /**
+     * AT MOST ONCE, for the rows that must be.
+     *
+     * The §21 listing-evidence capture is one per case (a second snapshot
+     * carries text the reporter never saw, labelled as what they reported), and
+     * the route enforced that by reading the trail and then appending — which
+     * two distinct reports joining the same open case both pass. A key here,
+     * with the partial unique below, moves the rule into the write. NULL is the
+     * ordinary case and is unconstrained.
+     */
+    idempotencyKey: text('idempotency_key'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    /** 0126 — see `idempotencyKey`. PARTIAL: only the rows that opt in. */
+    uniqueIndex('moderation_audit_idempotency_uq')
+      .on(t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} is not null`),
     index('moderation_audit_actor_idx').on(t.actorUserId),
     index('moderation_audit_subject_idx').on(t.subjectUserId),
     index('moderation_audit_action_idx').on(t.action),

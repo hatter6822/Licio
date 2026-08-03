@@ -17,6 +17,7 @@ import {
 import { type AuditChainDeps, appendChainedAudit } from './audit-chain.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationAuditRecord } from './stores.js';
+import { DuplicateAuditKeyError } from './stores.js';
 
 export interface AuditWriteInput {
   actorUserId: string | null;
@@ -35,6 +36,10 @@ export interface AuditWriteInput {
   reportIds?: string[];
   coApproverUserId?: string | null;
   notes?: string | null;
+  /** Set when this row must exist AT MOST ONCE (e.g. `listing-evidence:<caseId>`).
+   *  The store's partial unique decides, so two concurrent writers cannot both
+   *  land — a check before the write cannot, which is why the rule moved here. */
+  idempotencyKey?: string;
 }
 
 /**
@@ -108,10 +113,19 @@ export async function writeAudit(
       reportIds: input.reportIds ?? [],
       coApproverUserId: input.coApproverUserId ?? null,
       notes: input.notes ?? null,
+      idempotencyKey: input.idempotencyKey ?? null,
     });
     services.metrics.increment('audit.write.ok');
     return record.auditId;
   } catch (error) {
+    // A duplicate AT-MOST-ONCE key is not a failure: the row this call would
+    // have written is already there, put there by the writer that won. Metered
+    // separately so "the append lost a race it was meant to lose" never reads as
+    // "accountability degraded".
+    if (error instanceof DuplicateAuditKeyError) {
+      services.metrics.increment('audit.write.duplicate_key');
+      return null;
+    }
     services.metrics.increment('audit.write.fail');
     services.log('moderation.audit_write_failed', { action: input.action, error: String(error) });
     return null;

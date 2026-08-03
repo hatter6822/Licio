@@ -920,6 +920,27 @@ describe('IncidentsPanel', () => {
     );
   });
 
+  it('re-reads the landscape when the bridge target is ALREADY OPEN', async () => {
+    // Another steward opened it after this map was fetched, so the server has
+    // already stopped offering that target — and this query has no polling
+    // interval, so without the re-read the button stays enabled on a stale
+    // payload and every click repeats the 409 indefinitely.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: civicLandscape, scan: FULL_SCAN });
+    vi.mocked(api.openBridgeRequest).mockRejectedValue(
+      new ApiClientError('already_open', 'A bridge request is already open', 409),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    await screen.findByText(/Attention landscape/i);
+    const before = vi.mocked(api.fetchCivicMap).mock.calls.length;
+    fireEvent.click(await screen.findByRole('button', { name: /bridge request on this join/i }));
+    await waitFor(() =>
+      expect(vi.mocked(api.fetchCivicMap).mock.calls.length).toBeGreaterThan(before),
+    );
+  });
+
   it('keeps the incident queue usable when the landscape read fails', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);

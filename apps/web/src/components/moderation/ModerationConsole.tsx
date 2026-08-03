@@ -1729,15 +1729,22 @@ function CivicMapSection(): React.ReactElement | null {
       // every later click answers `409 already_open`.
       void queryClient.invalidateQueries({ queryKey: queryKeys.civicMap() });
     },
-    onError: (error) =>
+    onError: (error) => {
+      const alreadyOpen = error instanceof ApiClientError && error.code === 'already_open';
       toast({
         // A 409 is not a failure: someone already asked for a bridge here.
-        message:
-          error instanceof ApiClientError && error.code === 'already_open'
-            ? t('civicMap.bridgeAlreadyOpen', 'A bridge request is already open on that thread.')
-            : t('civicMap.bridgeFailed', 'Could not open a bridge request on that thread.'),
-        tone: error instanceof ApiClientError && error.code === 'already_open' ? 'info' : 'error',
-      }),
+        message: alreadyOpen
+          ? t('civicMap.bridgeAlreadyOpen', 'A bridge request is already open on that thread.')
+          : t('civicMap.bridgeFailed', 'Could not open a bridge request on that thread.'),
+        tone: alreadyOpen ? 'info' : 'error',
+      });
+      // RE-READ on `already_open` too. Another steward opened it after this map
+      // was fetched, so the server has already stopped offering that target —
+      // and this query has no polling interval, so without the invalidation the
+      // button stays enabled on a stale payload and every click repeats the 409
+      // indefinitely. The success path does the same thing for the same reason.
+      if (alreadyOpen) void queryClient.invalidateQueries({ queryKey: queryKeys.civicMap() });
+    },
   });
 
   if (map.isError) {

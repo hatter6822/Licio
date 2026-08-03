@@ -417,6 +417,20 @@ export class PrivateRoomStubService {
     ) {
       return { ok: false, reason: 'identity_change' };
     }
+    // …and the REPLACEMENT must verify, exactly as the original had to.
+    //
+    // `create` proves possession before claiming the room's key; a PATCH that
+    // did not left the same key attached to a body nobody signed — every member
+    // then rejects the record at bootstrap, and the room's own creator is the
+    // one who broke it. The schema checks the signature's SIZE, which is not the
+    // same question.
+    if (
+      request.signed_stub !== undefined &&
+      request.stub_signature !== undefined &&
+      !(await verifyDirectoryStubSignature(request.signed_stub, request.stub_signature))
+    ) {
+      return { ok: false, reason: 'signature_invalid' };
+    }
     const next = await this.store.update(
       roomServerId,
       {

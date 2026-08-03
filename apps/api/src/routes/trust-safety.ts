@@ -322,6 +322,14 @@ export function createTrustSafetyRoutes() {
               // fetches the trail by `caseId` alone, and the general audit panel
               // does not render notes.
               caseId: outcome.caseId,
+              // AT MOST ONCE PER CASE, decided by the store.
+              //
+              // The trail read above is an optimisation, not the rule: two
+              // distinct reports joining the same open case can both see it
+              // empty before either writes. `moderation_audit_idempotency_uq`
+              // is what actually settles it, and the loser's append is a no-op
+              // rather than a second snapshot of text that may have changed.
+              idempotencyKey: `listing-evidence:${outcome.caseId}`,
               reversible: false,
               // BUDGETED against the console's own note bound. The published
               // name and description are member-supplied and long enough

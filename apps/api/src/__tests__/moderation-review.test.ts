@@ -439,6 +439,34 @@ describe('buildCaseReview (snapshot + thread + side-by-side)', () => {
     expect(await buildCaseReview(services, SAFETY, 'missing')).toBeNull();
   });
 
+  it('appends an AT-MOST-ONCE row once, however many writers try', async () => {
+    // The §21 listing capture is one per case: a second snapshot carries text
+    // the reporter never saw, labelled as what they reported. Enforcing that by
+    // reading the trail and then appending is a check — two distinct reports
+    // joining the same open case both pass it before either writes — so the key
+    // moved into the write, where the store settles it.
+    const caseId = await insertCase({ caseId: 'eeeeeeee-0000-4000-9000-0000000000ab' });
+    const row = {
+      actorUserId: null,
+      actorRole: null,
+      action: 'private_room_listing_reported',
+      targetType: 'private_room_stub',
+      targetId: '00000000-0000-4000-8000-0000000000ab',
+      caseId,
+      reversible: false,
+      idempotencyKey: `listing-evidence:${caseId}`,
+    } as const;
+
+    expect(await writeAudit(services, { ...row, notes: 'first' })).not.toBeNull();
+    // The second writer is told nothing landed — because nothing needed to.
+    expect(await writeAudit(services, { ...row, notes: 'second' })).toBeNull();
+
+    const trail = await services.audit.list({ caseId, limit: 10 });
+    const captures = trail.filter((r) => r.action === 'private_room_listing_reported');
+    expect(captures).toHaveLength(1);
+    expect(captures[0]?.notes).toBe('first');
+  });
+
   it('keeps an over-long note RENDERABLE — a stored row that cannot be read is not a record', async () => {
     // The console reads every audit row through `auditRecordViewSchema`, whose
     // `notes` is bounded, so a longer note stored fine and then failed the parse

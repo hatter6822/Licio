@@ -666,6 +666,10 @@ if (db) {
       work({
         bridgeAttempts: new DrizzleBridgeAttemptStore(tx),
         audit: (input) => new DrizzleAuditStore(tx).append(input),
+        // …and the thread read, on the SAME handle: the writability predicate
+        // the insert depends on has to be read inside the transaction, or the
+        // window it closes is still open.
+        threads: new DrizzleStoryStore(tx),
       }),
     );
 }
