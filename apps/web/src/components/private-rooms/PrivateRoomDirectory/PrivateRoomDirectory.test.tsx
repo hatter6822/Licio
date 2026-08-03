@@ -95,6 +95,20 @@ describe('PrivateRoomDirectory', () => {
     expect(await screen.findByText(/No listed rooms yet/i)).toBeInTheDocument();
   });
 
+  it('does not claim a copy that never happened', async () => {
+    mockPages(page([{ id: 'r1', name: 'Neighbourhood watch' }]));
+    // No clipboard at all — an insecure context, an older WebView. The optional
+    // chain that used to guard this resolved `undefined` and the button said
+    // "Room id copied" anyway.
+    vi.spyOn(globalThis, 'navigator', 'get').mockReturnValue({} as unknown as Navigator);
+    render(<PrivateRoomDirectory />);
+    await screen.findByText('Neighbourhood watch');
+
+    const button = screen.getByRole('button', { name: /copy room id/i });
+    await userEvent.click(button);
+    expect(screen.queryByRole('button', { name: /room id copied/i })).toBeNull();
+  });
+
   it('has no accessibility violations', async () => {
     mockPages(page([{ id: 'r1', name: 'Neighbourhood watch' }]));
     const { container } = render(<PrivateRoomDirectory />);

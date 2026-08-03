@@ -303,6 +303,64 @@ describe('§21 directory capability carried through the join (WS-S.1.2b)', () =>
     expect(joiner.directoryStub?.bootstrapBlindId).toBe(payload.bootstrapBlindId);
   });
 
+  it('puts the capability in the SEALED INVITE, not only the post-admission grant', async () => {
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Listed Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const payload = await founder.directoryStubPayload();
+    await founder.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      stubId: '22222222-2222-4222-8222-222222222222',
+      directoryMode: 'unlisted',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    // The INVITEE opens the sealed invite — before any admin has seen a join
+    // request. An unlisted record answers `not_found` to a reader without the
+    // token, so this is the only point at which they can check what Licio
+    // publishes about the room they are being asked to enter.
+    const { invite } = await prep.complete(fragment);
+    expect(invite.room_stub_ref).toBe('11111111-1111-4111-8111-111111111111');
+    expect(invite.bootstrap_blind_id).toBe(payload.bootstrapBlindId);
+  });
+
+  it('omits the capability from an invite to a room with no stub', async () => {
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Detached Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    const { invite } = await prep.complete(fragment);
+    expect(invite.room_stub_ref).toBeUndefined();
+    expect(invite.bootstrap_blind_id).toBeUndefined();
+  });
+
   it('omits the handle for a room that registered no stub', async () => {
     const mkStore = await storeFactory();
     const founder = await PrivateRoomSession.create({

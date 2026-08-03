@@ -15,8 +15,10 @@
 // The JOINER half stands alone (no `session` — the joiner is not yet a member);
 // the ADMIT half drives an existing `session`.
 
+import type { InviteSecret } from '@licio/private-p2p';
 import { useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { fetchPrivateRoomBootstrap } from '../../../lib/private-rooms-api.js';
 import {
   PrivateRoomSession,
   parseJoinGrant,
@@ -88,6 +90,8 @@ function JoinerSection({
   const [requestJson, setRequestJson] = useState<string | null>(null);
   const [grantJson, setGrantJson] = useState('');
   const [joined, setJoined] = useState(false);
+  /** What Licio's own record says about the room this invite claims to be for. */
+  const [recordCheck, setRecordCheck] = useState<DirectoryLookup | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The pending preparation: holds the joiner's keys + the `complete`/`completeJoin` steps.
@@ -119,8 +123,13 @@ function JoinerSection({
     setError(null);
     try {
       const fragment = extractInviteFragment(sealedInvite.trim());
-      const { request } = await pending.complete(fragment);
+      const { invite, request } = await pending.complete(fragment);
       setRequestJson(JSON.stringify(request));
+      // Resolve Licio's record for the room, using the §21.2 capability the
+      // invite carries — the reason it rides the SEALED invite rather than the
+      // post-admission grant. See `lookUpDirectory` for what this does and does
+      // not establish; either way it is a REPORT, never a gate.
+      setRecordCheck(await lookUpDirectory(invite));
     } catch {
       setError(
         t(
@@ -213,6 +222,38 @@ function JoinerSection({
       {error ? (
         <p className="text-error-on-soft text-sm" role="alert">
           {error}
+        </p>
+      ) : null}
+
+      {recordCheck !== null ? (
+        <p
+          className={
+            recordCheck.kind === 'unresolved'
+              ? 'text-error-on-soft text-sm'
+              : 'text-ink-muted text-sm'
+          }
+          role={recordCheck.kind === 'unresolved' ? 'alert' : 'status'}
+        >
+          {recordCheck.kind === 'unresolved'
+            ? t(
+                'privateRoom.join.recordUnresolved',
+                'Warning: this invite points at a Licio directory record that does not resolve. Check with whoever sent it before joining.',
+              )
+            : recordCheck.kind === 'none'
+              ? t(
+                  'privateRoom.join.recordNone',
+                  'Licio holds no record of this room — expected if it was created without one. Nothing else about the invite is affected.',
+                )
+              : recordCheck.name !== null
+                ? t(
+                    'privateRoom.join.recordListed',
+                    'Licio’s record for this room resolves. It is listed publicly as “{name}”.',
+                    { name: recordCheck.name },
+                  )
+                : t(
+                    'privateRoom.join.recordUnlisted',
+                    'Licio’s record for this room resolves. The room publishes no name.',
+                  )}
         </p>
       ) : null}
 
@@ -356,6 +397,46 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
       ) : null}
     </section>
   );
+}
+
+/** What Licio's directory says about the room an invite is for. */
+type DirectoryLookup =
+  | { kind: 'resolved'; name: string | null }
+  | { kind: 'unresolved' }
+  | { kind: 'none' };
+
+/**
+ * Resolve the invite's §21 directory record with the capability it carries.
+ *
+ * What a RESOLVE establishes: the record exists and the token in this invite is
+ * the one that opens it — a token derived from the room's epoch-0 rendezvous
+ * key, so whoever built the invite had, or was given, something only the room
+ * holds. It also shows the invitee the public name before they commit, which is
+ * the point of `listed`.
+ *
+ * What it does NOT establish, and the copy must not imply: that the record and
+ * the invite describe the same room by cryptographic identity. They carry
+ * DIFFERENT keys — the stub's `room_public_key` is the founder device's Ed25519
+ * signing key, the invite's is the manifest's HPKE invite key — so comparing
+ * them would fail on every honest invite, which is exactly the kind of check
+ * that trains people to click through warnings.
+ *
+ * A room with no record at all is ordinary (`detached`, or a registration that
+ * did not succeed), and a network failure is not the invite's fault, so both
+ * read as "none" rather than a warning. A capability that is PRESENT and
+ * resolves nothing is the one case worth flagging: the sender named a record
+ * that is not there.
+ */
+async function lookUpDirectory(invite: InviteSecret): Promise<DirectoryLookup> {
+  const roomServerId = invite.room_stub_ref;
+  const token = invite.bootstrap_blind_id;
+  if (roomServerId === undefined || token === undefined) return { kind: 'none' };
+  try {
+    const record = await fetchPrivateRoomBootstrap(roomServerId, token);
+    return { kind: 'resolved', name: record.display_name };
+  } catch {
+    return { kind: 'unresolved' };
+  }
 }
 
 /** Accept either a full invite URL (`…#invite=<sealed>`) or a bare sealed string,

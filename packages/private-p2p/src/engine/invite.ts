@@ -71,6 +71,8 @@ export interface CreateRoomInviteParams {
   readonly maxUses?: number;
   readonly requiresAdminApproval?: boolean;
   readonly roomStubRef?: string;
+  /** The §21.2 bootstrap capability for `roomStubRef` (see the schema's note). */
+  readonly bootstrapBlindId?: string;
   /** The invite id (default: a fresh random id). */
   readonly inviteId?: string;
   /** The raw invite secret (default: 32 fresh random bytes). */
@@ -93,6 +95,9 @@ export function createRoomInvite(params: CreateRoomInviteParams): InviteSecret {
     granted_role: params.grantedRole,
     requires_admin_approval: params.requiresAdminApproval ?? false,
     ...(params.roomStubRef === undefined ? {} : { room_stub_ref: params.roomStubRef }),
+    ...(params.bootstrapBlindId === undefined
+      ? {}
+      : { bootstrap_blind_id: params.bootstrapBlindId }),
   } satisfies InviteSecret);
 }
 

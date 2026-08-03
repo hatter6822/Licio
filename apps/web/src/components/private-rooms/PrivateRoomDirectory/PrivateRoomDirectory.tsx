@@ -16,6 +16,7 @@
 
 import { useCallback, useEffect, useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { copyText } from '../../../lib/clipboard.js';
 import { type DirectoryEntry, listPrivateRoomDirectory } from '../../../lib/private-rooms-api.js';
 import { Button } from '../../ui/Button/index.js';
 import { Card } from '../../ui/Card/index.js';
@@ -58,12 +59,10 @@ export function PrivateRoomDirectory(): React.ReactElement {
   }, [load]);
 
   async function copyId(roomServerId: string): Promise<void> {
-    try {
-      await globalThis.navigator?.clipboard?.writeText(roomServerId);
-      setCopiedId(roomServerId);
-    } catch {
-      // Clipboard unavailable: the id is still shown in full below the name.
-    }
+    // Only claim it was copied if it WAS — the id is shown in full above the
+    // button either way, so a failed write costs the user nothing but a false
+    // "copied" costs them the paste.
+    if (await copyText(roomServerId)) setCopiedId(roomServerId);
   }
 
   return (

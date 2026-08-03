@@ -19,7 +19,7 @@ import {
 } from '@licio/shared';
 import { useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
-import { createPrivateRoomStub } from '../../../lib/private-rooms-api.js';
+import { createPrivateRoomStub, deletePrivateRoomStub } from '../../../lib/private-rooms-api.js';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { Button } from '../../ui/Button/index.js';
 import { Checkbox } from '../../ui/Checkbox/index.js';
@@ -84,9 +84,18 @@ export function CreatePrivateRoomWizard({
       // discard the room the user just made.
       let directoryFailed = false;
       if (directory !== 'detached') {
+        // TWO steps, TWO catches. Sharing one was a leak: if the POST succeeded
+        // and the local write then failed (quota, a private-mode eviction), the
+        // single catch discarded `room_server_id` — and that id is the ONLY
+        // handle for delist and delete, with no endpoint that lists an account's
+        // stubs. The server record would survive, publicly enumerable for a
+        // listed room, unreachable by the person who created it. So the local
+        // failure ROLLS THE SERVER BACK rather than reporting the same warning as
+        // a network failure that wrote nothing.
+        let created: Awaited<ReturnType<typeof createPrivateRoomStub>> | null = null;
         try {
           const payload = await session.directoryStubPayload();
-          const created = await createPrivateRoomStub({
+          created = await createPrivateRoomStub({
             directoryMode: directory,
             // Display metadata is `listed`-only — the server REFUSES it on an
             // unlisted room rather than dropping it silently, so send it only
@@ -113,12 +122,29 @@ export function CreatePrivateRoomWizard({
           });
         } catch {
           directoryFailed = true;
+          const orphan = created;
           setDirectoryWarning(
             t(
               'privateRoom.create.directoryFailed',
               'The room was created on this device, but Licio could not save its directory record. Share an invite directly, or try listing it again later.',
             ),
           );
+          if (orphan !== null) {
+            try {
+              await deletePrivateRoomStub(orphan.room_server_id);
+            } catch {
+              // The rollback itself failed, so a record this device can no longer
+              // address does exist. Say so with the id, which is now the only way
+              // back to it — silence here is what would make it unmanageable.
+              setDirectoryWarning(
+                t(
+                  'privateRoom.create.directoryOrphan',
+                  'The room was created on this device, but Licio saved a directory record this device could not keep track of, and could not remove it either. Its id is {id} — keep it if you want support to remove the record later.',
+                  { id: orphan.room_server_id },
+                ),
+              );
+            }
+          }
         }
       }
       // HOLD the wizard open on a directory failure. The parent's `onCreated`

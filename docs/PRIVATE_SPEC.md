@@ -652,7 +652,8 @@ Invite material:
 ```ts
 type InviteSecretV1 = {
   schema: 'licio.private.invite_secret.v1';
-  room_stub_ref?: string;
+  room_stub_ref?: string;        // the §21 room_server_id, if the room has a record
+  bootstrap_blind_id?: string;   // the §21.2 capability for that record
   room_public_key: Uint8Array;
   invite_id: string;
   invite_secret: Uint8Array;
@@ -662,6 +663,24 @@ type InviteSecretV1 = {
   requires_admin_approval: boolean;
 };
 ```
+
+The two directory fields travel together and only for a room that registered a
+stub. They ride the SEALED invite rather than the §12.3 grant because the
+recipient needs them BEFORE being admitted: an `unlisted` record answers
+`not_found` to any reader without the token, so an invitee who received the
+capability only after admission could not check what Licio publishes about the
+room they were being asked to enter, and a `listed` room's public name would
+reach them last rather than first.
+
+What resolving the record establishes, and what it does not, is worth stating
+because a client's copy must not overclaim. It establishes that the record
+exists and that this invite carries the token that opens it — a token derived
+from the room's epoch-0 rendezvous key, so its holder had something only the
+room holds. It does NOT bind the record to the invite by cryptographic
+identity: the stub's `room_public_key` is the founder device's signing key while
+the invite's is the manifest's HPKE invite key, so a client that "verified" one
+against the other would warn on every honest invite. A capability that is
+present and resolves nothing is the case worth flagging.
 
 Invite URL format:
 

@@ -11,6 +11,7 @@
 
 import { useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { copyText } from '../../../lib/clipboard.js';
 import type { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { Button } from '../../ui/Button/index.js';
 import { Card } from '../../ui/Card/index.js';
@@ -61,12 +62,11 @@ export function InvitePanel({ session }: InvitePanelProps): React.ReactElement {
 
   async function copy(): Promise<void> {
     if (inviteUrl === null) return;
-    try {
-      await globalThis.navigator?.clipboard?.writeText(inviteUrl);
-      setCopied(true);
-    } catch {
-      // Clipboard unavailable: the text is still selectable in the field.
-    }
+    // An invite link that reports "Copied" without copying is worse than one
+    // that reports nothing: the admin pastes whatever was on the clipboard
+    // before into the channel they chose to deliver it over. The link stays
+    // selectable in the field regardless.
+    if (await copyText(inviteUrl)) setCopied(true);
   }
 
   return (

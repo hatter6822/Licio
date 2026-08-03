@@ -8,6 +8,7 @@ import { DEFAULT_P2P_DIRECTORY_MODE, PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS } fro
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { PRIVATE_P2P_DB_NAME } from '../../../private-p2p/storage.js';
 import { checkA11y } from '../../../test/axe.js';
 import { CreatePrivateRoomWizard } from './CreatePrivateRoomWizard.js';
@@ -148,6 +149,102 @@ describe('CreatePrivateRoomWizard', () => {
       await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
       expect(typeof onCreated.mock.calls[0]?.[0]).toBe('string');
     } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('rolls the SERVER record back when the local write fails', async () => {
+    // The POST succeeds, the IndexedDB attach does not (quota, a private-mode
+    // eviction). `room_server_id` is the only handle for delist and delete and
+    // no endpoint lists an account's stubs, so dropping it would strand a
+    // publicly-enumerable record its own creator could never reach.
+    const calls: { method: string; url: string }[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      calls.push({ method: init?.method ?? 'GET', url });
+      const body = url.includes('/csrf-token')
+        ? { token: 'test-csrf-token' }
+        : init?.method === 'DELETE'
+          ? { removed: true, removed_what: 'licio_directory_record', message: 'Removed.' }
+          : {
+              room_server_id: '11111111-1111-4111-8111-111111111111',
+              stub_id: '22222222-2222-4222-8222-222222222222',
+              bootstrap_endpoints: [],
+              created_at: '2026-08-02T00:00:00.000Z',
+            };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const attachSpy = vi
+      .spyOn(PrivateRoomSession.prototype, 'attachDirectoryStub')
+      .mockRejectedValue(new Error('QuotaExceededError'));
+    try {
+      const user = userEvent.setup();
+      const onCreated = vi.fn();
+      render(<CreatePrivateRoomWizard onCreated={onCreated} />);
+      await user.type(screen.getByLabelText(/room name/i), 'Doomed Room');
+      for (const ack of PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS) {
+        await user.click(screen.getByLabelText(ack.label));
+      }
+      await user.click(screen.getByRole('button', { name: /create private room/i }));
+
+      await screen.findByText(/could not save its directory record/i);
+      await waitFor(() =>
+        expect(
+          calls.some(
+            (call) =>
+              call.method === 'DELETE' && call.url.includes('11111111-1111-4111-8111-111111111111'),
+          ),
+        ).toBe(true),
+      );
+      // The ROOM survives — it is local and already created.
+      expect(onCreated).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: /open the room anyway/i })).toBeInTheDocument();
+    } finally {
+      attachSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('surfaces the orphan id when even the rollback fails', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/csrf-token')) {
+        return new Response(JSON.stringify({ token: 'test-csrf-token' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (init?.method === 'DELETE') throw new Error('offline');
+      return new Response(
+        JSON.stringify({
+          room_server_id: '11111111-1111-4111-8111-111111111111',
+          stub_id: '22222222-2222-4222-8222-222222222222',
+          bootstrap_endpoints: [],
+          created_at: '2026-08-02T00:00:00.000Z',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    const attachSpy = vi
+      .spyOn(PrivateRoomSession.prototype, 'attachDirectoryStub')
+      .mockRejectedValue(new Error('QuotaExceededError'));
+    try {
+      const user = userEvent.setup();
+      render(<CreatePrivateRoomWizard />);
+      await user.type(screen.getByLabelText(/room name/i), 'Orphaned Room');
+      for (const ack of PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS) {
+        await user.click(screen.getByLabelText(ack.label));
+      }
+      await user.click(screen.getByRole('button', { name: /create private room/i }));
+
+      // A record this device cannot address DOES exist. Its id is the only way
+      // back to it, so silence here is what would make it unmanageable.
+      expect(await screen.findByText(/11111111-1111-4111-8111-111111111111/)).toBeInTheDocument();
+    } finally {
+      attachSpy.mockRestore();
       fetchSpy.mockRestore();
     }
   });

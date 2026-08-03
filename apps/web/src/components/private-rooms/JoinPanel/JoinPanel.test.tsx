@@ -7,13 +7,14 @@
 import 'fake-indexeddb/auto';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { PRIVATE_P2P_DB_NAME } from '../../../private-p2p/storage.js';
 import { checkA11y } from '../../../test/axe.js';
 import { JoinPanel } from './JoinPanel.js';
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await new Promise<void>((resolve) => {
     const req = indexedDB.deleteDatabase(PRIVATE_P2P_DB_NAME);
     req.onsuccess = () => resolve();
@@ -21,6 +22,31 @@ afterEach(async () => {
     req.onblocked = () => resolve();
   });
 });
+
+/** A §21.2 bootstrap projection with only the fields this check reads. */
+function jsonResponse(over: Record<string, unknown>): Response {
+  return new Response(
+    JSON.stringify({
+      room_server_id: '11111111-1111-4111-8111-111111111111',
+      directory_mode: 'listed',
+      display_name: null,
+      display_description: null,
+      display_avatar_public_cid: null,
+      room_public_key: 'cm9vbS1rZXk',
+      manifest_key_commitment: 'bWFuaWZlc3Q',
+      latest_manifest_commitment: null,
+      rendezvous_policy: 'licio_blind',
+      bootstrap_hints: [],
+      bootstrap_endpoints: [],
+      signed_stub: {},
+      stub_signature: 'c2ln',
+      created_at: '2026-08-02T00:00:00.000Z',
+      updated_at: '2026-08-02T00:00:00.000Z',
+      ...over,
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  );
+}
 
 async function makeSession(): Promise<PrivateRoomSession> {
   return PrivateRoomSession.create({
@@ -68,6 +94,71 @@ describe('JoinPanel — joiner half', () => {
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(/could not be opened/i),
     );
+  });
+});
+
+describe('JoinPanel — the §21.2 pre-join directory check', () => {
+  /** Drive the joiner half to the point where an invite has been opened. */
+  async function openInvite(admin: PrivateRoomSession): Promise<void> {
+    const user = userEvent.setup();
+    render(<JoinPanel />);
+    await user.type(screen.getByLabelText(/your display name/i), 'Bob');
+    await user.click(screen.getByRole('button', { name: /get my recipient key/i }));
+    const keyField = await screen.findByLabelText(/your recipient key/i);
+    const { inviteUrl } = await admin.createInvite({
+      inviteePublicKey: (keyField as HTMLTextAreaElement).value,
+    });
+    await user.type(screen.getByLabelText(/paste the invite link/i), inviteUrl);
+    await user.click(screen.getByRole('button', { name: /build join request/i }));
+  }
+
+  async function registerStub(admin: PrivateRoomSession): Promise<string> {
+    const payload = await admin.directoryStubPayload();
+    await admin.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      stubId: '22222222-2222-4222-8222-222222222222',
+      directoryMode: 'listed',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+    return payload.roomPublicKey;
+  }
+
+  it('shows the public name from the record the invite unlocks', async () => {
+    const admin = await makeSession();
+    await registerStub(admin);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      jsonResponse({ display_name: 'Neighbourhood watch' }),
+    );
+    await openInvite(admin);
+    expect(
+      await screen.findByText(/listed publicly as “Neighbourhood watch”/i),
+    ).toBeInTheDocument();
+  });
+
+  it('WARNS when the invite names a record that does not resolve', async () => {
+    const admin = await makeSession();
+    await registerStub(admin);
+    // A 404 covers an unknown room AND a wrong token alike (§15.3.1), so this is
+    // "the sender named a record that is not there" — worth flagging, unlike an
+    // invite that claims no record at all.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'not_found', message: 'gone' } }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await openInvite(admin);
+    const alerts = await screen.findAllByRole('alert');
+    expect(alerts.some((el) => /does not resolve/i.test(el.textContent ?? ''))).toBe(true);
+  });
+
+  it('says there is no record rather than blocking the join', async () => {
+    // A `detached` room carries no capability at all, and refusing to proceed
+    // would break the mode whose entire point is that Licio knows nothing.
+    const admin = await makeSession();
+    await openInvite(admin);
+    expect(await screen.findByText(/holds no record of this room/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/your join request/i)).toBeInTheDocument();
   });
 });
 

@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { copyText } from '../../../lib/clipboard.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
 import { Tooltip } from '../../ui/Tooltip/index.js';
@@ -40,8 +41,11 @@ async function deliver(payload: { title: string; text: string; url: string }): P
     await nav.share(payload);
     return 'shared';
   }
-  await navigator.clipboard.writeText(`${payload.text} ${payload.url}`.trim());
-  return 'copied';
+  // A clipboard that is absent and one that DENIES are the same outcome here:
+  // nothing was written, so the caller's existing "stay idle, claim nothing"
+  // branch is the honest answer. Previously the absent case threw a TypeError
+  // into that same branch — right by accident; now it is right on purpose.
+  return (await copyText(`${payload.text} ${payload.url}`.trim())) ? 'copied' : 'idle';
 }
 
 export function ShareStoryButton({

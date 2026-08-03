@@ -1332,11 +1332,20 @@ export class PrivateRoomSession {
       throw new Error('createInvite: the room manifest carries no invite public key');
     }
     const expiresAt = params.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    // The §21 directory capability rides the SEALED invite, not just the
+    // post-admission grant. An invitee needs it BEFORE joining: an `unlisted`
+    // record answers `not_found` without the token, so without this the
+    // recipient of an invite cannot check what Licio publishes about the room
+    // they are about to enter — and the room-signed `room_public_key` in that
+    // record is the one cross-check on the invite that does not come from the
+    // person who sent it.
+    const stub = this.session.directoryStub;
     const invite = this.p2p.createRoomInvite({
       roomPublicKey,
       grantedRole: params.grantedRole ?? 'member',
       expiresAt,
       ...(params.maxUses === undefined ? {} : { maxUses: params.maxUses }),
+      ...(stub ? { roomStubRef: stub.roomServerId, bootstrapBlindId: stub.bootstrapBlindId } : {}),
     });
     const sealed = await this.p2p.sealInvite(
       this.p2p.fromBase64Url(params.inviteePublicKey),
