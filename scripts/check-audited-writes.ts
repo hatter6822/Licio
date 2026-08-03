@@ -33,10 +33,21 @@
 // gate has nothing left to excuse, and a new violation has no way to be written
 // down as acceptable.
 //
-// WHAT IT DOES NOT CLAIM.  Lexical containment is the test, so a handler that
-// calls a helper which opens the unit reads as a violation here — the fix is to
-// pass the unit's stores, which is what the moderation call sites do.  And a
-// write with no audit at all is a different question this gate does not ask.
+// …AND THE UNIT ONE CALL AWAY.  A handler that writes and then calls a helper
+// which opens the unit and audits inside it reads as two innocent halves —
+// handler with a write and no append, helper with an append properly inside a
+// unit — while the defect lives in the seam between them.  That is how
+// `/mfa/totp/verify` spent a single-use recovery code with a `setAuth` and then
+// called `finishMfa`, whose unit recorded the verification: an append failure
+// answered 500 having permanently burned the code.  So a same-file helper that
+// audits inside its own unit is attributed to its CALLER.  The fix the gate is
+// asking for is to hand the write INTO that unit (`finishMfa(…, (tx) =>
+// tx.store.consumeRecoveryCode(…))`, the shape the moderation call sites use
+// when they pass a transactor's stores), and `insideCallbackTo` recognises it.
+//
+// WHAT IT DOES NOT CLAIM.  A write with no audit at all is a different question
+// this gate does not ask, and attribution stops at the file: a helper imported
+// from another module is invisible here.
 //
 // READ FROM THE PARSE, like every other gate here: a call is a CallExpression
 // with a resolved callee shape, not a line matching a regex, and the enclosing
@@ -51,9 +62,14 @@ const ROUTES_DIR = resolve(ROOT, 'apps/api/src/routes');
 
 /** Calls that append to an audit trail. */
 const AUDIT_CALLS = [/\baudit\.append$/, /^writeAudit$/, /\bauditChain\b/];
-/** Calls that change durable state. `.append` is excluded — that IS the audit. */
+/** Calls that change durable state. `.append` is excluded — that IS the audit.
+ *
+ *  `consume` earns its place the hard way: spending a single-use credential is
+ *  as durable as any insert and rather less recoverable, and the verb was
+ *  missing while `/mfa/totp/verify` burned a recovery code outside the unit
+ *  that recorded the verification. */
 const WRITE_CALLS =
-  /\.(insert|insertIfNoneOpen|update|updateUser|upsert|create|createWithThread|remove|delete|purge|credit|rebaseline|setAuth|applyAction|apply|delist|claim|reassign)[A-Za-z]*$/;
+  /\.(insert|insertIfNoneOpen|update|updateUser|upsert|create|createWithThread|remove|delete|purge|consume|credit|rebaseline|setAuth|applyAction|apply|delist|claim|reassign)[A-Za-z]*$/;
 /** Opening a unit of work. */
 const UNIT_CALLS = /(\.transactor\.run|\.transact|\.runInUnit)$/;
 
@@ -101,6 +117,48 @@ function handlerLabel(fn: Syntax): string {
   return '(unnamed handler)';
 }
 
+/** Every function-ish node in a source, by declared name. */
+function namedFunctions(root: Syntax): Map<string, Syntax> {
+  const byName = new Map<string, Syntax>();
+  for (const node of walk(root)) {
+    if (node.kind === SyntaxKind.FunctionDeclaration) {
+      const name = node.name?.getText();
+      if (name !== undefined) byName.set(name, node);
+    }
+  }
+  return byName;
+}
+
+/**
+ * Is `node` inside a callback HANDED TO one of `helpers`?
+ *
+ * This is the sanctioned fix for the seam below, not an exception to it: the
+ * caller cannot open the helper's unit, so it passes the write in and the helper
+ * runs it on the unit's own handle — `finishMfa(services, …, (tx) =>
+ * tx.store.consumeRecoveryCode(…))`, the same shape as passing a transactor's
+ * stores to a moderation helper. Lexically the write sits under `finishMfa`
+ * rather than under `transact`, so without this the gate would flag exactly the
+ * code it exists to ask for.
+ */
+function insideCallbackTo(node: Syntax, helpers: ReadonlySet<string>): boolean {
+  for (let at = node.parent; at !== undefined; at = at.parent) {
+    if (at.kind !== SyntaxKind.ArrowFunction && at.kind !== SyntaxKind.FunctionExpression) continue;
+    const call = at.parent;
+    if (call?.kind === SyntaxKind.CallExpression && helpers.has(calleeText(call))) return true;
+  }
+  return false;
+}
+
+/** Does this function open a unit AND append an audit row inside it? */
+function auditsInsideItsOwnUnit(fn: Syntax): boolean {
+  for (const node of walk(fn)) {
+    if (node.kind !== SyntaxKind.CallExpression) continue;
+    if (!AUDIT_CALLS.some((pattern) => pattern.test(calleeText(node)))) continue;
+    if (insideUnit(node)) return true;
+  }
+  return false;
+}
+
 export function runAuditedWriteGate(files: Map<string, string>): string[] {
   const findings = withParsedSources(
     [...files].map(([path, content]) => ({ path, content })),
@@ -108,6 +166,52 @@ export function runAuditedWriteGate(files: Map<string, string>): string[] {
       const out: Finding[] = [];
       for (const source of parsed) {
         const newlines = newlineIndex(source.content);
+        // THE UNIT ONE CALL AWAY.
+        //
+        // A handler that writes and then calls a helper which opens the unit and
+        // audits inside it reads as two innocent halves: the handler has a write
+        // and no append, the helper has an append properly inside a unit. The
+        // defect is the seam between them, and it is not hypothetical — it is
+        // how `/mfa/totp/verify` spent a single-use recovery code with a
+        // `setAuth` and then called `finishMfa`, whose unit recorded the
+        // verification. An append failure there answered 500 having permanently
+        // burned the code, which on the user's last one costs them the account.
+        //
+        // So a same-file helper that audits inside its own unit is attributed to
+        // its CALLER: whatever the caller wrote before calling it had to go in
+        // that unit too.
+        const helpers = namedFunctions(source.root);
+        const auditingHelpers = new Set(
+          [...helpers].filter(([, fn]) => auditsInsideItsOwnUnit(fn)).map(([name]) => name),
+        );
+        for (const write of walk(source.root)) {
+          if (write.kind !== SyntaxKind.CallExpression) continue;
+          if (!WRITE_CALLS.test(calleeText(write))) continue;
+          if (insideUnit(write)) continue;
+          // Handed INTO the helper's unit — the fix, not the defect.
+          if (insideCallbackTo(write, auditingHelpers)) continue;
+          // The INNERMOST enclosing function owns the write: attributing it to
+          // every ancestor would report the same defect once per nesting level.
+          const fn = enclosingFunction(write);
+          if (fn === undefined) continue;
+          // A helper's own body is judged where it is CALLED, not here — else
+          // every correct transactor flags itself for the writes inside its unit.
+          if (auditingHelpers.has(fn.name?.getText() ?? '')) continue;
+          let auditsElsewhere = false;
+          for (const inner of walk(fn)) {
+            if (inner.kind !== SyntaxKind.CallExpression) continue;
+            if (auditingHelpers.has(calleeText(inner))) {
+              auditsElsewhere = true;
+              break;
+            }
+          }
+          if (!auditsElsewhere) continue;
+          out.push({
+            file: source.path,
+            line: lineAt(newlines, write.getStart()),
+            detail: handlerLabel(fn),
+          });
+        }
         for (const node of walk(source.root)) {
           if (node.kind !== SyntaxKind.CallExpression) continue;
           const callee = calleeText(node);

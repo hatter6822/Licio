@@ -190,6 +190,89 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect(reuse.status).toBe(400);
   });
 
+  it('does NOT burn the recovery code when the audit append fails', async () => {
+    // The code was spent by a `setAuth` BEFORE `finishMfa` opened its unit, so
+    // an audit failure answered 500 having permanently consumed it while
+    // granting nothing — and on a user's last code that is the account. The
+    // consumption now runs inside the same unit as the record, so a failing
+    // append takes it down with it.
+    const { app, sid } = await signup('recoveryaudit');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const sid2 = cookie(confirm, '__Host-sid');
+    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
+      .recovery_codes[0] as string;
+
+    // ONE failing append, on the verification record only.
+    const realAppend = services.audit.append.bind(services.audit);
+    let failed = false;
+    services.audit.append = async (entry, createdAt) => {
+      if (!failed && entry.eventType === 'mfa_verify') {
+        failed = true;
+        throw new Error('audit store unavailable');
+      }
+      return realAppend(entry, createdAt);
+    };
+
+    const attempt = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(sid2),
+      body: JSON.stringify({ code: recovery }),
+    });
+    expect(attempt.status).toBeGreaterThanOrEqual(500);
+    services.audit.append = realAppend;
+
+    // The code still works: nothing was consumed, so the user is not locked out
+    // by a failure on the platform's side.
+    const retry = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(sid2),
+      body: JSON.stringify({ code: recovery }),
+    });
+    expect(retry.status).toBe(200);
+    expect((await readJson<{ recovery_remaining: number }>(retry)).recovery_remaining).toBe(9);
+  });
+
+  it('records a REJECTED attempt as a failure, not as a verification', async () => {
+    // Both paths appended `mfa_verify`, so the trail could not answer "did this
+    // account clear MFA?" — a brute-force run read exactly like sign-ins.
+    const { app, sid } = await signup('mfafailaudit');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const sid2 = cookie(confirm, '__Host-sid');
+
+    const bad = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(sid2),
+      body: JSON.stringify({ code: '000000' }),
+    });
+    expect(bad.status).toBe(400);
+
+    const token = sid2.split('=')[1] as string;
+    const userId = (await services.sessions.get(sha256Hex(token)))?.record.user_id as string;
+    const trail = await services.audit.securityActivityForUser(userId);
+    const events = trail.map((e) => e.event_type);
+    expect(events).toContain('mfa_verify_failed');
+    // …and NOT as a success: the whole point is that the two are now distinct.
+    expect(events).not.toContain('mfa_verify');
+  });
+
   it('burns the confirm code so it cannot be replayed at /verify (WS-D.1.5b)', async () => {
     const { app, sid } = await signup('confirmreplay');
     const enroll = await app.request('/v1/auth/mfa/totp/enroll', {

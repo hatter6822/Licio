@@ -818,6 +818,24 @@ export function createComplianceRoutes() {
                 reason,
                 approvalRef: approval_ref ?? null,
               });
+              // …and the OPERATOR's trail, in the same unit.
+              //
+              // Two trails answer two questions: the hash chain above is the
+              // authoritative record of what the policy became, and this is
+              // the security trail of what this ACCOUNT did — the one an
+              // operator reviews per actor rather than per region. It used to
+              // be a best-effort append after the commit, which meant a policy
+              // change could be live and hash-audited while absent from the
+              // account's history entirely; now neither exists without the
+              // other.
+              await stores.identityAudit.append({
+                actorUserId: auth.userId,
+                eventType: 'compliance_policy_change',
+                context: {
+                  setting: policyInput.country_or_region,
+                  new_value: previous === null ? 'create' : 'update',
+                },
+              });
             },
             'jurisdiction policy write',
           );
@@ -852,11 +870,11 @@ export function createComplianceRoutes() {
             503,
           );
         }
-        // Hot reload FIRST: the policy is live and hash-audited from here on,
-        // so serving a stale cached verdict until the TTL would be the real
-        // harm.  (The identity audit below is a secondary index over the
-        // authoritative chain entry just written — it must not be able to
-        // strand an applied change behind an un-invalidated cache.)
+        // Hot reload: past this point the policy is live and both trails are
+        // committed, so serving a stale cached verdict until the TTL is the
+        // only remaining harm — and it is the one thing here that cannot be
+        // rolled back, which is why nothing after the unit is allowed to fail
+        // the request.
         services.policyCache.invalidate(policyInput.country_or_region);
         try {
           await services.broadcaster.publish(policyInput.country_or_region);

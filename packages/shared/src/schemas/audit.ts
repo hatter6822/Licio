@@ -18,6 +18,11 @@ export const AUDIT_EVENT_TYPES = [
   'auth_method_remove',
   'mfa_enroll',
   'mfa_verify',
+  /** A REJECTED second-factor attempt.  Distinct from `mfa_verify` because the
+   *  failure path used to append that same type, so the trail an investigator
+   *  reads to answer "did this account clear MFA?" could not tell a clearance
+   *  from a wrong code — and a brute-force run looked exactly like sign-ins. */
+  'mfa_verify_failed',
   'mfa_disable',
   'privacy_setting_change',
   'export_request',

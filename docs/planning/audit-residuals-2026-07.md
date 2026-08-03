@@ -712,6 +712,17 @@ What still keeps this closed is `scripts/check-audited-writes.test.ts`'s last
 case, which runs the gate over the LIVE route tree — with no allowlist, a
 regression has nowhere to be written down.
 
+The gate itself grew one leg after a defect walked past it: **the unit one call
+away.**  `/mfa/totp/verify` spent a single-use recovery code with a `setAuth` and
+then called `finishMfa`, whose own unit recorded the verification — two innocent
+halves (a handler with a write and no append, a helper with an append properly
+inside a unit) with the defect in the seam, so an append failure burned the code
+while granting nothing.  A same-file helper that audits inside its own unit is
+now attributed to its CALLER; the sanctioned fix is to hand the write into that
+unit as a callback (`insideCallbackTo` recognises it), and `consume*` counts as
+the durable write it is.  Attribution stops at the file — a helper imported from
+another module is still invisible, which is the next leg if one is ever needed.
+
 ### Cursor grammar — a malformed cursor must not restart pagination
 
 `decodeKeysetCursor` and `parseDirectoryCursor` both fail SOFT (an unreadable

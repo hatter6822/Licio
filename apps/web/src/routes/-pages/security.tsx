@@ -758,6 +758,14 @@ const SECURITY_EVENT_LABELS: Partial<
   auth_method_remove: { key: 'security.event.auth_method_remove', text: 'Sign-in method removed' },
   mfa_enroll: { key: 'security.event.mfa_enroll', text: 'Two-factor set up' },
   mfa_verify: { key: 'security.event.mfa_verify', text: 'Two-factor verified' },
+  // Named here rather than left to the humanized fallback, for the same reason
+  // `login_failure` is: a rejected second factor the account holder did not
+  // attempt is the clearest signal they will ever get that someone else has
+  // their password, and it belongs in the feed in words they read as an alarm.
+  mfa_verify_failed: {
+    key: 'security.event.mfa_verify_failed',
+    text: 'Failed two-factor attempt',
+  },
   mfa_disable: { key: 'security.event.mfa_disable', text: 'Two-factor disabled' },
   privacy_setting_change: {
     key: 'security.event.privacy_setting_change',

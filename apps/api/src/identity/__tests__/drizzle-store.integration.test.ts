@@ -185,6 +185,65 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
     expect(await store.setAuth(randomUUID(), { mfaPending: true })).toBeNull();
   });
 
+  it('consumeRecoveryCode spends a code EXACTLY once, under a concurrent pair', async () => {
+    // Single-use has to be a property of the write, not of a read before it.
+    // `getAuth` + `setAuth(recoveryCodeHashes: remaining)` is two statements, so
+    // two requests presenting the same code both see it active and both write a
+    // list without it — the code is spent twice, and the second write rebuilds
+    // the whole list from a stale snapshot, resurrecting anything the first
+    // spent in between. Only a real database can show the race resolve.
+    const { userId } = await store.createUser(userInput());
+    const codes = [sha256Hex('r-1'), sha256Hex('r-2'), sha256Hex('r-3')];
+    await store.setAuth(userId, { recoveryCodeHashes: codes });
+    const target = codes[0] as string;
+
+    // The race is FORCED rather than hoped for. A plain `Promise.all` of two
+    // consumes is a real race but a timing-dependent one: whichever transaction
+    // gets its round trip in first may finish outright, and then a read-then-
+    // write implementation passes because the second call's read already sees
+    // the code spent. Holding a transaction open across the second attempt puts
+    // the second caller in exactly the state that breaks it — a snapshot in
+    // which the code is still active, taken before the winner committed.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const winner = db.transaction(async (tx) => {
+      await tx.execute(
+        sql`UPDATE mfa_recovery_codes SET used_at = now()
+            WHERE user_id = ${userId} AND code_hash = decode(${target}, 'hex')
+              AND used_at IS NULL`,
+      );
+      await held; // …the row is locked and uncommitted while the loser runs.
+      return true;
+    });
+    // Give the winner its lock before the loser reads.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const loser = store.consumeRecoveryCode(userId, target);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release?.();
+    await winner;
+    // The loser blocked on the row lock, then re-evaluated its own predicate
+    // against the committed row and found the code spent. A read-then-write
+    // stamps it a SECOND time and reports success on a code it did not win.
+    expect(await loser).toBeNull();
+
+    const active = (await store.getAuth(userId))?.recoveryCodeHashes ?? [];
+    expect([...active].sort()).toEqual([...codes.slice(1)].sort());
+    // Stamped, never deleted — single-use forensics (WS-D.1.5a).
+    const counts = await db.execute(
+      sql`SELECT count(*) FILTER (WHERE used_at IS NULL) AS active,
+                 count(*) FILTER (WHERE used_at IS NOT NULL) AS used
+          FROM mfa_recovery_codes WHERE user_id = ${userId}`,
+    );
+    expect(counts[0]).toMatchObject({ active: '2', used: '1' });
+
+    // An unknown code and an unknown user are both "not active", never a throw.
+    expect(await store.consumeRecoveryCode(userId, sha256Hex('never-issued'))).toBeNull();
+    expect(await store.consumeRecoveryCode(randomUUID(), target)).toBeNull();
+    expect(await store.consumeRecoveryCode('not-a-uuid', target)).toBeNull();
+  });
+
   // --- WebAuthn credentials -----------------------------------------------------
   it('upserts WebAuthn credentials with byte-exact base64url/bytea round-trips', async () => {
     const { userId } = await store.createUser(userInput());

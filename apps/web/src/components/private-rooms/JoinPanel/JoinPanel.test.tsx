@@ -381,6 +381,56 @@ describe('JoinPanel — admit half', () => {
     expect(screen.queryByLabelText(grantLabel)).not.toBeInTheDocument();
   });
 
+  it('drops a SUPERSEDED admission rather than overwriting the next one', async () => {
+    // Clearing the grant on input change fixed the display but not the race
+    // behind it: admission is several async crypto steps and the fields stay
+    // editable throughout, so device A's in-flight attempt can resolve after the
+    // admin has pasted device B's records — and its success branch writes A's
+    // grant AND blanks both fields, destroying B's input to show a grant for a
+    // different device.
+    const user = userEvent.setup();
+    const admin = await makeSession();
+    const prepA = await PrivateRoomSession.prepareJoinRequest({ proposedDisplayName: 'Ann' });
+    const inviteA = await admin.createInvite({ inviteePublicKey: prepA.inviteePublicKey });
+    const fragmentA = inviteA.inviteUrl.slice(
+      inviteA.inviteUrl.indexOf('#invite=') + '#invite='.length,
+    );
+    const { request: requestA } = await prepA.complete(fragmentA);
+
+    // Hold A's admission open so the admin can type over it, exactly as a slow
+    // MLS Add would.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const real = admin.admitJoinRequest.bind(admin);
+    vi.spyOn(admin, 'admitJoinRequest').mockImplementation(async (invite, request) => {
+      const outcome = await real(invite, request);
+      await held;
+      return outcome;
+    });
+
+    render(<JoinPanel session={admin} />);
+    const inviteField = screen.getByLabelText(/^invite record$/i);
+    const requestField = screen.getByLabelText(/^join request$/i);
+    fireEvent.change(inviteField, { target: { value: JSON.stringify(inviteA.invite) } });
+    fireEvent.change(requestField, { target: { value: JSON.stringify(requestA) } });
+    await user.click(screen.getByRole('button', { name: /verify and admit/i }));
+
+    // …the admin moves on to device B while A is still in flight.
+    fireEvent.change(inviteField, { target: { value: '{"device":"B invite"}' } });
+    fireEvent.change(requestField, { target: { value: '{"device":"B request"}' } });
+    release?.();
+
+    await waitFor(() => expect(screen.queryByText(/admitting/i)).not.toBeInTheDocument());
+    // B's records are still where the admin put them, and no grant for A is on
+    // screen under a label pointing at B.
+    expect((inviteField as HTMLTextAreaElement).value).toBe('{"device":"B invite"}');
+    expect((requestField as HTMLTextAreaElement).value).toBe('{"device":"B request"}');
+    expect(screen.queryByLabelText(/send this back to the new device/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
   it('has no accessibility violations', async () => {
     const admin = await makeSession();
     const { container } = render(<JoinPanel session={admin} />);

@@ -158,7 +158,15 @@ interfaces.
   app's own dependency-free encoder at its v5 opt-in; the LCAP §22.3
   micro-bundle profile stays pinned to v4) plus the grouped **setup key**
   with a copy affordance for the manual "enter a setup key" path
-  (`apps/web/src/lib/otpauth.ts`).
+  (`apps/web/src/lib/otpauth.ts`).  A recovery code is spent by
+  `IdentityStore.consumeRecoveryCode` — a compare-and-set whose predicate is the
+  `used_at IS NULL` WHERE clause, so single-use is a property of the write rather
+  than of a read before it — and it runs INSIDE the unit that records the
+  verification, so an audit failure cannot burn a code without granting access.
+  A rejected attempt is `mfa_verify_failed`, distinct from the `mfa_verify` a
+  success writes: the trail has to be able to answer "did this account clear
+  MFA?", which it could not while a brute-force run and a sign-in produced
+  identical rows.
 
 WS-D endpoints rely on `SameSite=Strict` + the opaque session model + a per-flow
 `login_attempt_id` binding as the CSRF defense (so they are exempt from the WS-C

@@ -933,6 +933,31 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     expect(body.scan.examined).toBe(125);
   });
 
+  it('calls a scan COMPLETE when the room ends on a FULL page boundary', async () => {
+    // The room whose thread count is an exact multiple of the page size never
+    // produces a short page, so the walk consumes its last full page and the
+    // entry cap ends the loop with nothing left to read — a room examined
+    // ENTIRELY, reported as truncated. Same wrong answer as the short-page case,
+    // one page boundary further along, and only a lookahead can tell it from a
+    // room that really does continue.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId } = await seedSplitRoom(fixture, steward.userId);
+    // Exactly 100 threads (pages of 50 → 50, 50 — both full), all measured, so
+    // the hundredth entry is the room's final thread.
+    const measured = await seedRoomThreads(fixture, roomId, 100, 0);
+    expect(measured).toBe(100);
+
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    const body = (await report.json()) as {
+      reports: unknown[];
+      scan: { complete: boolean; examined: number };
+    };
+    expect(body.reports).toHaveLength(100);
+    expect(body.scan.complete).toBe(true);
+    expect(body.scan.examined).toBe(100);
+  });
+
   it('still reports INCOMPLETE when the cap stops it mid-page', async () => {
     // The other side of the fix: the cap landing anywhere but the final thread
     // leaves threads genuinely unexamined, and neither flag nor count may

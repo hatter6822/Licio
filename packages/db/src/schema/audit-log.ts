@@ -17,6 +17,9 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'auth_method_remove',
   'mfa_enroll',
   'mfa_verify',
+  /** A rejected attempt — see AUDIT_EVENT_TYPES in @licio/shared for why it is
+   *  its own type rather than an `mfa_verify` with a context flag. */
+  'mfa_verify_failed',
   'mfa_disable',
   'privacy_setting_change',
   'export_request',

@@ -128,6 +128,28 @@ export interface IdentityStore {
   // --- User auth ---
   getAuth(userId: string): Promise<StoredUserAuth | null>;
   setAuth(userId: string, patch: Partial<StoredUserAuth>): Promise<StoredUserAuth | null>;
+  /**
+   * COMPARE-AND-SET: spend a recovery code, only while it is still active.
+   *
+   * `null` ⇒ this code is not an active code for this user (unknown, or a
+   * concurrent request just spent it).  Otherwise the count of codes left.
+   *
+   * A `getAuth` + `setAuth(recoveryCodeHashes: remaining)` cannot express this
+   * for two independent reasons.  The first is the ordinary one: two requests
+   * presenting the SAME code both read it present and both write a list without
+   * it, so a single-use code is used twice — and the second write also
+   * resurrects any code the first spent in between, because it rewrites the
+   * whole list from a stale snapshot.  The second is that the list is a
+   * PROJECTION of `mfa_recovery_codes` rows, so "set the list" has to diff the
+   * old and new sets to decide which rows to stamp — a wide write standing in
+   * for a one-row transition.
+   *
+   * As one statement it is also the only shape that can join the unit that
+   * records it: consuming outside and auditing inside means an append failure
+   * burns the code without granting access — worst on the last one, where it
+   * costs the account its remaining way in.
+   */
+  consumeRecoveryCode(userId: string, codeHash: string): Promise<{ remaining: number } | null>;
   // --- WebAuthn credentials ---
   /** UPSERT by `credentialId` — counter/last-used updates re-add the credential. */
   addWebauthn(cred: StoredWebauthnCredential): Promise<void>;
@@ -272,6 +294,21 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     const updated = { ...auth, ...patch };
     this.#auth.set(userId, updated);
     return updated;
+  }
+
+  async consumeRecoveryCode(
+    userId: string,
+    codeHash: string,
+  ): Promise<{ remaining: number } | null> {
+    // Test and write with NO `await` between them — on a single-threaded
+    // runtime that is the same guarantee the conditional UPDATE gives.
+    const auth = this.#auth.get(userId);
+    if (!auth) return null;
+    const idx = auth.recoveryCodeHashes.indexOf(codeHash);
+    if (idx < 0) return null;
+    const remaining = auth.recoveryCodeHashes.filter((_, i) => i !== idx);
+    this.#auth.set(userId, { ...auth, recoveryCodeHashes: remaining });
+    return { remaining: remaining.length };
   }
 
   // --- WebAuthn credentials ------------------------------------------------

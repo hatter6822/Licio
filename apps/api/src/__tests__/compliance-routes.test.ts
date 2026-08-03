@@ -316,6 +316,12 @@ describe('policy admin (WS-N.1.1e)', () => {
       get('/v1/compliance/admin/policy-audit/verify', reviewer.cookie),
     );
     expect(((await verify.json()) as { valid: boolean }).valid).toBe(true);
+    // …AND on the acting account's security trail, in the same unit. Two trails
+    // answer two questions — the chain records what the policy became, this
+    // records what this operator did — and a policy change live and hash-audited
+    // but absent from the actor's history is unreviewable per actor.
+    const activity = await identity.audit.securityActivityForUser(counsel.userId);
+    expect(activity.map((e) => e.event_type)).toContain('compliance_policy_change');
   });
 
   it('carrying an approved enabled cell forward while NARROWING another needs no counsel; widening sideways still does (codex: compare policy deltas before requiring counsel)', async () => {

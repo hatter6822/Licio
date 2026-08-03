@@ -101,6 +101,84 @@ describe('check:audited-writes', () => {
     expect(issues[0]).toMatch(/^things\.ts:5 /);
   });
 
+  it('flags a write whose UNIT IS ONE CALL AWAY, in a same-file helper', () => {
+    // The shape that reads as two innocent halves and cost a user their last
+    // recovery code: the handler spends the credential, the helper opens the
+    // unit and records the verification, and an append failure burns the one
+    // without the other.
+    const seam = `
+async function finish(services, userId) {
+  await services.transact(async (tx) => {
+    await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify' });
+    await markVerified(services.sessions);
+  });
+}
+export function createRoutes() {
+  return new Hono().post('/mfa/totp/verify', async (c) => {
+    await services.store.setAuth(userId, { recoveryCodeHashes: remaining });
+    await finish(services, userId);
+    return c.json({ ok: true });
+  });
+}
+`;
+    const issues = runAuditedWriteGate(new Map([['auth-mfa.ts', seam]]));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toContain("handler '/mfa/totp/verify'");
+  });
+
+  it('accepts the write HANDED INTO that helper’s unit', () => {
+    // The fix the gate is asking for — the caller cannot open the helper's unit,
+    // so it passes the write in and the helper runs it on the unit's handle.
+    const handedIn = `
+async function finish(services, userId, consume) {
+  return services.transact(async (tx) => {
+    const spent = await consume(tx);
+    await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify' });
+    return spent;
+  });
+}
+export function createRoutes() {
+  return new Hono().post('/mfa/totp/verify', async (c) => {
+    const spent = await finish(services, userId, (tx) =>
+      tx.store.consumeRecoveryCode(userId, matched),
+    );
+    return c.json({ spent });
+  });
+}
+`;
+    expect(runAuditedWriteGate(new Map([['auth-mfa.ts', handedIn]]))).toEqual([]);
+  });
+
+  it('does not flag the auditing HELPER for its own in-unit writes', () => {
+    // The helper writes inside the unit it opened; judging it as its own caller
+    // would flag every correct transactor in the tree.
+    const helperOnly = `
+async function finish(services, userId) {
+  await services.transact(async (tx) => {
+    await tx.store.setAuth(userId, { mfaPending: false });
+    await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify' });
+  });
+}
+export function createRoutes() {
+  return new Hono().post('/mfa/totp/verify', async (c) => finish(services, userId));
+}
+`;
+    expect(runAuditedWriteGate(new Map([['auth-mfa.ts', helperOnly]]))).toEqual([]);
+  });
+
+  it('counts spending a single-use credential as a durable write', () => {
+    const consumed = `
+export function createRoutes() {
+  return new Hono().post('/mfa/totp/verify', async (c) => {
+    await services.store.consumeRecoveryCode(userId, hash);
+    await services.audit.append({ actorUserId: userId, eventType: 'mfa_verify' });
+    return c.json({ ok: true });
+  });
+}
+`;
+    expect(runAuditedWriteGate(new Map([['auth-mfa.ts', consumed]]))).toHaveLength(1);
+  });
+
   it('passes the LIVE route tree — no handler writes outside its unit', () => {
     expect(runAuditedWriteGate(collectRouteFiles())).toEqual([]);
   });

@@ -352,6 +352,35 @@ export class DrizzleIdentityStore implements IdentityStore {
     });
   }
 
+  async consumeRecoveryCode(
+    userId: string,
+    codeHash: string,
+  ): Promise<{ remaining: number } | null> {
+    if (!isUuid(userId)) return null;
+    return this.#db.transaction(async (tx) => {
+      // The PRECONDITION IS THE WHERE CLAUSE: `used_at IS NULL` is what makes
+      // this single-use. Two requests presenting the same code race here and
+      // exactly one updates a row; the loser sees zero rows and is told the
+      // code is not valid, which it no longer is.
+      const spent = await tx
+        .update(mfaRecoveryCodes)
+        .set({ usedAt: new Date() })
+        .where(
+          and(
+            eq(mfaRecoveryCodes.userId, userId),
+            eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
+            isNull(mfaRecoveryCodes.usedAt),
+          ),
+        )
+        .returning({ codeHash: mfaRecoveryCodes.codeHash });
+      if (spent.length === 0) return null;
+      // Stamped, never deleted — single-use forensics (WS-D.1.5a), same as the
+      // `setAuth` projection above.
+      const remaining = await this.#activeRecoveryCodes(tx, userId);
+      return { remaining: remaining.length };
+    });
+  }
+
   /** Active (unconsumed) recovery-code hashes, as hex strings. */
   async #activeRecoveryCodes(db: Pick<Db, 'select'>, userId: string): Promise<string[]> {
     const rows = await db

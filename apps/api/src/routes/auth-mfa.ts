@@ -15,7 +15,7 @@ import {
 } from '@licio/shared';
 import { type Context, Hono } from 'hono';
 import { constantTimeEqual } from '../identity/crypto.js';
-import type { IdentityServices } from '../identity/services.js';
+import type { IdentityServices, IdentityTx } from '../identity/services.js';
 import {
   buildSessionCookie,
   markMfaVerified,
@@ -189,27 +189,44 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           }
 
           // Fall back to a single-use recovery code (constant-time compare).
+          //
+          // The compare is over the READ list only to find which stored hash
+          // was presented; SPENDING it is `consumeRecoveryCode`, whose own
+          // predicate ("still active") decides the outcome — so the code is
+          // burned exactly once even under two simultaneous presentations, and
+          // it is burned INSIDE the unit that records the verification. It used
+          // to be spent by a `setAuth` before `finishMfa` opened its
+          // transaction: an audit failure then answered 500 having permanently
+          // consumed the code without granting access, which on the user's last
+          // code costs them the account.
           const presentedHash = hashRecoveryCode(code);
-          const idx = userAuth.recoveryCodeHashes.findIndex((h) =>
+          const matched = userAuth.recoveryCodeHashes.find((h) =>
             constantTimeEqual(presentedHash, h),
           );
-          if (idx >= 0) {
-            const remaining = userAuth.recoveryCodeHashes.filter((_, i) => i !== idx);
-            await services.store.setAuth(auth.userId, { recoveryCodeHashes: remaining });
-            await finishMfa(services, auth.userId, auth.tokenHash, c);
+          if (matched !== undefined) {
+            const spent = await finishMfa(services, auth.userId, auth.tokenHash, c, (tx) =>
+              tx.store.consumeRecoveryCode(auth.userId, matched),
+            );
+            // Lost the race — another request spent this code between the read
+            // and the write. Nothing was consumed and nothing was recorded.
+            if (spent === null) return c.json(err('invalid_code', 'Invalid code.'), 400);
             return c.json({
               status: 'mfa_verified' as const,
               recovery_used: true,
-              recovery_remaining: remaining.length,
+              recovery_remaining: spent.remaining,
             });
           }
 
-          // A recovery code was CONSUMED above (a durable write), so its record
-          // commits with it.
+          // A FAILED verification, recorded as one.
+          //
+          // This appended `mfa_verify` — the same event a SUCCESS writes — so
+          // the trail an investigator reads to answer "did this account clear
+          // MFA?" could not distinguish a clearance from a wrong code, and a
+          // brute-force run and a normal sign-in produced identical rows.
           await services.transact(async (tx) => {
             await tx.audit.append({
               actorUserId: auth.userId,
-              eventType: 'mfa_verify',
+              eventType: 'mfa_verify_failed',
               context: {},
             });
           });
@@ -258,6 +275,16 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
   );
 }
 
+/** The presented recovery code was spent by another request between the read
+ *  and the conditional write. Thrown INSIDE the unit so the verification rolls
+ *  back whole rather than half-applying. */
+class RecoveryCodeAlreadySpentError extends Error {
+  constructor() {
+    super('the recovery code is no longer active');
+    this.name = 'RecoveryCodeAlreadySpentError';
+  }
+}
+
 /**
  * Mark the session MFA-verified, reset the attempt counter, audit success, and
  * rotate the session id on the privilege change — mirroring /confirm and every
@@ -265,20 +292,39 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
  * `markMfaVerified` runs BEFORE the rotation so the rotated record — which
  * `rotateSession` copies from the stored one — carries `mfa_verified=true`.
  */
-async function finishMfa(
+async function finishMfa<T>(
   services: IdentityServices,
   userId: string,
   tokenHash: string,
   c: Context<AuthEnv>,
-): Promise<void> {
+  /**
+   * The durable factor this verification SPENDS, run inside the same unit.
+   *
+   * A recovery code is consumed by clearing it; a TOTP step is not, so this is
+   * absent there. Returning `null` from it aborts the whole verification —
+   * a code another request spent first must not produce a verified session,
+   * and must not leave a record saying it did.
+   */
+  consume?: (tx: IdentityTx) => Promise<T | null>,
+): Promise<T | null> {
   // The session flag lives in Redis and cannot join a Postgres transaction, so
   // the RECORD gates the change: it is appended first, inside the unit, and the
   // flag is set inside it too — a failed `markMfaVerified` aborts the record
   // rather than leaving a verified session nothing accounts for.
-  await services.transact(async (tx) => {
-    await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
-    await markMfaVerified(services.sessions, tokenHash);
-  });
+  const spent = await services
+    .transact(async (tx) => {
+      const consumed = consume === undefined ? (undefined as T) : await consume(tx);
+      if (consumed === null) throw new RecoveryCodeAlreadySpentError();
+      await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
+      await markMfaVerified(services.sessions, tokenHash);
+      return consumed;
+    })
+    .catch((error: unknown) => {
+      // The unit rolled back: no consumption, no record, no verified session.
+      if (error instanceof RecoveryCodeAlreadySpentError) return null;
+      throw error;
+    });
+  if (spent === null) return null;
   await services.otp.delete(attemptsKey(userId));
   const token = readSessionToken(c.req.header('cookie'));
   const rotated = token ? await rotateSession(services.sessions, token) : null;
@@ -287,4 +333,5 @@ async function finishMfa(
       append: true,
     });
   }
+  return spent;
 }

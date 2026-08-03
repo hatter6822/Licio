@@ -16,7 +16,7 @@
 // the ADMIT half drives an existing `session`.
 
 import type { InviteSecret } from '@licio/private-p2p';
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError } from '../../../lib/api.js';
 import { fetchPrivateRoomBootstrap } from '../../../lib/private-rooms-api.js';
@@ -374,20 +374,31 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
   const canAdmit = inviteJson.trim().length > 0 && requestJson.trim().length > 0 && !busy;
 
   /**
-   * A GRANT BELONGS TO THE REQUEST THAT PRODUCED IT.
+   * A GRANT BELONGS TO THE REQUEST THAT PRODUCED IT — and so does every other
+   * outcome of an admission.
    *
-   * It was free-floating state that only ever got REPLACED, so after admitting
-   * device A the panel kept showing A's grant under "send this back to the new
-   * device" while the admin worked on device B. A rejected or failed B —
+   * The grant was free-floating state that only ever got REPLACED, so after
+   * admitting device A the panel kept showing A's grant under "send this back to
+   * the new device" while the admin worked on device B. A rejected or failed B —
    * `verdict.ok === false`, a parse miss, a throw — writes no new grant, so the
    * label pointed at B and the value was A's: the admin sends an unusable grant
    * and B's join never completes, with nothing on screen saying so.
    *
-   * Cleared when either input CHANGES (the previous grant cannot belong to the
-   * pair being typed) and again when an attempt starts, so no outcome can leave
-   * a grant from a different device on screen.
+   * Clearing on input change fixed the display but not the RACE behind it. The
+   * admission is several async crypto steps and the fields stay editable
+   * throughout, so A's in-flight attempt could resolve after the admin had typed
+   * B's records — and its success branch writes A's grant AND blanks both fields,
+   * destroying B's pasted input to show a grant for a different device.
+   *
+   * So an attempt is KEYED, the way the joiner half above keys its request and
+   * its directory verdict to the invite fragment they came from: bumping
+   * `attempt` supersedes whatever is in flight, and a superseded result is
+   * dropped rather than rendered.
    */
+  const attempt = useRef(0);
+
   function beginNewAdmission(): void {
+    attempt.current += 1;
     setGrantJson(null);
     setStatus(null);
   }
@@ -397,18 +408,28 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
     setBusy(true);
     setError(null);
     beginNewAdmission();
+    const mine = attempt.current;
+    /** Has the admin moved on since this attempt started? */
+    const superseded = (): boolean => attempt.current !== mine;
     try {
       const invite = await PrivateRoomSession.parseInvite(inviteJson.trim());
+      if (superseded()) return;
       if (invite === null) {
         setError(t('privateRoom.admit.badInvite', 'That invite record is not valid.'));
         return;
       }
       const request = await PrivateRoomSession.parseJoinRequest(requestJson.trim());
+      if (superseded()) return;
       if (request === null) {
         setError(t('privateRoom.admit.badRequest', 'That join request is not valid.'));
         return;
       }
       const { verdict, grant } = await session.admitJoinRequest(invite, request);
+      // The DEVICE IS ADMITTED either way — this is a display decision, not a
+      // crypto one, and dropping the render is the honest half: the admin is
+      // looking at another device's records, and `member.add` has committed to
+      // the room state they can see in the member list.
+      if (superseded()) return;
       if (verdict.ok) {
         setStatus(
           t('privateRoom.admit.ok', 'Device admitted as {role}.', { role: verdict.grantedRole }),
@@ -422,6 +443,7 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
         setError(rejectionMessage(t, verdict.reason));
       }
     } catch {
+      if (superseded()) return;
       setError(t('privateRoom.admit.error', 'Could not admit the device.'));
     } finally {
       setBusy(false);

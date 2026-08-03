@@ -430,6 +430,10 @@ export function createInvariantsAdminRoutes(
         // ambiguity this room-scoped paging exists to remove — so the answer
         // says which it was.
         let complete = false;
+        // Did a bound stop the walk PART-WAY THROUGH a page? Then threads behind
+        // it in that page are genuinely unexamined and no probe can help. Exiting
+        // at a page boundary is the ambiguous case the probe below resolves.
+        let stoppedMidPage = false;
         scan: while (scanned < SCOI_REPORT_SCAN_CEILING && entries.length < SCOI_REPORT_ENTRIES) {
           const threads = await ingestion.stories.listThreadsByRoom(
             roomId,
@@ -456,7 +460,10 @@ export function createInvariantsAdminRoutes(
             // looking for findings that do not exist. Checking here means a page
             // consumed to its end falls through to that check instead, and a
             // thread this walk never looked at is one `scanned` never counts.
-            if (entries.length >= SCOI_REPORT_ENTRIES) break scan;
+            if (entries.length >= SCOI_REPORT_ENTRIES) {
+              stoppedMidPage = true;
+              break scan;
+            }
             scanned += 1;
             const story = stories.get(thread.storyId);
             if (!story) continue;
@@ -493,6 +500,24 @@ export function createInvariantsAdminRoutes(
             break;
           }
         }
+        // ONE bounded lookahead, for the boundary the page arithmetic cannot see.
+        //
+        // A room whose thread count is an exact multiple of the page size never
+        // produces a short page: the walk consumes the last full page, a bound
+        // trips at the top of the while, and the loop ends with `complete` false
+        // over a room it examined ENTIRELY. A 100-thread room reporting itself
+        // truncated is the same wrong answer the short-page fix removed, one
+        // page-boundary further along.
+        //
+        // A single-row keyset read past the cursor settles it, and only in this
+        // case: nothing to see means the walk reached the room's end whichever
+        // bound fired, and a mid-page stop skips it because the answer is
+        // already known.
+        if (!complete && !stoppedMidPage && threadCursor !== null) {
+          const lookahead = await ingestion.stories.listThreadsByRoom(roomId, threadCursor, 1);
+          complete = lookahead.length === 0;
+        }
+
         return c.json({
           room_id: roomId,
           reports: entries,
