@@ -62,12 +62,12 @@
     "dev:stop": "tsx scripts/free-dev-ports.ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.5",
-    "@types/node": "^26.1.1",
+    "@biomejs/biome": "^2.5.6",
+    "@types/node": "^26.1.2",
     "@vitest/coverage-v8": "^4.1.10",
     "lefthook": "^2.1.10",
     "libpg-query": "^17.7.4",
-    "node-html-parser": "^9.0.0",
+    "node-html-parser": "^9.0.1",
     "parse5": "^8.0.1",
     "tailwindcss": "4.3.3",
     "tsx": "^4.23.1",
