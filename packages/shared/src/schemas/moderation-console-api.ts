@@ -314,6 +314,18 @@ export const caseReviewResponseSchema = z
      * reviewer without platform staff could not act on.
      */
     directory_delistable: z.boolean(),
+    /**
+     * MFCI-2 (WS-J.2.6e) — enforcement on this case is HELD pending integrity
+     * review of a coordinated-report incident, for this reviewer.
+     *
+     * The hold is a property of the case AND the actor: an integrity analyst IS
+     * the review and is never held. While it stands, `available_actions` carries
+     * the workflow verbs only (escalate/clear), exactly as `applyAction` allows
+     * — the flag exists so the console can SAY why the enforcement verbs are
+     * absent. A palette that silently shrinks is a reviewer wondering whether
+     * they have lost a role.
+     */
+    enforcement_held: z.boolean(),
   })
   .strict();
 export type CaseReviewResponse = z.infer<typeof caseReviewResponseSchema>;

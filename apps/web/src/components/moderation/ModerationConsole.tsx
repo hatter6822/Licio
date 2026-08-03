@@ -1021,6 +1021,18 @@ function CaseReviewDialog({
             <h3 className="text-xs font-semibold uppercase text-ink-muted">
               {t('console.palette', 'Action palette')}
             </h3>
+            {/* MFCI-2 (WS-J.2.6e): the server withholds the enforcement verbs
+                while a coordinated-report incident holds this case, because
+                applying one would be refused. Say so — a palette that quietly
+                shrinks reads as a lost role, not as a protection working. */}
+            {data.enforcement_held ? (
+              <p role="status" className="text-sm text-warning-on-soft">
+                {t(
+                  'console.enforcementHeld',
+                  'Enforcement is held pending integrity review of a coordinated-report incident. Escalate or clear the case; an integrity analyst can act now.',
+                )}
+              </p>
+            ) : null}
             <Select
               label={t('console.action', 'Action')}
               value={effectiveAction}

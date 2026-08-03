@@ -437,6 +437,42 @@ describe('buildCaseReview (snapshot + thread + side-by-side)', () => {
     expect(await buildCaseReview(services, SAFETY, 'missing')).toBeNull();
   });
 
+  it('withholds the ENFORCEMENT verbs while MFCI-2 holds the case — and says so', async () => {
+    // `applyAction` refuses an enforcement verb with `enforcement_delayed` while
+    // a coordinated-report incident holds the case, and the palette offered them
+    // anyway: the reviewer's only way to learn about the hold was to trip it.
+    const caseId = await insertCase({
+      caseId: 'eeeeeeee-0000-4000-9000-00000000000d',
+      targetId: '00000000-0000-4000-8000-00000000held',
+      enforcementDelayed: true,
+    });
+    const held = await buildCaseReview(services, SAFETY, caseId);
+    expect(held?.enforcement_held).toBe(true);
+    expect(held?.available_actions).not.toContain('remove');
+    expect(held?.available_actions).not.toContain('hide');
+    // The case still MOVES: workflow verbs are never held, which is what the
+    // endpoint allows and the only way a held case leaves the queue.
+    expect(held?.available_actions).toContain('escalate');
+    expect(held?.available_actions).toContain('clear');
+  });
+
+  it('never holds an integrity analyst — they ARE the review', async () => {
+    const caseId = await insertCase({
+      caseId: 'eeeeeeee-0000-4000-9000-00000000000e',
+      targetId: '00000000-0000-4000-8000-0000000intg',
+      enforcementDelayed: true,
+    });
+    const analyst: StewardActor = {
+      userId: '00000000-0000-4000-8000-0000000000c9',
+      platformRoles: ['steward'],
+      stewardRoles: ['ROLE_INTEGRITY'],
+      mfaActive: true,
+      mfaVerified: true,
+    };
+    const review = await buildCaseReview(services, analyst, caseId);
+    expect(review?.enforcement_held).toBe(false);
+  });
+
   it('carries THIS case history — including untargeted events, excluding other cases', async () => {
     const subject = '00000000-0000-4000-8000-0000000000c7';
     const mine = await insertCase({

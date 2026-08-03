@@ -760,6 +760,49 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     expect(orphanBridge.status).toBe(404);
   });
 
+  it('finds a quiet room\u2019s conversations under a platform full of newer ones', async () => {
+    // The report used to start from the platform's 200 most recent stories and
+    // filter down to this room, so the budget was spent before the room was
+    // considered: a busier platform pushed a quiet room's threads out of the
+    // scan entirely and its stewards read an empty report \u2014 which says "no
+    // divergent conversations here", not "nothing of yours was looked at".
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId, storyId } = await seedSplitRoom(fixture, steward.userId);
+    await fixture.invariants.scoi
+      .computeBatch([{ targetType: 'story', targetId: storyId }], hourWindow(Date.now()))
+      .then((outputs) =>
+        Promise.all(
+          outputs.map((o) =>
+            fixture.events.invariantStore.upsert({
+              invariantType: o.invariantType,
+              targetType: o.target.targetType,
+              targetId: o.target.targetId,
+              timeWindow: o.window,
+              version: o.version,
+              scoreVector: o.score_vector,
+              explanationSummary: o.explanationSummary,
+              confidence: o.confidence,
+              coverage: o.coverage,
+              reasonCodes: o.reason_codes,
+              fallbackUsed: o.fallback_used,
+              versionMetadata: null,
+              shadowMode: true,
+              createdAt: new Date().toISOString(),
+            }),
+          ),
+        ),
+      );
+    // …and then 250 newer stories elsewhere, which is an ordinary hour on a
+    // platform with any volume.
+    for (let i = 0; i < 250; i += 1) await seedStory(fixture);
+
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    expect(report.status).toBe(200);
+    const body = (await report.json()) as { reports: Array<{ story_id: string }> };
+    expect(body.reports.map((entry) => entry.story_id)).toEqual([storyId]);
+  });
+
   it('withdraws a bridge target once a request is OPEN on it', async () => {
     // The map published a target the POST beside it answers `409 already_open`
     // for: eligibility asked "may this caller act here?" and never "is there

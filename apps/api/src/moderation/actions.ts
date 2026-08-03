@@ -55,7 +55,7 @@ export type ActionOutcome =
 
 /** Map a console action to the enforcement action type used by the appeal matrix
  *  (escalate/clear are workflow, not enforcement → null). */
-function enforcementType(action: ConsoleAction): EnforcementActionType | null {
+export function enforcementType(action: ConsoleAction): EnforcementActionType | null {
   switch (action) {
     case 'warn':
       return 'warn';

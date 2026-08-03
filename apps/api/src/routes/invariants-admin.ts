@@ -78,6 +78,17 @@ const DASHBOARD_ROW_CAP = 100;
 // that previously kept (and mapped over) every retained row.
 const TRANSPARENCY_LOOKBACK_MS = 90 * 24 * 60 * 60_000;
 const TRANSPARENCY_ROW_CAP = 500;
+// --- Bounds on the per-room SCOI report -------------------------------------
+// The report is a KEYSET page over the room's own threads, so both bounds are
+// about the room rather than the platform: how many findings are returned, and
+// how far into the room's history the scan will walk looking for them (a room
+// with thousands of threads and no SCOI measurements must not turn one console
+// load into a table walk).  A page smaller than the ceiling keeps the per-round
+// hydration bounded; the scan stops early on a short page, which is the room's
+// end.
+const SCOI_REPORT_ENTRIES = 100;
+const SCOI_REPORT_SCAN_CEILING = 500;
+const SCOI_REPORT_PAGE = 50;
 
 const invariantTypeSchema = z.enum(INVARIANT_TYPE_NAMES);
 
@@ -399,36 +410,63 @@ export function createInvariantsAdminRoutes(
         const invariants = resolveInvariants();
         const lenses = await forum.lenses.listByRoom(roomId);
         const lensNames = new Map(lenses.map((lens) => [lens.lensId, lens.name]));
+        // Page the ROOM's OWN threads, rather than the platform's 200 most
+        // recent stories filtered down to this room afterwards.
+        //
+        // The budget was spent before the room was considered: on a platform
+        // with any volume the recent 200 are dominated by the busiest rooms, so
+        // a quiet room's threads never appeared in them and its stewards read an
+        // empty SCOI report — which is indistinguishable from "no divergent
+        // conversations here" and is in fact "nothing of yours was looked at".
+        // The room is a column on the thread, so the restriction belongs in the
+        // read; what is bounded now is how much of the ROOM is scanned.
         const entries = [];
-        for (const story of await ingestion.stories.listRecent(200)) {
-          const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
-          if (!thread || thread.roomId !== roomId) continue;
-          const scoi = await latestScoiFor(events, story.storyId);
-          if (!scoi) continue;
-          // Per-lens interpretation summaries: tagged contribution counts.
-          const contributions = await forum.contributions.listByThread(thread.threadId, {
-            limit: 500,
-          });
-          const perLens = new Map<string, number>();
-          for (const contribution of contributions) {
-            const lensId = contribution.metadata['lens_id'];
-            if (typeof lensId !== 'string') continue;
-            perLens.set(lensId, (perLens.get(lensId) ?? 0) + 1);
+        let threadCursor: { createdAt: string; threadId: string } | null = null;
+        let scanned = 0;
+        scan: while (scanned < SCOI_REPORT_SCAN_CEILING && entries.length < SCOI_REPORT_ENTRIES) {
+          const threads = await ingestion.stories.listThreadsByRoom(
+            roomId,
+            threadCursor,
+            SCOI_REPORT_PAGE,
+          );
+          if (threads.length === 0) break;
+          scanned += threads.length;
+          const stories = await ingestion.stories.getByIds(threads.map((t) => t.storyId));
+          const last = threads[threads.length - 1];
+          threadCursor =
+            last === undefined ? null : { createdAt: last.createdAt, threadId: last.threadId };
+          for (const thread of threads) {
+            const story = stories.get(thread.storyId);
+            if (!story) continue;
+            const scoi = await latestScoiFor(events, story.storyId);
+            if (!scoi) continue;
+            // Per-lens interpretation summaries: tagged contribution counts.
+            const contributions = await forum.contributions.listByThread(thread.threadId, {
+              limit: 500,
+            });
+            const perLens = new Map<string, number>();
+            for (const contribution of contributions) {
+              const lensId = contribution.metadata['lens_id'];
+              if (typeof lensId !== 'string') continue;
+              perLens.set(lensId, (perLens.get(lensId) ?? 0) + 1);
+            }
+            entries.push({
+              story_id: story.storyId,
+              thread_id: thread.threadId,
+              title: story.title,
+              context_state: scoi.contextState,
+              scoi: scoi.scoi,
+              lenses: [...perLens.entries()].map(([lensId, count]) => ({
+                lens_id: lensId,
+                name: lensNames.get(lensId) ?? lensId,
+                contribution_count: count,
+              })),
+              // The §10.5 "Bridge attempts" branch (the WS-H.4.2d credit surface).
+              bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
+            });
+            if (entries.length >= SCOI_REPORT_ENTRIES) break scan;
           }
-          entries.push({
-            story_id: story.storyId,
-            thread_id: thread.threadId,
-            title: story.title,
-            context_state: scoi.contextState,
-            scoi: scoi.scoi,
-            lenses: [...perLens.entries()].map(([lensId, count]) => ({
-              lens_id: lensId,
-              name: lensNames.get(lensId) ?? lensId,
-              contribution_count: count,
-            })),
-            // The §10.5 "Bridge attempts" branch (the WS-H.4.2d credit surface).
-            bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
-          });
+          if (threads.length < SCOI_REPORT_PAGE) break;
         }
         return c.json({ room_id: roomId, reports: entries });
       })

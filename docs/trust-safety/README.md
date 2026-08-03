@@ -237,7 +237,13 @@ platform `admin` role implicitly holds all five doctrine roles.
   permanent until manually reverted).
 - **Integrity incidents (WS-J.2.6e / MFCI-2).** A coordinated-report incident
   HOLDS the case's volume-driven enforcement (`applyAction` returns
-  `enforcement_delayed` for non-ROLE_INTEGRITY actors).  The ROLE_INTEGRITY
+  `enforcement_delayed` for non-ROLE_INTEGRITY actors).  The case review
+  PUBLISHES that hold — `enforcement_held` is resolved from the same two reads
+  the endpoint makes (the target's open case, and any open delayed case about
+  the subject, so an account pivot cannot slip it), the palette carries the
+  workflow verbs only while it stands, and the console states the reason.  A
+  reviewer learns about the hold from the panel rather than from a refusal.
+  The ROLE_INTEGRITY
   integrity queue (`GET /v1/moderation/incidents`) lists open incidents
   (aggregate, base-rate-conditioned summary — never per-reporter identity) and
   resolves them: `cleared` lifts the delay (enforcement may proceed), `confirmed`

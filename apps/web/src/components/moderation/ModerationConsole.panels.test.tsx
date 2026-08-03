@@ -197,6 +197,7 @@ const caseReview: CaseReviewResponse = {
   },
   available_actions: ['warn', 'hide', 'remove'],
   directory_delistable: false,
+  enforcement_held: false,
 };
 
 const appealQueue: AppealQueueResponse = {
@@ -483,6 +484,21 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     expect(screen.getByRole('link', { name: /sign in again/i })).toHaveAttribute('href', '/login');
     expect(screen.queryByText(/not a permissions problem/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
+  });
+
+  it('explains an MFCI-2 enforcement hold instead of just shrinking the palette', async () => {
+    // The server withholds the enforcement verbs while a coordinated-report
+    // incident holds the case. A palette that silently loses `hide`/`remove`
+    // reads as a lost role; the reviewer needs the reason and the way out.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      enforcement_held: true,
+      available_actions: ['escalate', 'clear'],
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText(/Enforcement is held pending integrity review/i)).toBeVisible();
   });
 
   it('surfaces an error toast when an action is forbidden', async () => {
