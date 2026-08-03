@@ -843,63 +843,64 @@ export async function assembleActivitySnapshots(
 // Reeb (WS-H.7.4): engagement landscape over the topic-similarity graph
 // ---------------------------------------------------------------------------
 
+/** The most active items one landscape sweep considers. */
+const LANDSCAPE_NODES = 100;
+
 export async function assembleEngagementLandscape(
   events: EventPipelineServices,
   ingestion: IngestionServices,
   nowMs: number,
-): Promise<{ nodes: ReebNode[]; edges: ReebEdge[] }> {
-  // PUBLIC stories only, filtered in the query rather than here.
-  //
-  // The landscape is assembled once, globally, and the Civic Map projects it to
-  // any platform integrity steward — who may be neither a member nor a steward
-  // of the room a `room_only` story belongs to. Reading `listRecent` made the
-  // map a way to see that story's title, topics, thread id and engagement
-  // without the membership the ordinary read requires.
-  const recent = await ingestion.stories.listRecentPublic(100);
+): Promise<{ nodes: ReebNode[]; edges: ReebEdge[]; stories: Map<string, StoryRecord> }> {
   const hourMs = 3_600_000;
   const windowStart = new Date(Math.floor(nowMs / hourMs) * hourMs - hourMs).toISOString();
-  // Only stories with ACTIVITY IN THIS WINDOW are nodes.
+
+  // START FROM THE WINDOW, not from recency.
   //
-  // The landscape describes where attention went this hour, and a story with
-  // zero events received none. Including it as a level-0 node let `reebGraph`
-  // build basins and merges out of topic adjacency alone — clusters the panel
-  // then described as attention grouping "this hour" when nothing had happened
-  // to them. Excluding it entirely is the same rule the all-zero guard applies,
-  // held per node instead of per landscape, so a single active story cannot
-  // drag ninety-nine silent ones into the map with it.
-  // ONE window read for the whole landscape, not one per story: this assembly
-  // is on the interactive Civic Map's request path, and a round trip per story
-  // put up to a hundred of them ahead of every analyst's page load.
-  const windows = await events.windowStore.getManyForWindow(
-    recent.map((story) => story.storyId),
-    windowStart,
-    '1h',
-  );
+  // The landscape answers "what drew attention in this hour", and taking the
+  // most RECENT stories and then filtering by activity asks a different
+  // question: an older story with real activity is excluded before it is
+  // considered, and a hundred quiet new ones make an active hour report an
+  // empty landscape. The window rows already ARE the set of things that drew
+  // attention, so the bound applies to them — busiest first, so a truncated
+  // landscape keeps the clusters worth seeing.
+  const active = await events.windowStore.listActiveInWindow(windowStart, '1h', LANDSCAPE_NODES);
+
+  // …then hydrate, PUBLIC-ONLY and in one query. The restriction lives in the
+  // read rather than in a filter afterwards, so a `room_only` or hidden story
+  // cannot reach a surface whose caller's room authority is unknown; anything
+  // that does not hydrate is simply not a node.
+  const byId = await ingestion.stories.getPublicByIds(active.map((row) => row.itemId));
+
   const nodes: ReebNode[] = [];
-  const active = new Set<string>();
-  for (const story of recent) {
-    const value = windows.get(story.storyId)?.eventCount ?? 0;
-    if (value <= 0) continue;
-    active.add(story.storyId);
-    nodes.push({ id: story.storyId, value });
+  const topicsById = new Map<string, readonly string[]>();
+  for (const row of active) {
+    const story = byId.get(row.itemId);
+    if (!story) continue;
+    nodes.push({ id: row.itemId, value: row.eventCount });
+    topicsById.set(row.itemId, story.topicIds);
   }
+
   const edges: ReebEdge[] = [];
-  for (let i = 0; i < recent.length; i += 1) {
-    for (let j = i + 1; j < recent.length; j += 1) {
-      const a = recent[i];
-      const b = recent[j];
+  for (let i = 0; i < nodes.length; i += 1) {
+    for (let j = i + 1; j < nodes.length; j += 1) {
+      const a = nodes[i];
+      const b = nodes[j];
       if (!a || !b) continue;
-      // An edge to a node that is not in the landscape is not an edge.
-      if (!active.has(a.storyId) || !active.has(b.storyId)) continue;
+      const left = topicsById.get(a.id) ?? [];
+      const right = topicsById.get(b.id) ?? [];
       // Two stories are topic-adjacent only through a REAL shared topic — the
       // sentinel must not create an engagement-landscape edge between unrelated
       // unclassified stories.
-      if (a.topicIds.some((t) => !isSentinelTopicId(t) && b.topicIds.includes(t))) {
-        edges.push({ a: a.storyId, b: b.storyId });
+      if (left.some((topic) => !isSentinelTopicId(topic) && right.includes(topic))) {
+        edges.push({ a: a.id, b: b.id });
       }
     }
   }
-  return { nodes, edges };
+  // The hydrated rows travel WITH the graph. A consumer that re-read them by id
+  // would issue a second query and reopen the window this one closed — a story
+  // can leave the public set between two reads, and the second reader would then
+  // have a node it cannot name. Every node here has a row, by construction.
+  return { nodes, edges, stories: byId };
 }
 
 // ---------------------------------------------------------------------------

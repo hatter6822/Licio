@@ -363,8 +363,8 @@ export class DrizzleStoryStore implements StoryStore {
   async getPublicByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>> {
     const out = new Map<string, StoryRecord>();
     if (storyIds.length === 0) return out;
-    // The restriction is in the QUERY, matching `listRecentPublic` — so a story
-    // hidden between the two reads is simply absent rather than enriched.
+    // The restriction is in the QUERY — so a story hidden between selecting its
+    // id and hydrating it is simply absent rather than enriched.
     const rows = await this.#db
       .select()
       .from(storiesTable)
@@ -600,18 +600,6 @@ export class DrizzleStoryStore implements StoryStore {
     const rows = await this.#db
       .select()
       .from(storiesTable)
-      .orderBy(desc(storiesTable.createdAt))
-      .limit(limit);
-    return rows.map((row) => this.#toRecord(row));
-  }
-
-  async listRecentPublic(limit: number): Promise<StoryRecord[]> {
-    // The restriction is in the QUERY, not applied to the result: a caller that
-    // reads through this method cannot see a room-restricted row at all.
-    const rows = await this.#db
-      .select()
-      .from(storiesTable)
-      .where(and(eq(storiesTable.visibility, 'public'), isNull(storiesTable.hiddenState)))
       .orderBy(desc(storiesTable.createdAt))
       .limit(limit);
     return rows.map((row) => this.#toRecord(row));

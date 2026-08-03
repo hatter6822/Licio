@@ -2103,13 +2103,20 @@ GET /v1/private-rooms/:roomServerId/bootstrap
 For listed rooms, returns public stub fields. For unlisted rooms, requires an
 invite-derived blind token.
 
-The token is a **commitment the room publishes in its own signed stub**, so the
-server can check it while holding no room key: at create time the client places
-`bootstrap_blind_id` — derived from the room's rendezvous key, exactly as the
-§15.3 blind ids are — inside `signed_stub`, and the reader presents the same
-value as `?token=`. The server compares the two in constant time. It learns
-nothing from either: the value is an HMAC output over material it does not
-hold.
+The token is a **capability the room derives and the server merely stores**, so
+the server can check it while holding no room key: at create time the client
+sends `bootstrap_blind_id` — derived from the room's rendezvous key, exactly as
+the §15.3 blind ids are — as its own top-level field, the server keeps it in its
+own column, and the reader presents the same value as `?token=`. The server
+compares the two in constant time. It learns nothing from either: the value is
+an HMAC output over material it does not hold.
+
+It is deliberately NOT inside `signed_stub`. That body is projected wholesale to
+anonymous readers of a `listed` room, so a secret placed in it is published to
+everyone — see §21.1. Signing the token would add nothing anyway: the signature
+verifies against `room_public_key`, which the signed body itself carries, so it
+means something only to a reader who already knows the room's key — a member,
+who holds the token.
 
 The token is derived from the room's **epoch-0** rendezvous key and therefore
 **does NOT rotate**, unlike the §15.3 rendezvous blind ids it is built the same
@@ -2205,7 +2212,28 @@ Forbidden updates:
 - op heads;
 - content metadata;
 - activity timestamps;
-- unread counts.
+- unread counts;
+- the record's IDENTITY.
+
+The last one is not a data class but a property, and it is enforced: a
+`signed_stub` replacement whose `room_public_key` differs from the stored one is
+refused. `room_public_key` is how a member decides the record was authored by
+their room rather than by the server storing it, and ANY member device can build
+a signed body — signing it with its own key. So an ordinary commitment refresh
+from a device that is not the founder's would silently re-identify the record,
+and every member who verifies would conclude their room's entry was forged.
+`latest_manifest_commitment` is a plain column outside the signed body, which is
+why refreshing it needs no re-signing at all.
+
+**Bootstrap hints are POINTERS, in a closed format per kind.** `value` was a
+free 1 KiB string, which is the `signed_stub` defect one field along: a strict
+outer object around an unrestricted value channel, persisted and re-served
+verbatim through a column §8.2 permits precisely because a pointer is not
+content. Each kind now names what it can be — `licio_blind` and `manual` are
+base64url (a blind id, an out-of-band exchange code; NOT prose), and
+`member_relay` is an `https://` or `wss://` endpoint with no credentials, query
+or fragment, which is where a payload would otherwise ride a legitimate-looking
+URL.
 
 ### 21.4 Delete/delist stub
 

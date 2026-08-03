@@ -43,13 +43,61 @@ const publicCidSchema = z
 export const rendezvousPolicySchema = z.enum(['licio_blind', 'member_rendezvous', 'manual_only']);
 export type RendezvousPolicy = z.infer<typeof rendezvousPolicySchema>;
 
-/** A bootstrap hint: a relay/rendezvous pointer, never a peer identity. */
-const bootstrapHintSchema = z
-  .object({
-    kind: z.enum(['licio_blind', 'member_relay', 'manual']),
-    value: z.string().min(1).max(1_024),
-  })
-  .strict();
+/**
+ * A bootstrap hint: a relay/rendezvous POINTER, never a peer identity — and now
+ * a closed format per kind rather than a free string.
+ *
+ * `value` was `z.string().max(1024)`, which is the same defect `signed_stub` was
+ * closed for, one field along: a strict OUTER object around an unrestricted
+ * value channel. An authenticated client could put a message, a member id, key
+ * material, or chunked room content in each of sixteen hints, and both stores
+ * persisted and re-served it verbatim — through a column the §8.2 allowlist
+ * permits precisely because a POINTER is not content.
+ *
+ * So each kind names what it can be:
+ *
+ *   • `licio_blind`   — a §15.3 blind id: base64url, nothing else.
+ *   • `member_relay`  — a transport endpoint: `https://` or `wss://` only, and
+ *                       no credentials, query or fragment, which is where a
+ *                       payload would otherwise ride a legitimate-looking URL.
+ *   • `manual`        — an out-of-band exchange code, NOT prose. Free text here
+ *                       would re-open the channel under the one kind whose name
+ *                       invites it.
+ *
+ * A discriminated union rather than a refinement, so the shape itself carries
+ * the rule and a new kind cannot be added without choosing a format for it.
+ */
+const blindHintValueSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
+
+const relayHintValueSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((value) => {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return false;
+    }
+    return (
+      (url.protocol === 'https:' || url.protocol === 'wss:') &&
+      url.username === '' &&
+      url.password === '' &&
+      url.search === '' &&
+      url.hash === ''
+    );
+  }, 'expected an https:// or wss:// endpoint with no credentials, query or fragment');
+
+const bootstrapHintSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('licio_blind'), value: blindHintValueSchema }).strict(),
+  z.object({ kind: z.literal('member_relay'), value: relayHintValueSchema }).strict(),
+  z.object({ kind: z.literal('manual'), value: blindHintValueSchema }).strict(),
+]);
 export type BootstrapHint = z.infer<typeof bootstrapHintSchema>;
 
 /** At most this many hints per stub (bounded row size). */

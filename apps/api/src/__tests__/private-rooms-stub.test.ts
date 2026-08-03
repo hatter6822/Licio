@@ -470,6 +470,73 @@ describe('delist — what the audit trail is told', () => {
   });
 });
 
+describe('§21.3 — a record cannot change who signed it', () => {
+  it('refuses a signed body carrying a different room_public_key', async () => {
+    // `directoryStubPayload()` signs with the DEVICE's key, and the owning
+    // account can reach the refresh control from a joined device — so a patch
+    // that carried the body would re-identify the record under a key members do
+    // not know, and every verifier would read an honest record as forged.
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const result = await svc.update(
+      created.value.room_server_id,
+      {
+        signed_stub: { ...SIGNED_STUB, room_public_key: 'YW5vdGhlci1kZXZpY2Uta2V5' },
+        stub_signature: 'c2ln',
+      },
+      ACCOUNT,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toBe('identity_change');
+  });
+
+  it('allows a re-signed body that keeps the same identity', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const result = await svc.update(
+      created.value.room_server_id,
+      { signed_stub: SIGNED_STUB, stub_signature: 'YW5vdGhlci1zaWduYXR1cmU' },
+      ACCOUNT,
+    );
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('§8.2 bootstrap hints — pointers, not a value channel', () => {
+  it('refuses free text, key-like material and content in a hint value', () => {
+    for (const hint of [
+      { kind: 'licio_blind', value: 'a private message about the meeting' },
+      { kind: 'manual', value: 'Ask Alice — she is at the community centre' },
+      { kind: 'member_relay', value: 'wss://relay.example/?payload=some-room-content' },
+      { kind: 'member_relay', value: 'wss://user:secret@relay.example/' },
+      { kind: 'member_relay', value: 'file:///etc/passwd' },
+    ]) {
+      expect(
+        privateRoomCreateStubRequestSchema.safeParse(rawRequest({ bootstrap_hints: [hint] }))
+          .success,
+        `expected ${hint.kind}:${hint.value} to be rejected`,
+      ).toBe(false);
+    }
+  });
+
+  it('accepts the pointer each kind is FOR', () => {
+    for (const hint of [
+      { kind: 'licio_blind', value: 'YmxpbmQtaWQtdmFsdWU' },
+      { kind: 'manual', value: 'ZXhjaGFuZ2UtY29kZQ' },
+      { kind: 'member_relay', value: 'wss://relay.example/p2p' },
+      { kind: 'member_relay', value: 'https://relay.example' },
+    ]) {
+      expect(
+        privateRoomCreateStubRequestSchema.safeParse(rawRequest({ bootstrap_hints: [hint] }))
+          .success,
+        `expected ${hint.kind}:${hint.value} to be accepted`,
+      ).toBe(true);
+    }
+  });
+});
+
 describe('§21.3 display patch — atomic with the mode it depends on', () => {
   it('refuses a display patch against a record delisted underneath it', async () => {
     const svc = freshService();

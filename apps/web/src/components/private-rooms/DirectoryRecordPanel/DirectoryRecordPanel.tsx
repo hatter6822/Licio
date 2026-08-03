@@ -272,11 +272,19 @@ export function DirectoryRecordPanel({
                       // Refresh the commitment a bootstrapping peer checks the
                       // manifest against. It goes stale on every manifest change,
                       // and a stale one makes an honest peer look wrong.
+                      //
+                      // ONLY that column. `directoryStubPayload()` signs with
+                      // THIS DEVICE's key and publishes it as `room_public_key`,
+                      // and the owning account can reach this control from a
+                      // JOINED device — so sending the signed body along would
+                      // re-sign the record under a device key members do not
+                      // know, and verification would fail after an ordinary
+                      // refresh. `latest_manifest_commitment` is a plain column
+                      // outside the signed body, which is why it is patchable at
+                      // all.
                       const payload = await session.directoryStubPayload();
                       const next = await updatePrivateRoomStub(roomServerId ?? '', {
                         latestManifestCommitment: payload.manifestKeyCommitment,
-                        signedStub: payload.signedStub,
-                        stubSignature: payload.stubSignature,
                       });
                       setState({ kind: 'present', record: next });
                       setStatus(

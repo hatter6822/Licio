@@ -423,24 +423,18 @@ export interface StoryStore {
   /** Most recent stories (search corpus + admin surfaces). */
   listRecent(limit: number): Promise<StoryRecord[]>;
   /**
-   * Most recent PUBLICLY-VISIBLE, non-hidden stories.
+   * The batched by-id read, restricted to PUBLICLY-VISIBLE, non-hidden rows.
    *
    * For a surface that must not disclose room-restricted content to a caller
    * whose authorization it does not know — the WS-H.7.4 Reeb landscape is one:
    * it is assembled once, globally, and read by any platform integrity steward,
    * who may be neither a member nor a steward of the room a `room_only` story
-   * lives in.  Filtering afterwards is what a caller forgets; the restriction is
-   * therefore in the QUERY, so a surface that reads through this method cannot
-   * see restricted rows to leak in the first place.
-   */
-  listRecentPublic(limit: number): Promise<StoryRecord[]>;
-  /**
-   * The batched by-id read, restricted the same way.
+   * lives in. Filtering afterwards is what a caller forgets; the restriction is
+   * in the QUERY, so a surface reading through this method cannot see a
+   * restricted row to leak in the first place.
    *
-   * `listRecentPublic` and a later `getByIds` are two moments: a story can be
-   * hidden or turned `room_only` in between, and the enrichment would then
-   * return the title and topics of a row that is no longer public. Same
-   * restriction, same query, so the race closes rather than narrowing.
+   * That also closes the window between selecting ids and hydrating them: a
+   * story turned `room_only` in between is simply absent rather than enriched.
    */
   getPublicByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>>;
   /**
@@ -977,13 +971,6 @@ export class InMemoryStoryStore implements StoryStore {
 
   async listRecent(limit: number): Promise<StoryRecord[]> {
     return [...this.#stories.values()]
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, limit);
-  }
-
-  async listRecentPublic(limit: number): Promise<StoryRecord[]> {
-    return [...this.#stories.values()]
-      .filter((story) => story.visibility === 'public' && story.hiddenState === null)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
   }

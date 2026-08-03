@@ -49,6 +49,7 @@ export type StubFailure =
   | 'forbidden'
   | 'display_requires_listed'
   | 'forbidden_stub_field'
+  | 'identity_change'
   | 'unlisted_requires_token';
 
 export type StubResult<T> = { ok: true; value: T } | { ok: false; reason: StubFailure };
@@ -327,6 +328,21 @@ export class PrivateRoomStubService {
     // A PATCH can no longer drop the capability or desynchronise the
     // commitments: the capability is not in the body it replaces, and the
     // columns are re-derived from the body the store is handed.
+    //
+    // What it must ALSO not do is change WHO the record is signed by.
+    // `room_public_key` is how a member decides the directory entry was authored
+    // by their room rather than by the server storing it, and it is the founder
+    // device's key — but any member device can build a signed body, and it signs
+    // with ITS OWN key. So an ordinary commitment refresh from a joined device
+    // would silently re-identify the record, and every member who verifies would
+    // conclude their room's entry was forged. The mutable fields §21.3 lists do
+    // not include identity; this makes that structural rather than implied.
+    if (
+      request.signed_stub !== undefined &&
+      request.signed_stub.room_public_key !== stub.roomPublicKey
+    ) {
+      return { ok: false, reason: 'identity_change' };
+    }
     const next = await this.store.update(
       roomServerId,
       {

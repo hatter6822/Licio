@@ -490,18 +490,20 @@ export interface AggregationWindowStore {
     windowSize: AggregationWindowSize,
   ): Promise<AggregationWindowRecord | null>;
   /**
-   * One window row for MANY items — one query, not one per item.
+   * The items that drew ANY event in one window, busiest first.
    *
-   * The WS-H.7.4 landscape reads the same window for every recent story, and
-   * doing that through `get` meant up to 100 sequential indexed queries ahead of
-   * the response, multiplied by every concurrent viewer of an interactive
-   * surface. Absent items simply have no entry.
+   * The WS-H.7.4 landscape asks "what got attention this hour", and answering it
+   * by taking the 100 most RECENT stories and then filtering by activity gets
+   * the question backwards: an older story with real activity is excluded before
+   * it is considered, and a hundred quiet new ones make an active hour report an
+   * empty landscape. The window rows already are the answer — this reads them
+   * directly, and the caller hydrates only the ones still public.
    */
-  getManyForWindow(
-    itemIds: readonly string[],
+  listActiveInWindow(
     windowStart: string,
     windowSize: AggregationWindowSize,
-  ): Promise<Map<string, AggregationWindowRecord>>;
+    limit: number,
+  ): Promise<Array<{ itemId: string; eventCount: number }>>;
   /** Trailing windows for an item strictly before `beforeIso`, newest first. */
   listForItemBefore(
     itemId: string,
@@ -538,17 +540,19 @@ export class InMemoryAggregationWindowStore implements AggregationWindowStore {
     return this.#rows.get(this.#key(itemId, windowStart, windowSize)) ?? null;
   }
 
-  async getManyForWindow(
-    itemIds: readonly string[],
+  async listActiveInWindow(
     windowStart: string,
     windowSize: AggregationWindowSize,
-  ): Promise<Map<string, AggregationWindowRecord>> {
-    const out = new Map<string, AggregationWindowRecord>();
-    for (const itemId of itemIds) {
-      const row = this.#rows.get(this.#key(itemId, windowStart, windowSize));
-      if (row) out.set(itemId, row);
-    }
-    return out;
+    limit: number,
+  ): Promise<Array<{ itemId: string; eventCount: number }>> {
+    return [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.windowStart === windowStart && row.windowSize === windowSize && row.eventCount > 0,
+      )
+      .sort((a, b) => b.eventCount - a.eventCount || a.itemId.localeCompare(b.itemId))
+      .slice(0, limit)
+      .map((row) => ({ itemId: row.itemId, eventCount: row.eventCount }));
   }
 
   async listForItemBefore(

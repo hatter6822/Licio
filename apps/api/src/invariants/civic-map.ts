@@ -89,61 +89,50 @@ export async function buildCivicMap(
    */
   canBridge: (threadId: string, roomId: string | null) => Promise<boolean> = async () => false,
 ): Promise<CivicMapResponse | null> {
-  const { nodes, edges } = await assembleEngagementLandscape(events, ingestion, nowMs);
-  // An ALL-ZERO landscape is a quiet hour, not a landscape.
-  //
-  // The assembly returns the recent stories whether or not anything happened to
-  // them this hour, so a quiet window produced 100 nodes at level 0 and
-  // `reebGraph` dutifully manufactured basins and merges out of topic adjacency
-  // alone — a map asserting attention is grouping "this hour" from an hour in
-  // which nobody read anything. Emptiness is a real state this surface already
-  // knows how to render; the guard just has to recognise it.
-  if (nodes.length === 0 || nodes.every((node) => node.value === 0)) return null;
+  const {
+    nodes,
+    edges,
+    stories: byId,
+  } = await assembleEngagementLandscape(events, ingestion, nowMs);
+  // No nodes ⇒ no landscape. The assembly starts FROM the window's active rows
+  // and drops anything that no longer hydrates as public, so an empty result
+  // means a quiet hour or a window whose stories are all restricted — both real
+  // states this surface renders as "nothing to map yet" rather than an error.
+  if (nodes.length === 0) return null;
 
   const graph = reebGraph(nodes, edges);
 
-  // Enrich BY THE GRAPH'S OWN IDS, and through the PUBLIC-ONLY read.
-  //
-  // Assembly and enrichment are two moments: a story can be hidden or turned
-  // `room_only` in between, and an unrestricted by-id read would then hand an
-  // integrity analyst the title and topics of a row that is no longer public.
-  // Same restriction in both queries closes the race rather than narrowing it —
-  // a story that leaves the public set between them lands in the honest
-  // "Story unavailable" branch below, which is what it now is to this surface.
-  //
-  //
-  // A repeat `listRecent(n)` returns the n most recent stories AT THAT INSTANT,
-  // so stories arriving between assembly and this read push older graph members
-  // out of the window — and filtering then dropped live basins to "Story
-  // unavailable" with no topics, blaming ordinary concurrent ingestion on a
-  // deletion. Fetching the exact ids removes the race and makes the fallback
-  // mean what it says: the row really is gone.
-  const byId = await ingestion.stories.getPublicByIds(nodes.map((node) => node.id));
   const finalBasins = new Set(graph.finalBasins);
 
-  // Only the basins' peak stories need a thread, not every node — and they are
-  // fetched in ONE query. A per-basin `getThreadByStoryId` would be a round trip
-  // per basin against Postgres on a surface a steward reloads by hand.
-  // Threads for every PUBLIC landscape node, not only the peaks.
+  // Threads for every landscape node, not only the peaks — in ONE query.
   //
   // A bridge request should open on a conversation that actually carries the
   // join. Basins meet through their lower-level members — the X/Y and Y/Z case
   // `saddleTopics` documents — so targeting a peak sends the request to a thread
   // about X while the saddle is about Y, and the endpoint then computes its
   // SCOI baseline and candidate participants for the wrong conversation.
-  const threadByStory = await ingestion.stories.getThreadsByStoryIds(
-    // …and only for stories STILL PUBLIC: a thread id is a handle to a
-    // conversation, so fetching one for a story that left the public set between
-    // the two reads would publish exactly what the public-only enrichment
-    // withheld.
-    nodes.map((node) => node.id).filter((id) => byId.has(id)),
-  );
+  const threadByStory = await ingestion.stories.getThreadsByStoryIds(nodes.map((node) => node.id));
 
-  /** The thread this caller may actually act on, or null. */
-  const actionableThread = async (storyId: string): Promise<string | null> => {
-    const threadId = threadByStory.get(storyId)?.threadId;
-    if (threadId === undefined) return null;
-    return (await canBridge(threadId, byId.get(storyId)?.roomId ?? null)) ? threadId : null;
+  /**
+   * The thread this caller may actually act on, or null — MEMOIZED per story.
+   *
+   * Every sampled endpoint of every merge and split asks, story ids repeat
+   * across saddles, and the two-pass preference visits some of them twice. Each
+   * unmemoized answer is a `rooms.getById` plus usually a `stewardRolesFor`, so
+   * one map load ran hundreds of redundant queries. The promise is cached, not
+   * the value, so concurrent askers share one round trip rather than racing.
+   */
+  const authorized = new Map<string, Promise<string | null>>();
+  const actionableThread = (storyId: string): Promise<string | null> => {
+    const cached = authorized.get(storyId);
+    if (cached !== undefined) return cached;
+    const pending = (async () => {
+      const threadId = threadByStory.get(storyId)?.threadId;
+      if (threadId === undefined) return null;
+      return (await canBridge(threadId, byId.get(storyId)?.roomId ?? null)) ? threadId : null;
+    })();
+    authorized.set(storyId, pending);
+    return pending;
   };
 
   // Topics for EVERY landscape node, not only the peaks: a saddle's subject
@@ -159,10 +148,12 @@ export async function buildCivicMap(
     const topics = topicsByStory.get(peak.basin) ?? [];
     basins.push({
       basin_id: peak.basin,
-      // A story whose row vanished between assembly and enrichment (deleted,
-      // moderated) still has a place in the graph — name it honestly rather
-      // than dropping a node the tree's edges still reference.
-      title: story?.title ?? 'Story unavailable',
+      // Every node HAS a row: the landscape hydrates before it builds the graph
+      // and drops anything that did not, and those rows travel with it — so the
+      // "Story unavailable" fallback this used to carry described a state that
+      // can no longer occur. It came from a second by-id read that has been
+      // removed along with the race it reopened.
+      title: story?.title ?? '',
       level: peak.level,
       thread_id: await actionableThread(peak.basin),
       topics,
@@ -201,28 +192,36 @@ export async function buildCivicMap(
     return await actionableThread(survivor);
   };
 
-  const toSaddle = async (event: {
-    basinA: string;
-    basinB: string;
-    survivor: string;
-    level: number;
-    connectingEdges: number;
-    connectingEdgeSample: readonly { a: string; b: string }[];
-    fragile: boolean;
-  }): Promise<CivicMapSaddle> => ({
-    basin_a: event.basinA,
-    basin_b: event.basinB,
-    level: event.level,
-    connecting_edges: event.connectingEdges,
-    fragile: event.fragile,
-    survivor: event.survivor,
-    shared_topics: saddleTopics(event.connectingEdgeSample, topicsByStory),
-    bridge_thread_id: await saddleThread(
-      event.connectingEdgeSample,
-      [event.basinA, event.basinB],
-      event.survivor,
-    ),
-  });
+  const toSaddle =
+    (actionable: boolean) =>
+    async (event: {
+      basinA: string;
+      basinB: string;
+      survivor: string;
+      level: number;
+      connectingEdges: number;
+      connectingEdgeSample: readonly { a: string; b: string }[];
+      fragile: boolean;
+    }): Promise<CivicMapSaddle> => ({
+      basin_a: event.basinA,
+      basin_b: event.basinB,
+      level: event.level,
+      connecting_edges: event.connectingEdges,
+      fragile: event.fragile,
+      survivor: event.survivor,
+      shared_topics: saddleTopics(event.connectingEdgeSample, topicsByStory),
+      // Resolved ONLY where a bridge action exists: the surface offers one for a
+      // FRAGILE merge and nowhere else, so authorizing a target for a sturdy
+      // merge or a split is work whose answer nothing renders.
+      bridge_thread_id:
+        actionable && event.fragile
+          ? await saddleThread(
+              event.connectingEdgeSample,
+              [event.basinA, event.basinB],
+              event.survivor,
+            )
+          : null,
+    });
 
   const connected = new Set(edges.flatMap((e) => [e.a, e.b]));
   const hourMs = 3_600_000;
@@ -241,8 +240,10 @@ export async function buildCivicMap(
       final_basin_count: graph.finalBasins.length,
     },
     basins: basins.slice(0, 120),
-    merges: await Promise.all(graph.merges.slice(0, 240).map(toSaddle)),
-    splits: await Promise.all(graph.splits.slice(0, 240).map(toSaddle)),
+    merges: await Promise.all(graph.merges.slice(0, 240).map(toSaddle(true))),
+    // A split is a basin coming APART — there is no join to bridge, so no
+    // target is resolved for one.
+    splits: await Promise.all(graph.splits.slice(0, 240).map(toSaddle(false))),
     coverage: nodes.length === 0 ? 0 : connected.size / nodes.length,
   };
 }

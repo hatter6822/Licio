@@ -37,29 +37,19 @@ function services(stories: FakeStory[], opts: { omitFromList?: string[] } = {}) 
   const omitted = new Set(opts.omitFromList ?? []);
   const events = {
     windowStore: {
-      // ONE read for the whole landscape — see `assembleEngagementLandscape`:
-      // a per-story `get` put a round trip per story ahead of every map load.
-      getManyForWindow: (ids: readonly string[]) =>
+      // The landscape STARTS from the window — what actually drew attention —
+      // rather than from the most recent stories filtered by activity.
+      listActiveInWindow: () =>
         Promise.resolve(
-          new Map(
-            stories
-              .filter((s) => ids.includes(s.storyId))
-              .map((s) => [s.storyId, { eventCount: s.events }]),
-          ),
+          stories
+            .filter((s) => s.events > 0)
+            .sort((a, b) => b.events - a.events)
+            .map((s) => ({ itemId: s.storyId, eventCount: s.events })),
         ),
     },
   } as unknown as Parameters<typeof buildCivicMap>[0];
   const ingestion = {
     stories: {
-      // `listRecentPublic`, not `listRecent`: the landscape reads only stories
-      // the query itself restricts to publicly-visible ones, so a `room_only`
-      // story in a private room can never reach an integrity analyst's map.
-      listRecentPublic: () =>
-        Promise.resolve(
-          stories
-            .filter((s) => !omitted.has(s.storyId))
-            .map((s) => ({ storyId: s.storyId, title: s.title, topicIds: s.topicIds })),
-        ),
       getPublicByIds: (ids: readonly string[]) =>
         Promise.resolve(
           new Map(
@@ -206,6 +196,26 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(saddle?.bridge_thread_id).toBe(`thread-${bridgeXY}`);
   });
 
+  it('includes an ACTIVE older story that a recency bound would have cut', async () => {
+    // The landscape starts from the window's active rows, so the bound applies
+    // to what drew attention. Selecting by creation time first would drop this
+    // busy older story in favour of quiet newer ones — and a hundred of those
+    // would report an empty landscape for an hour that had real activity.
+    const busyOld = 'aaaaaaaa-1111-4111-8111-111111111111';
+    const rows = [
+      { storyId: busyOld, title: 'Old but busy', topicIds: [TOPIC_A?.id ?? ''], events: 40 },
+      {
+        storyId: 'bbbbbbbb-2222-4222-8222-222222222222',
+        title: 'New and quiet',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 0,
+      },
+    ];
+    const { events, ingestion } = services(rows);
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
+    expect(map?.basins.map((basin) => basin.title)).toEqual(['Old but busy']);
+  });
+
   it('never surfaces the UNCLASSIFIED sentinel as a topic', async () => {
     const { events, ingestion } = services([
       story('11111111-1111-4111-8111-111111111111', 10, [UNCLASSIFIED_TOPIC_ID]),
@@ -233,14 +243,13 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     ];
     const events = {
       windowStore: {
-        getManyForWindow: (ids: readonly string[]) =>
-          Promise.resolve(new Map(ids.map((id) => [id, { eventCount: 5 }]))),
+        listActiveInWindow: () =>
+          Promise.resolve(rows.map((r) => ({ itemId: r.storyId, eventCount: 5 }))),
       },
     } as unknown as Parameters<typeof buildCivicMap>[0];
     const busy = {
       stories: {
         // The landscape sees the two originals…
-        listRecentPublic: () => Promise.resolve(rows),
         // …and by enrichment time a flood of newer stories has landed. A
         // window-based re-read would miss both; an id-based one cannot.
         getPublicByIds: (ids: readonly string[]) =>
@@ -260,7 +269,11 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     }
   });
 
-  it('names a genuinely deleted story honestly rather than dropping its basin', async () => {
+  it('leaves a story that stopped being public OUT of the landscape', async () => {
+    // Assembly hydrates BEFORE it builds the graph, and the hydrated rows travel
+    // with it — so a story that is no longer public never becomes a node, rather
+    // than becoming one the map cannot name. The second by-id read that used to
+    // produce a "Story unavailable" basin is gone, and with it the race.
     const gone = '33333333-3333-4333-8333-333333333333';
     const rows = [
       { storyId: gone, title: 'Vanishing', topicIds: [TOPIC_A?.id ?? ''] },
@@ -270,19 +283,16 @@ describe('buildCivicMap (WS-H.7.4)', () => {
         topicIds: [TOPIC_A?.id ?? ''],
       },
     ];
-    // `gone` must be the higher-valued story so it is a PEAK — a basin's name is
-    // its peak, and with equal values the smaller id would win instead.
     const events = {
       windowStore: {
-        getManyForWindow: (ids: readonly string[]) =>
-          Promise.resolve(new Map(ids.map((id) => [id, { eventCount: id === gone ? 20 : 3 }]))),
+        listActiveInWindow: () =>
+          Promise.resolve(
+            rows.map((r) => ({ itemId: r.storyId, eventCount: r.storyId === gone ? 20 : 3 })),
+          ),
       },
     } as unknown as Parameters<typeof buildCivicMap>[0];
     const deleting = {
       stories: {
-        listRecentPublic: () => Promise.resolve(rows),
-        // The row really is gone by enrichment time — the fallback now MEANS
-        // deleted, because ordinary ingestion can no longer produce it.
         getPublicByIds: (ids: readonly string[]) =>
           Promise.resolve(
             new Map(
@@ -297,10 +307,8 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     } as unknown as Parameters<typeof buildCivicMap>[1];
     const map = await buildCivicMap(events, deleting, NOW, async () => true);
     expect(map).not.toBe(null);
-    if (!map) return;
-    const vanished = map.basins.find((basin) => basin.basin_id === gone);
-    expect(vanished).toBeDefined();
-    expect(vanished?.title).toBe('Story unavailable');
+    expect(map?.basins.find((basin) => basin.basin_id === gone)).toBeUndefined();
+    expect(map?.basins.map((basin) => basin.title)).toEqual(['Survivor']);
   });
 
   it('reports the window it swept and a coverage share', async () => {

@@ -176,6 +176,17 @@ function refuse(reason: StubFailure): { status: 403 | 404 | 422; body: unknown }
           },
         },
       };
+    case 'identity_change':
+      return {
+        status: 422,
+        body: {
+          error: {
+            code: 'identity_change',
+            message:
+              'A directory record cannot change the key it is signed by. Members verify the record against that key; re-signing it under another device would make an honest record look forged.',
+          },
+        },
+      };
     case 'forbidden_stub_field':
       return {
         status: 422,
