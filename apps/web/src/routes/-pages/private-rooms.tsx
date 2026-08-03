@@ -59,6 +59,10 @@ export function PrivateRoomsPage(): React.ReactElement {
                 refresh();
                 void navigate({ to: '/private/$roomId', params: { roomId } });
               }}
+              // The room can exist while the wizard stays open to report a
+              // directory failure — refresh then too, or dismissing that warning
+              // leaves a real room missing from this list until a reload.
+              onRoomPersisted={() => refresh()}
             />
           </Card>
         ) : null}

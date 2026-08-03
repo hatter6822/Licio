@@ -221,7 +221,11 @@ export function createTrustSafetyRoutes() {
             resolvedContentKind,
             resolvedSubjectUserId,
           );
-          if (outcome.ok && listing !== null) {
+          // NOT on an idempotent retry. `submitReport` returns the ORIGINAL
+          // report unchanged, and the listing may have been edited since — so a
+          // second capture would attach text the reporter never reported to the
+          // same case, labelled as what they reported.
+          if (outcome.ok && !outcome.response.idempotent && listing !== null) {
             // BEST EFFORT: the report has already committed, and losing the
             // capture must not un-take it.
             await writeAudit(mod, {

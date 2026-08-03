@@ -382,6 +382,32 @@ describe('CreatePrivateRoomWizard', () => {
     expect(options.some((label) => /People you invite/i.test(label))).toBe(true);
   });
 
+  it('tells the caller the room EXISTS even when the directory step fails', async () => {
+    // The wizard holds open so the warning is seen, and the parent refreshes
+    // its list in `onCreated` — so without this a dismissed warning left a real,
+    // persisted room missing from the list, with an empty state inviting a
+    // duplicate.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
+    try {
+      const user = userEvent.setup();
+      const onCreated = vi.fn();
+      const onRoomPersisted = vi.fn();
+      render(<CreatePrivateRoomWizard onCreated={onCreated} onRoomPersisted={onRoomPersisted} />);
+      await user.type(screen.getByLabelText(/room name/i), 'Half Made');
+      for (const ack of PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS) {
+        await user.click(screen.getByLabelText(ack.label));
+      }
+      await user.click(screen.getByRole('button', { name: /create private room/i }));
+
+      await screen.findByText(/could not save its directory record/i);
+      await waitFor(() => expect(onRoomPersisted).toHaveBeenCalledTimes(1));
+      // …and NOT `onCreated`, which navigates away from the warning.
+      expect(onCreated).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('has no accessibility violations', async () => {
     const { container } = render(<CreatePrivateRoomWizard />);
     await checkA11y(container);

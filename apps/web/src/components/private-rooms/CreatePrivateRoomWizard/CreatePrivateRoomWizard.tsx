@@ -33,7 +33,18 @@ import { Input } from '../../ui/Input/index.js';
 import { Select } from '../../ui/Select/index.js';
 
 export interface CreatePrivateRoomWizardProps {
+  /** The room is created AND its directory step finished — the caller navigates. */
   onCreated?: (roomId: string) => void;
+  /**
+   * The room exists on this device, whatever happened to its directory record.
+   *
+   * Distinct from `onCreated` because the wizard HOLDS OPEN on a directory
+   * failure so the warning is seen, and the caller's list refresh lives in
+   * `onCreated` — so dismissing that warning left a room that is real, persisted
+   * and absent from the list until a full reload, with an empty state inviting
+   * the user to create it again.
+   */
+  onRoomPersisted?: (roomId: string) => void;
 }
 
 /** §4.2 — how discoverable the room's EXISTENCE is, chosen at creation.
@@ -80,6 +91,7 @@ function availableChoices(signedIn: boolean, restricted: boolean): readonly Dire
 
 export function CreatePrivateRoomWizard({
   onCreated,
+  onRoomPersisted,
 }: CreatePrivateRoomWizardProps): React.ReactElement {
   const t = useT();
   const headingId = useId();
@@ -263,6 +275,10 @@ export function CreatePrivateRoomWizard({
       if (directoryFailed) {
         setCreating(false);
         setCreatedRoomId(session.roomId);
+        // The room is REAL even though this wizard stays open. Tell the caller
+        // now, so a list refreshed on dismissal shows it rather than inviting a
+        // duplicate.
+        onRoomPersisted?.(session.roomId);
         return;
       }
       onCreated?.(session.roomId);

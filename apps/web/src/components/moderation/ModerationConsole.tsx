@@ -674,7 +674,7 @@ function CaseReviewDialog({
    * demotion or neither does.
    */
   const delist = useMutation({
-    mutationFn: (roomServerId: string) => staffDelistPrivateRoom(roomServerId),
+    mutationFn: (roomServerId: string) => staffDelistPrivateRoom(roomServerId, caseId),
     onSuccess: () => {
       toast({
         message: t(

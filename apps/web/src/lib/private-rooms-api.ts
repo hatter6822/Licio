@@ -275,10 +275,17 @@ const staffDelistResponseSchema = z.object({
 /** §11.4/§21.4 — platform staff stop a room advertising a public name. */
 export async function staffDelistPrivateRoom(
   roomServerId: string,
+  /** The case this answers, so the demotion RESOLVES it in the same unit — a
+   *  remedy that leaves its case open puts it straight back in the queue. */
+  caseId?: string,
 ): Promise<{ room_server_id: string; delisted: true }> {
   const response = await apiFetch(
     `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}/delist`,
-    { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(caseId === undefined ? {} : { case_id: caseId }),
+    },
   );
   return await parseResponse(response, staffDelistResponseSchema);
 }

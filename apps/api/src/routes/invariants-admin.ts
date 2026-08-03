@@ -115,6 +115,25 @@ export function createInvariantsAdminRoutes(
     new Hono<AuthEnv>()
       .use('*', authMiddleware(resolveIdentity))
       .use('*', requireSteward())
+      // NOTHING here is cacheable.
+      //
+      // Every response on this surface is steward-gated and several are tailored
+      // to the CALLER's authority — the Civic Map's `thread_id` and
+      // `bridge_thread_id` are resolved against the requesting analyst's room
+      // steward roles, and its basins carry role-gated titles and exact hourly
+      // levels. A cached 200 replayed after an account switch or a role
+      // revocation would serve one steward's view to another without
+      // `authMiddleware` or the queue check running again, and the Workbox
+      // exclusion covers the service worker, not the HTTP cache or a proxy.
+      //
+      // On the GROUP rather than per route: the next endpoint added here would
+      // otherwise have to remember, and every one of them answers a
+      // role-dependent question.
+      .use('*', async (c, next) => {
+        await next();
+        c.header('Cache-Control', 'no-store, private');
+        c.header('Vary', 'Cookie', { append: true });
+      })
 
       .get('/health', async (c) => {
         const invariants = resolveInvariants();

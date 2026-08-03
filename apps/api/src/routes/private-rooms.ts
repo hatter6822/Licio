@@ -117,6 +117,9 @@ const mineTargetSchema = z.object({
     .optional(),
 });
 
+/** The optional case a staff delist resolves (the console supplies it). */
+const delistBodySchema = z.object({ case_id: z.uuid().optional() }).strict();
+
 const roomIdParamSchema = z.object({ roomServerId: z.uuid() });
 
 /** §4.2 directory paging. Both fields are optional; a bad value is a 400 rather
@@ -454,6 +457,13 @@ export function createPrivateRoomsRoutes() {
       // deliberately untouched: a room's own creator is not a steward and must
       // not need MFA to stop advertising their own room.
       const staff = auth.roles.includes('admin') && auth.mfaActive && auth.mfaVerified;
+      // The case this delist answers, when it was taken from the console.
+      const body = await readJsonBounded(c, MAX_BODY_BYTES);
+      const parsedBody = delistBodySchema.safeParse(body === undefined ? {} : body);
+      if (!parsedBody.success) {
+        return c.json({ error: { code: 'invalid_request', message: 'Invalid delist' } }, 400);
+      }
+      const caseId = parsedBody.data.case_id;
 
       // THE STAFF ARM RUNS AS ONE UNIT with its audit record.
       //
@@ -481,6 +491,24 @@ export function createPrivateRoomsRoutes() {
         const mod = getModerationServices();
         const demoted = await mod.transactor.run(async (tx) => {
           if (!(await tx.delistListedRoom(params.data.roomServerId))) return false;
+          // RESOLVE the case in the same unit, when the delist came from one.
+          //
+          // Without it the remedy ran and the case stayed `new`: back in the
+          // queue, with a case-scoped history that does not mention the
+          // enforcement. The case transition, the demotion and the audit row are
+          // one fact about one action, so they commit together.
+          if (caseId !== undefined) {
+            // Only a case ABOUT THIS ROOM. A stale or forged id for another
+            // target would silently drop someone else's report from the queue.
+            const theCase = await tx.cases.getById(caseId);
+            if (
+              theCase !== null &&
+              theCase.targetType === 'room' &&
+              theCase.targetId === params.data.roomServerId
+            ) {
+              await tx.cases.update(caseId, { status: 'resolved', resolvedActionId: null });
+            }
+          }
           await tx.audit({
             actorUserId: auth.userId,
             // The doctrine-steward roles do not cover this: §11.4 gives the
@@ -492,6 +520,7 @@ export function createPrivateRoomsRoutes() {
             priorState: 'listed',
             nextState: 'unlisted',
             reversible: false,
+            ...(caseId !== undefined ? { caseId } : {}),
             notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
           });
           return true;
