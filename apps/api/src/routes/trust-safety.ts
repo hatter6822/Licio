@@ -127,6 +127,78 @@ async function withHandles<K extends string, H extends string, T extends Record<
   );
 }
 
+/**
+ * The §21 listing-evidence capture, for BOTH the fresh report and the retry.
+ *
+ * Extracted because moving the idempotent replay ahead of the mutable target
+ * checks quietly took the repair with it: a report that committed while its
+ * evidence append failed, whose response was then lost, is precisely the case
+ * this recovery exists for — and every retry began returning the stored
+ * response without ever looking at the case trail. The one path that could
+ * still add the missing row stopped taking it.
+ *
+ * Idempotent by the store's own key, so calling it on every retry is free after
+ * the first success.
+ */
+async function captureListingEvidence(
+  mod: ReturnType<typeof getModerationServices>,
+  input: {
+    enabled: boolean;
+    caseId: string;
+    targetId: string;
+    reportedAt: string;
+    listing: Awaited<ReturnType<ReturnType<typeof getPrivateRoomStubService>['listingSnapshot']>>;
+  },
+): Promise<void> {
+  if (!input.enabled || input.caseId === '') return;
+  const priorCapture =
+    (
+      await mod.audit.list({
+        caseId: input.caseId,
+        action: 'private_room_listing_reported',
+        limit: 1,
+      })
+    ).length > 0;
+  if (priorCapture) return;
+  // Edited SINCE the report means the original is gone: the stub row is edited
+  // in place and keeps no history, so the trail says that rather than
+  // presenting the new text as what was reported.
+  const editedSinceReport =
+    input.listing !== null && Date.parse(input.listing.updated_at) > Date.parse(input.reportedAt);
+  // BEST EFFORT: the report has already committed, and losing the capture must
+  // not un-take it.
+  await writeAudit(mod, {
+    // NO ACTOR. `/moderation-console/audit` resolves every actor to a handle for
+    // any queue reader, while reporter identity is gated to safety and integrity
+    // roles — so naming the reporter here would let a community or appeals
+    // steward read who filed the report straight out of the general feed. The
+    // row is EVIDENCE about the listing, not a record of somebody's action.
+    actorUserId: null,
+    actorRole: null,
+    action: 'private_room_listing_reported',
+    targetType: 'private_room_stub',
+    targetId: input.targetId,
+    // CASE-SCOPED, or the panel never shows it: `buildCaseReview` fetches the
+    // trail by `caseId` alone, and the general audit panel does not render notes.
+    caseId: input.caseId,
+    // AT MOST ONCE PER CASE, decided by the store: two distinct reports joining
+    // the same open case can both see the trail empty before either writes, and
+    // `moderation_audit_idempotency_uq` is what actually settles it.
+    idempotencyKey: `listing-evidence:${input.caseId}`,
+    reversible: false,
+    // BUDGETED against the console's own note bound: the published name and
+    // description are member-supplied and long enough TOGETHER to exceed it
+    // (120 + 2000), and an over-long note used to make every later read of the
+    // case fail its response schema.
+    notes:
+      input.listing === null
+        ? 'Listing UNAVAILABLE — the room was delisted or its record removed between this report being accepted and the capture running, so what was published is gone. The report stands; the text it was about cannot be recovered.'
+        : editedSinceReport
+          ? 'Listing UNAVAILABLE — the published name/description were edited after this report was filed and before this capture could be stored, and the record keeps no history. What is published now is NOT what was reported.'
+          : listingEvidenceNote(input.listing),
+  });
+}
+
 export function createTrustSafetyRoutes() {
   return (
     new Hono<AuthEnv>()
@@ -175,6 +247,21 @@ export function createTrustSafetyRoutes() {
           // it.
           const replay = await findIdempotentReplay(mod, auth.userId, request.local_operation_id);
           if (replay) {
+            // …but a replay still RECONCILES the evidence it may be missing.
+            //
+            // The capture is best-effort by design (losing it must not un-take
+            // the report), so the case it failed for is exactly the case a retry
+            // should repair — and returning the stored response without looking
+            // at the case trail took away the only path that could. The capture
+            // is idempotent per case, so this costs one read once the row is
+            // there.
+            await captureListingEvidence(mod, {
+              enabled: request.target_type === 'room',
+              caseId: replay.caseId,
+              targetId: request.target_id,
+              reportedAt: replay.response.created_at,
+              listing: await getPrivateRoomStubService().listingSnapshot(request.target_id),
+            });
             return c.json(reportCreatedResponseSchema.parse(replay.response), 200);
           }
           // Resolve target existence (against a tombstone where applicable).  For
@@ -298,72 +385,13 @@ export function createTrustSafetyRoutes() {
           // true — unchanged since the report means what is here IS what was
           // reported; edited since means the original is gone, and the trail
           // says exactly that rather than presenting the new text as evidence.
-          const priorCapture =
-            outcome.ok && reportedListedRoom
-              ? (
-                  await mod.audit.list({
-                    caseId: outcome.caseId,
-                    action: 'private_room_listing_reported',
-                    limit: 1,
-                  })
-                ).length > 0
-              : false;
-          const editedSinceReport =
-            outcome.ok && listing !== null
-              ? Date.parse(listing.updated_at) > Date.parse(outcome.response.created_at)
-              : false;
-          // EVERY accepted listed-room report leaves an evidence row, including
-          // one whose listing is already gone.
-          //
-          // Keying the append on the SNAPSHOT surviving meant the case with the
-          // most urgent story — reported, then delisted or deleted before the
-          // capture ran — was the one case that carried no evidence at all, and
-          // not even the note saying so. A reviewer cannot tell that from a
-          // report about nothing.
-          if (outcome.ok && reportedListedRoom && !priorCapture) {
-            // BEST EFFORT: the report has already committed, and losing the
-            // capture must not un-take it.
-            await writeAudit(mod, {
-              // NO ACTOR. `/moderation-console/audit` resolves every actor to a
-              // handle for any queue reader, while reporter identity is gated to
-              // safety and integrity roles — so naming the reporter here would
-              // let a community or appeals steward read who filed the report
-              // straight out of the general feed. The row is EVIDENCE about the
-              // listing, not a record of somebody's action.
-              actorUserId: null,
-              actorRole: null,
-              action: 'private_room_listing_reported',
-              targetType: 'private_room_stub',
-              targetId: request.target_id,
-              // CASE-SCOPED, or the panel never shows it: `buildCaseReview`
-              // fetches the trail by `caseId` alone, and the general audit panel
-              // does not render notes.
-              caseId: outcome.caseId,
-              // AT MOST ONCE PER CASE, decided by the store.
-              //
-              // The trail read above is an optimisation, not the rule: two
-              // distinct reports joining the same open case can both see it
-              // empty before either writes. `moderation_audit_idempotency_uq`
-              // is what actually settles it, and the loser's append is a no-op
-              // rather than a second snapshot of text that may have changed.
-              idempotencyKey: `listing-evidence:${outcome.caseId}`,
-              reversible: false,
-              // BUDGETED against the console's own note bound. The published
-              // name and description are member-supplied and long enough
-              // TOGETHER to exceed it (120 + 2000), and an over-long note used
-              // to make every later read of this case fail its response schema
-              // — so the room whose listing was reported became the one room
-              // staff could not review. The append clamps as a backstop; the
-              // budget here is what keeps the evidence a deliberate excerpt
-              // rather than an arbitrary cut mid-word.
-              notes:
-                listing === null
-                  ? 'Listing UNAVAILABLE — the room was delisted or its record removed between this report being accepted and the capture running, so what was published is gone. The report stands; the text it was about cannot be recovered.'
-                  : editedSinceReport
-                    ? 'Listing UNAVAILABLE — the published name/description were edited after this report was filed and before this capture could be stored, and the record keeps no history. What is published now is NOT what was reported.'
-                    : listingEvidenceNote(listing),
-            });
-          }
+          await captureListingEvidence(mod, {
+            enabled: outcome.ok && reportedListedRoom,
+            caseId: outcome.ok ? outcome.caseId : '',
+            targetId: request.target_id,
+            reportedAt: outcome.ok ? outcome.response.created_at : '',
+            listing,
+          });
           if (!outcome.ok) {
             // WS-N.2.3e: key-like material blocked with the standing warning
             // (the matched value was discarded, never stored or echoed).

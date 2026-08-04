@@ -289,6 +289,13 @@ function JoinerSection({
               setGrantJson('');
               setError(null);
             }}
+            // LOCKED for the whole of a completion, exactly as the admit half
+            // is. The room-key comparison happens BEFORE the await, so editing
+            // during `completeJoin` left the in-flight call to persist room A
+            // and navigate into it while the screen showed invite B — and
+            // discarding the result afterwards would not help, because the room
+            // is already stored locally by then.
+            disabled={busy}
             rows={2}
           />
           <Button
@@ -338,6 +345,7 @@ function JoinerSection({
             label={t('privateRoom.join.grantLabel', 'Paste the grant the admin sent back')}
             value={grantJson}
             onChange={(e) => setGrantJson(e.target.value)}
+            disabled={busy}
             rows={3}
           />
           <Button

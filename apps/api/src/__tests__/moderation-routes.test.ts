@@ -1052,6 +1052,65 @@ describe('trust-safety route branches', () => {
     }
   });
 
+  it('a RETRY repairs listing evidence the first attempt failed to capture', async () => {
+    // The capture is best-effort — losing it must not un-take the report — so
+    // the case it failed for is exactly the case a retry should repair. Moving
+    // the idempotent replay ahead of the mutable target checks quietly took that
+    // path away: every retry returned the stored response without ever looking
+    // at the case trail, and the one path that could add the missing row stopped
+    // taking it.
+    const { getPrivateRoomStubService, PrivateRoomStubService, setPrivateRoomStubService } =
+      await import('../private-rooms/service.js');
+    const previous = getPrivateRoomStubService();
+    const { InMemoryPrivateRoomStubStore } = await import('../private-rooms/stores.js');
+    const service = new PrivateRoomStubService(new InMemoryPrivateRoomStubStore());
+    const roomServerId = randomUUID();
+    service.isPubliclyListed = async () => true;
+    service.listingSnapshot = async () => ({
+      display_name: 'Abusive name',
+      display_description: 'Abusive text',
+      updated_at: '2026-08-01T00:00:00.000Z',
+    });
+    setPrivateRoomStubService(service);
+    const mod = getModerationServices();
+    const chain = mod.auditChain.store;
+    const realAppend = chain.appendChained.bind(chain);
+    try {
+      const reporter = await seedUser({ handle: `re${randomUUID().slice(0, 6)}` });
+      const body = reportBody({
+        target_type: 'room',
+        target_id: roomServerId,
+        content_kind: undefined,
+      });
+      // The first attempt commits the report and LOSES the evidence append.
+      chain.appendChained = async (entry, seal) => {
+        if (entry.action === 'private_room_listing_reported') throw new Error('chain unavailable');
+        return realAppend(entry, seal);
+      };
+      const first = await app().request(post('/v1/reports', body, reporter.cookie));
+      chain.appendChained = realAppend;
+      expect(first.status).toBe(201);
+      const caseId = (await mod.cases.findOpenByTarget('room', roomServerId))?.caseId as string;
+      expect(
+        await mod.audit.list({ caseId, action: 'private_room_listing_reported', limit: 1 }),
+      ).toHaveLength(0);
+
+      // …the client's response was lost, so it retries the same operation id.
+      const retry = await app().request(post('/v1/reports', body, reporter.cookie));
+      expect(retry.status).toBe(200);
+      const evidence = await mod.audit.list({
+        caseId,
+        action: 'private_room_listing_reported',
+        limit: 1,
+      });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.notes).toContain('Abusive name');
+    } finally {
+      chain.appendChained = realAppend;
+      setPrivateRoomStubService(previous);
+    }
+  });
+
   it('#12b records evidence for a listed room whose listing VANISHED before the capture', async () => {
     // The most urgent version of this report — filed, then the room delisted or
     // its record removed before the capture ran — was the one case that carried

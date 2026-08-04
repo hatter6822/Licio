@@ -513,16 +513,22 @@ export function createIngestionAdminRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const events = getEventPipelineServices();
           const ingestion = getIngestionServices();
-          const progress = await startBackfill(
-            events.configStore,
-            c.req.valid('json').from_version,
-            ingestion.embeddingProvider.modelVersion,
-            ingestion.now,
-          );
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'ingestion_config_change',
-            context: { setting: 'embedding_backfill', new_value: progress.model_version },
+          // Starting a backfill is a durable operator action — it changes what
+          // the ingestion pipeline will re-embed — so it commits with the row
+          // naming who started it.
+          const progress = await getIdentityServices().transact(async (tx) => {
+            const started = await startBackfill(
+              tx.config ?? events.configStore,
+              c.req.valid('json').from_version,
+              ingestion.embeddingProvider.modelVersion,
+              ingestion.now,
+            );
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'ingestion_config_change',
+              context: { setting: 'embedding_backfill', new_value: started.model_version },
+            });
+            return started;
           });
           return c.json({ progress }, 202);
         },

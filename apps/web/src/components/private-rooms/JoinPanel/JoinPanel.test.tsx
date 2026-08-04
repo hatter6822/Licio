@@ -441,6 +441,41 @@ describe('JoinPanel — admit half', () => {
     expect(screen.getByRole('status')).toHaveTextContent(/device admitted/i);
   });
 
+  it('locks the JOINER fields while a completion runs', async () => {
+    // The grant/invite room comparison happens BEFORE `completeJoin` awaits, so
+    // an edit during it left the in-flight call to persist room A and navigate
+    // into it while the screen showed invite B — and discarding the result
+    // afterwards cannot help, because the room is stored locally by then. The
+    // completion is real MLS processing plus IndexedDB writes, so the busy
+    // window is many turns of the loop wide.
+    const room = await makeSession();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse({}));
+    const user = userEvent.setup();
+    render(<JoinPanel />);
+    await user.type(screen.getByLabelText(/your display name/i), 'Bob');
+    await user.click(screen.getByRole('button', { name: /get my recipient key/i }));
+    const keyField = (await screen.findByLabelText(/your recipient key/i)) as HTMLTextAreaElement;
+    const invite = await room.createInvite({ inviteePublicKey: keyField.value });
+    await user.type(screen.getByLabelText(/paste the invite link/i), invite.inviteUrl);
+    await user.click(screen.getByRole('button', { name: /build join request/i }));
+    const request = JSON.parse(
+      ((await screen.findByLabelText(/your join request/i)) as HTMLTextAreaElement).value,
+    ) as never;
+    const { grant } = await room.admitJoinRequest(invite.invite, request);
+    if (!grant) throw new Error('expected a grant');
+
+    // Both fields are editable until the join starts…
+    expect(screen.getByLabelText(/paste the invite link/i)).not.toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/paste the grant/i), {
+      target: { value: serializeJoinGrant(grant) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /finish joining/i }));
+
+    // …and locked for the whole of it, so no edit can reach the in-flight call.
+    await waitFor(() => expect(screen.getByLabelText(/paste the grant/i)).toBeDisabled());
+    expect(screen.getByLabelText(/paste the invite link/i)).toBeDisabled();
+  });
+
   it('has no accessibility violations', async () => {
     const admin = await makeSession();
     const { container } = render(<JoinPanel session={admin} />);

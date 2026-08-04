@@ -101,32 +101,18 @@ const READ_METHODS =
  * "unrecognised ⇒ write" and every relaxation is a line someone had to add on
  * purpose.
  */
-const READ_EXCEPTIONS = new Set(['resolveMany', 'query', 'verifyChain', 'exportForAccount']);
+const READ_EXCEPTIONS = new Set([
+  'resolveMany',
+  'query',
+  'verifyChain',
+  'exportForAccount',
+  // A roles lookup, and a configured-topics accessor: both read, and both were
+  // found by the gate flagging a pure projection (`isRoomSteward`) and a pure
+  // replay (`replayDecision`) that merely call them.
+  'stewardRolesFor',
+  'sensitiveTopicIds',
+]);
 
-/**
- * Free functions that write, by name — the ONE place a write allowlist remains.
- *
- * A member call names its receiver, so "is this domain state?" is answerable
- * structurally and the rule can fail closed. A bare call does not: a route file
- * hands services to projections (`toRoomSummary`), emitters
- * (`emitPrivacyRequestEvent`) and helpers that already transact internally
- * (`submitReport`) far more often than to a raw writer, so failing closed there
- * produces alarms on correct code — and a gate that cries wolf is one people
- * learn to skip. So the bare-call form is named, and `storeInvariantsConfigValue`
- * (the `/config` false-green the review found) is why the list exists at all.
- */
-const FREE_WRITE_FUNCTIONS =
-  /^(store|save|persist|write|apply|purge|anonymize|scrub|freeze|rebaseline|revoke|grant|resolveItemSafetyState)/;
-
-/**
- * Bindings that hold a services/store object — the RECEIVER test that replaces
- * the verb test.
- *
- * Structural rather than a name list: a local initialised from a
- * `get*Services()` / `resolve*()` factory, plus the parameters of unit
- * callbacks (`tx`, `stores`). Everything reached through one of those is domain
- * state; everything else in a handler is Hono, zod, or local computation.
- */
 const SERVICE_FACTORY = /^(get[A-Z][A-Za-z]*Services|resolve[A-Z][A-Za-z]*)$/;
 
 /** Opening a unit of work.
@@ -334,7 +320,11 @@ function rootIdentifier(node: Syntax | undefined): string {
  *     or a store, which is the only way a route file can reach domain state
  *     without naming it. `/config` did exactly this and the gate never saw it.
  */
-function isDurableWrite(call: Syntax, services: ReadonlySet<string>): boolean {
+function isDurableWrite(
+  call: Syntax,
+  services: ReadonlySet<string>,
+  writers: ReadonlySet<string>,
+): boolean {
   const callee = calleeText(call);
   if (callee === '') return false;
   if (AUDIT_CALLS.some((pattern) => pattern.test(callee))) return false;
@@ -351,17 +341,113 @@ function isDurableWrite(call: Syntax, services: ReadonlySet<string>): boolean {
     if (segments.some((segment) => NON_STORE_MEMBERS.test(segment))) return false;
     return !READ_METHODS.test(last) && !READ_EXCEPTIONS.has(last);
   }
-  // A bare call: NAMED as a writer (see FREE_WRITE_FUNCTIONS) and handed a
-  // service or store, so ordinary projections and local helpers stay out.
-  if (!FREE_WRITE_FUNCTIONS.test(last)) return false;
+  // A bare call is a write when the FUNCTION ITSELF writes through the service
+  // it is handed — resolved by reading its declaration, not by matching its
+  // name. `engageKillSwitch(events, …)` and `releaseKillSwitch(events, …)` both
+  // persist `ranking.killswitch` and neither was on the name list that used to
+  // stand here, so the gate reported the route clean; a list of verbs cannot
+  // cover a vocabulary it does not own.
   const first = call.arguments?.[0];
   if (first === undefined) return false;
   // A service VALUE, not a reference to the factory that makes one:
   // `authMiddleware(resolveIdentity)` hands over the function itself.
-  if (first.kind === SyntaxKind.CallExpression) {
-    return SERVICE_FACTORY.test(rootIdentifier(first.expression));
+  const handedAService =
+    first.kind === SyntaxKind.CallExpression
+      ? SERVICE_FACTORY.test(rootIdentifier(first.expression))
+      : services.has(rootIdentifier(first));
+  if (!handedAService) return false;
+  // An EMISSION is not the change being accounted for.
+  //
+  // `emitPrivacyRequestEvent(events, …)` publishes a WS-E pipeline observation
+  // ABOUT a change that has already committed with its record; it is downstream
+  // of the fact, like a metric that happens to be durable. Demanding it join the
+  // unit would put a notification inside a transaction it can only slow down —
+  // and would make the four privacy endpoints permanently non-compliant with a
+  // rule they already satisfy.
+  if (/^emit([A-Z]|$)/.test(last)) return false;
+  return writers.has(last);
+}
+
+/**
+ * Imported functions that WRITE through a service they are handed.
+ *
+ * Resolved by reading the declaration rather than by matching the name, which is
+ * the only thing that scales: a route file's helpers come from a dozen modules
+ * with their own vocabularies (`engageKillSwitch`, `releaseKillSwitch`,
+ * `storeInvariantsConfigValue`, `resolveItemSafetyState`), and any list of verbs
+ * is a list of the ones somebody happened to think of. Two of those were missed
+ * by exactly that list, in the route that turns ranking off.
+ *
+ * The test is the same one applied to handlers, one level in: treat the callee's
+ * FIRST PARAMETER as a service binding and ask whether its body performs a
+ * durable write through it — DIRECTLY, without descending into helpers it calls
+ * in turn. That bound is deliberate. Descending amplifies every gap in the read
+ * vocabulary: `toRoomSummary` and `isRoomSteward` read their service and then
+ * call read-only helpers of their own, and following them turned two pure
+ * projections into "writers" on the strength of one unrecognised verb three
+ * calls down. A helper that hides its write behind another helper is a case
+ * this does not see, and saying so is better than a gate nobody trusts.
+ */
+function resolveWritingHelpers(
+  routeSource: Syntax,
+  moduleOf: (specifier: string) => Syntax | undefined,
+): Set<string> {
+  const writers = new Set<string>();
+  /** `import { a, b } from './x.js'` — the names, and where they came from. */
+  const imported: Array<{ name: string; specifier: string }> = [];
+  for (const node of walk(routeSource)) {
+    if (node.kind !== SyntaxKind.ImportDeclaration) continue;
+    const specifier = node.moduleSpecifier?.text;
+    if (specifier === undefined) continue;
+    const bindings = node.importClause?.namedBindings;
+    for (const element of bindings?.elements ?? []) {
+      const name = element.name?.getText();
+      if (name !== undefined) imported.push({ name, specifier });
+    }
   }
-  return services.has(rootIdentifier(first));
+
+  const writesThroughItsService = (fn: Syntax): boolean => {
+    const parameter = fn.parameters?.[0]?.name?.getText();
+    if (parameter === undefined) return false;
+    const own = new Set([parameter]);
+    for (const node of walk(fn)) {
+      if (node.kind !== SyntaxKind.CallExpression) continue;
+      if (isDurableWrite(node, own, new Set())) return true;
+    }
+    return false;
+  };
+
+  for (const { name, specifier } of imported) {
+    const module = moduleOf(specifier);
+    if (module === undefined) continue;
+    const fn = namedFunctions(module).get(name);
+    if (fn !== undefined && writesThroughItsService(fn)) writers.add(name);
+  }
+  return writers;
+}
+
+/**
+ * A relative import specifier, resolved to the key the parsed-source map uses.
+ *
+ * Route files sit in one directory and import `../ranking/killswitch.js`, so the
+ * key is that path with the ESM `.js` mapped back to the `.ts` on disk.
+ */
+function resolveSpecifier(fromFile: string, specifier: string): string {
+  if (!specifier.startsWith('.')) return '';
+  const base = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/')) : '';
+  const parts = `${base}/${specifier}`.split('/');
+  const stack: string[] = [];
+  for (const part of parts) {
+    if (part === '.' || part === '') continue;
+    // A `..` with nothing to pop must be KEPT, not dropped: route files sit one
+    // directory down, so `../ranking/killswitch.js` climbing out of `routes/` is
+    // the ordinary case — swallowing it produced `routes/ranking/killswitch.ts`,
+    // which does not exist, so every import silently failed to resolve and the
+    // gate reported a clean pass over code it had never read.
+    if (part === '..' && stack.length > 0 && stack[stack.length - 1] !== '..') stack.pop();
+    else stack.push(part);
+  }
+  return stack.join('/').replace(/\.js$/, '.ts');
 }
 
 /** Every function-ish node in a source, by declared name. */
@@ -411,6 +497,8 @@ export function runAuditedWriteGate(files: Map<string, string>): string[] {
     [...files].map(([path, content]) => ({ path, content })),
     (parsed) => {
       const out: Finding[] = [];
+      // Every parsed module by its path, so an import can be followed.
+      const byPath = new Map(parsed.map((source) => [source.path, source.root]));
       for (const source of parsed) {
         const newlines = newlineIndex(source.content);
         // THE RULE: in a handler that records, EVERY durable write is inside the
@@ -430,6 +518,10 @@ export function runAuditedWriteGate(files: Map<string, string>): string[] {
         // handler records something, and here is a durable change of its that no
         // unit covers.
         const services = serviceBindings(source.root);
+        // Helpers this file imports that write through a service they are handed.
+        const writers = resolveWritingHelpers(source.root, (specifier) =>
+          byPath.get(resolveSpecifier(source.path, specifier)),
+        );
         const helpers = namedFunctions(source.root);
         const auditingHelpers = new Set(
           [...helpers].filter(([, fn]) => auditsInsideItsOwnUnit(fn)).map(([name]) => name),
@@ -446,7 +538,7 @@ export function runAuditedWriteGate(files: Map<string, string>): string[] {
         };
         for (const write of walk(source.root)) {
           if (write.kind !== SyntaxKind.CallExpression) continue;
-          if (!isDurableWrite(write, services)) continue;
+          if (!isDurableWrite(write, services, writers)) continue;
           if (onExitPathWithoutRecord(write, auditingHelpers)) continue;
           if (insideUnit(write)) continue;
           // Handed INTO a helper's unit — the fix, not the defect.
@@ -500,6 +592,25 @@ export function collectRouteFiles(): Map<string, string> {
     throw new Error(
       `check-audited-writes: found only ${files.size} route files — the tree moved; update ROUTES_DIR.`,
     );
+  }
+  // …AND the modules they import, because "does this helper write?" is answered
+  // by reading it. Keyed by the same path an import specifier resolves to
+  // (`../ranking/killswitch.js` → `../ranking/killswitch.ts`), one level deep:
+  // route files are the only callers judged, so their direct imports are the
+  // only declarations that have to be readable.
+  for (const [name, content] of [...files]) {
+    for (const match of content.matchAll(/from\s+'(\.[^']+\.js)'/g)) {
+      const specifier = match[1];
+      if (specifier === undefined) continue;
+      const key = resolveSpecifier(name, specifier);
+      if (key === '' || files.has(key)) continue;
+      try {
+        files.set(key, readFileSync(join(ROUTES_DIR, key), 'utf-8'));
+      } catch {
+        // A specifier that does not resolve to a file is not this gate's
+        // business: the compiler already refuses it.
+      }
+    }
   }
   return files;
 }

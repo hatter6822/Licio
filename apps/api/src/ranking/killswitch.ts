@@ -14,6 +14,7 @@
 
 import { z } from 'zod';
 import type { EventPipelineServices } from '../events/services.js';
+import type { PwattConfigStore } from '../events/stores.js';
 
 export const KILLSWITCH_CONFIG_KEY = 'ranking.killswitch';
 
@@ -91,6 +92,11 @@ export async function engageKillSwitch(
   events: EventPipelineServices,
   input: EngageKillSwitchInput,
   nowIso: string,
+  /** The config store to write through, when the caller holds a transactional
+   *  one. Turning ranking off (or back on) is a durable operator action that
+   *  carries an identity-trail row, and the two commit together — so the route
+   *  hands in `tx.config` and the write lands on the unit's handle. */
+  store: PwattConfigStore = events.configStore,
 ): Promise<KillSwitchState> {
   const state = killSwitchStateSchema.parse({
     global: input.global,
@@ -102,7 +108,7 @@ export async function engageKillSwitch(
     review_date: input.reviewDate,
     engaged_at: nowIso,
   });
-  await events.configStore.set(KILLSWITCH_CONFIG_KEY, state);
+  await store.set(KILLSWITCH_CONFIG_KEY, state);
   events.log('ranking.killswitch.changed', {
     state: 'engaged',
     global: state.global,
@@ -117,11 +123,15 @@ export async function engageKillSwitch(
 export async function releaseKillSwitch(
   events: EventPipelineServices,
   actorOwner: string,
+  /** See `engageKillSwitch` — RELEASE is the direction that matters most: a
+   *  ranking that comes back on with no record of who released it is the one an
+   *  incident review cannot reconstruct. */
+  store: PwattConfigStore = events.configStore,
 ): Promise<void> {
   // The config store has no delete; an explicit disengaged state would need
   // schema special-casing, so we write the canonical "everything off" state
   // — which the decision function treats as disengaged via its empty scopes.
-  await events.configStore.set(KILLSWITCH_CONFIG_KEY, {
+  await store.set(KILLSWITCH_CONFIG_KEY, {
     global: false,
     surfaces: [],
     profile_ids: [],

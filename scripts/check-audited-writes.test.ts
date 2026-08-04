@@ -226,6 +226,18 @@ export function createRoutes() {
     expect(runAuditedWriteGate(new Map([['things.ts', readsThenAudits]]))).toEqual([]);
   });
 
+  it('COUNTS the modules it read, so a resolver that resolves nothing is visible', () => {
+    // The first import-following implementation dropped a leading `..` with
+    // nothing to pop, so every specifier resolved to a path that does not
+    // exist: the writer set was empty and the gate reported a clean pass over
+    // code it had never opened. A resolver that silently resolves nothing is
+    // the sharpest form of green-and-wrong, and the file count is what makes it
+    // visible — route files alone are ~33.
+    const files = collectRouteFiles();
+    expect(files.size).toBeGreaterThan(100);
+    expect([...files.keys()].some((key) => key.startsWith('../'))).toBe(true);
+  });
+
   it('passes the LIVE route tree — no handler writes outside its unit', () => {
     expect(runAuditedWriteGate(collectRouteFiles())).toEqual([]);
   });

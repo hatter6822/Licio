@@ -743,6 +743,23 @@ Closing what it found needed one seam rather than eight edits: every workstream'
 (built over the identity transaction in production) covers five of them, and the
 two domains owning their own config-store instance use their own transactors.
 
+**A bare helper is judged by READING it.**  The bare-call arm kept a name list
+after the inversion above, and a list cannot cover a vocabulary it does not own:
+`engageKillSwitch`/`releaseKillSwitch` persist the ranking kill switch and
+matched nothing.  The gate now follows the import, treats the callee's first
+parameter as a service binding, and asks whether its body writes through it.
+
+Two corrections in getting there are the part worth keeping.  The first
+implementation resolved `../ranking/killswitch.js` by dropping a leading `..`
+with nothing to pop — producing a path that does not exist — so every import
+failed to resolve, the writer set was empty, and the gate reported a CLEAN PASS
+over code it had never opened.  A resolver that silently resolves nothing is the
+sharpest form of a green-and-wrong gate, and the check that caught it was
+counting the files it had actually read (33 → 165).  The second was scope:
+following helpers recursively turned two pure projections into "writers" on one
+unrecognised verb three calls down, so resolution stops at the directly imported
+declaration and the limit is documented rather than hidden.
+
 **The unit one call away.**  `/mfa/totp/verify` spent a single-use recovery code with a `setAuth` and
 then called `finishMfa`, whose own unit recorded the verification — two innocent
 halves (a handler with a write and no append, a helper with an append properly

@@ -47,6 +47,7 @@ import {
 } from '../identity/sessions.js';
 import { hashAuthWalletAddress, issueSiweNonce, verifySiwe } from '../identity/siwe.js';
 import { createAuthenticationOptions, verifyAuthentication } from '../identity/webauthn.js';
+import { createLogger } from '../lib/logger.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
@@ -495,22 +496,50 @@ function createLoginRoutes(resolve: () => IdentityServices) {
             (s) => deriveSessionRef(services.config.masterSecret, s.tokenHash) === ref,
           );
           if (!target) return c.json(err('not_found', 'Session not found.'), 404);
-          // The session store is REDIS in production, so this pair cannot share
-          // a transaction — but the record can still gate the change. The append
-          // runs first, inside the unit; the revoke runs inside it too, so a
-          // failed revoke aborts the record rather than leaving one for a
-          // session that is still live. What remains is the commit itself
-          // failing after a successful revoke, which is a strictly smaller
-          // window than the sequential pair this replaces (where an audit
-          // failure left the session revoked and unrecorded, every time).
+          // THE RECORD COMMITS FIRST, THEN THE REVOKE — because only one of the
+          // two can be retried.
+          //
+          // The session store is Redis in production, so this pair cannot share
+          // a transaction, and putting the delete lexically inside the unit did
+          // not make it rollbackable: Postgres accepting the callback and then
+          // failing to COMMIT left the session permanently gone while the
+          // `session_revoke` row rolled back — a revocation that happened, with
+          // no security record, unrecoverable, because no later write can
+          // reconstruct it.
+          //
+          // Deleting a session is IDEMPOTENT, so putting it after the commit
+          // makes the pair converge instead: the record is durable before
+          // anything is destroyed, and an incomplete revoke is completed by the
+          // retry the 503 below asks for. The cost is stated rather than hidden
+          // — between the commit and the delete there is a moment where the
+          // trail says revoked and the session still answers — and it is
+          // bounded by that retry, where the previous window was permanent.
           await services.transact(async (tx) => {
             await tx.audit.append({
               actorUserId: auth.userId,
               eventType: 'session_revoke',
               context: {},
             });
-            await services.sessions.delete(target.tokenHash);
           });
+          try {
+            await services.sessions.delete(target.tokenHash);
+          } catch (error) {
+            // LOUD, not swallowed: the record says this session is gone, so a
+            // session that survives is a discrepancy an operator has to be able
+            // to see. The caller is told to retry, and the retry finishes it.
+            authLogger.error(
+              {
+                auditAction: 'session_revoke_incomplete',
+                userId: auth.userId,
+                message: error instanceof Error ? error.message : 'unknown',
+              },
+              'a session_revoke row is committed for a session that is still live',
+            );
+            return c.json(
+              err('revoke_incomplete', 'The session could not be ended. Please try again.'),
+              503,
+            );
+          }
           if (target.tokenHash === auth.tokenHash) {
             c.header('Set-Cookie', clearSessionCookie(), { append: true });
           }
@@ -536,6 +565,9 @@ function createLoginRoutes(resolve: () => IdentityServices) {
       })
   );
 }
+
+/** Pino is the only server logging path (redaction lives there). */
+const authLogger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 
 export function createAuthRoutes(resolve: () => IdentityServices = getIdentityServices) {
   return new Hono<AuthEnv>()
