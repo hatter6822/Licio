@@ -152,6 +152,57 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     expect((await store.listForUser(userId))[0]?.tokenHash).toBe(b.tokenHash);
   });
 
+  it('RedisSessionStore: take() hands the session to exactly ONE caller', async () => {
+    // A rotation is a hand-off, and `take` is what makes it one. Only a real
+    // Redis proves it: GETDEL is a single command, whereas the GET+DEL pair it
+    // replaced let two concurrent rotations both read the session and both mint
+    // a successor — one privilege transition becoming two live sessions.
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
+    const userId = '55555555-5555-4555-8555-555555555555';
+    const a = await createSession(store, {
+      userId,
+      authMethod: 'webauthn',
+      credentialRef: 'c',
+      deviceLabel: 'dev',
+      rememberMe: false,
+    });
+
+    const taken = await Promise.all([store.take(a.tokenHash), store.take(a.tokenHash)]);
+    expect(taken.filter((t) => t !== null)).toHaveLength(1);
+    expect(await store.get(a.tokenHash)).toBeNull();
+    expect(await store.listForUser(userId)).toHaveLength(0);
+  });
+
+  it('RedisSessionStore: putIfPresent() does not RESURRECT a deleted session', async () => {
+    // Every session mutation is read-then-write, and a plain SET would recreate
+    // a session that a concurrent rotation or sign-out had removed — restoring
+    // it with whatever privilege the edit was adding. `SET … XX` cannot.
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
+    const userId = '66666666-6666-4666-8666-666666666666';
+    const a = await createSession(store, {
+      userId,
+      authMethod: 'webauthn',
+      credentialRef: 'c',
+      deviceLabel: 'dev',
+      rememberMe: false,
+    });
+    const read = (await store.get(a.tokenHash)) as StoredSession;
+
+    // Present ⇒ the write lands and says so.
+    expect(
+      await store.putIfPresent(a.tokenHash, {
+        ...read,
+        record: { ...read.record, mfa_verified: true },
+      }),
+    ).toBe(true);
+    expect((await store.get(a.tokenHash))?.record.mfa_verified).toBe(true);
+
+    // Gone ⇒ the write finds nothing, and does not bring it back.
+    await store.delete(a.tokenHash);
+    expect(await store.putIfPresent(a.tokenHash, read)).toBe(false);
+    expect(await store.get(a.tokenHash)).toBeNull();
+  });
+
   it('RedisSessionStore: a short session after a long one never SHORTENS the index TTL', async () => {
     const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
     const userId = '22222222-2222-4222-8222-222222222222';

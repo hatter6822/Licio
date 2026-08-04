@@ -147,6 +147,12 @@ describe('authMiddleware', () => {
       },
       async put() {},
       async delete() {},
+      async take() {
+        throw new Error('redis down');
+      },
+      async putIfPresent() {
+        throw new Error('redis down');
+      },
       async listForUser() {
         return [];
       },

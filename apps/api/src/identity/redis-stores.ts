@@ -152,6 +152,47 @@ export class RedisSessionStore implements SessionStore {
     await pipeline.exec();
   }
 
+  async putIfPresent(tokenHash: string, stored: StoredSession): Promise<boolean> {
+    // `SET … XX` writes ONLY when the key already exists, in one command — so a
+    // session deleted between this caller's read and its write is not brought
+    // back by the write (see the interface note; a resurrected session carries
+    // whatever privilege the edit was adding).  The per-user index needs no
+    // touch: the member is already there, and its TTL is only ever extended.
+    const ttlMs = Math.max(1, Math.ceil(stored.expiresAt - Date.now()));
+    const result = await this.#redis.set(
+      this.#key(tokenHash),
+      JSON.stringify(stored),
+      'PX',
+      ttlMs,
+      'XX',
+    );
+    return result === 'OK';
+  }
+
+  async take(tokenHash: string): Promise<StoredSession | null> {
+    // GETDEL is ONE atomic command: exactly one concurrent caller gets the
+    // value and the rest get nil.  Composing GET with DEL would not be — both
+    // callers would read the session and both would go on to mint a successor,
+    // which is precisely what this exists to stop (see `rotateSession`).
+    const raw = await this.#redis.getdel(this.#key(tokenHash));
+    if (!raw) return null;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      const candidate = parsed as { record?: unknown; expiresAt?: unknown };
+      const record = sessionRecordSchema.parse(candidate.record);
+      if (typeof candidate.expiresAt !== 'number' || !Number.isFinite(candidate.expiresAt)) {
+        throw new Error('bad expiresAt');
+      }
+      await this.#redis.srem(this.#userKey(record.user_id), tokenHash);
+      return { record, expiresAt: candidate.expiresAt };
+    } catch {
+      // Corrupt row: the key is already gone, which is the same fail-closed
+      // outcome `get` reaches by deleting it.  The user index entry is pruned
+      // by `listForUser` when it next finds the key missing.
+      return null;
+    }
+  }
+
   async listForUser(userId: string): Promise<Array<{ tokenHash: string; stored: StoredSession }>> {
     const hashes = await this.#redis.smembers(this.#userKey(userId));
     const out: Array<{ tokenHash: string; stored: StoredSession }> = [];

@@ -455,17 +455,24 @@ export class DrizzleIdentityStore implements IdentityStore {
     return rebound.length > 0;
   }
 
-  async clearResumableVerification(userId: string, codeHash: string): Promise<void> {
-    if (!isUuid(userId)) return;
-    await this.#db
+  async clearResumableVerification(userId: string, codeHash: string): Promise<boolean> {
+    if (!isUuid(userId)) return false;
+    // The PRECONDITION IS THE WHERE CLAUSE: only a row that still HAS a
+    // continuation is cleared, so of two concurrent completions exactly one
+    // reports true. Without that the same-session arm had no claim at all —
+    // both retries granted, both rotated, and one code produced two sessions.
+    const cleared = await this.#db
       .update(mfaRecoveryCodes)
       .set({ verificationSessionHash: null })
       .where(
         and(
           eq(mfaRecoveryCodes.userId, userId),
           eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
+          isNotNull(mfaRecoveryCodes.verificationSessionHash),
         ),
-      );
+      )
+      .returning({ id: mfaRecoveryCodes.id });
+    return cleared.length > 0;
   }
 
   /** Active (unconsumed) recovery-code hashes, as hex strings. */

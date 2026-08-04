@@ -37,6 +37,30 @@ export interface SessionStore {
   put(tokenHash: string, stored: StoredSession): Promise<void>;
   get(tokenHash: string): Promise<StoredSession | null>;
   delete(tokenHash: string): Promise<void>;
+  /**
+   * Get AND delete in one step, returning what was there — the primitive a
+   * ROTATION needs.
+   *
+   * A rotation is a hand-off, so exactly one caller may take the old session.
+   * Read-then-delete is not that: two concurrent requests carrying the same
+   * cookie both read it, both mint a successor, and one session becomes two —
+   * from one privilege transition, and (on the recovery path) from one
+   * single-use code.  `take` makes the delete the claim, so the loser gets
+   * `null` and mints nothing.
+   */
+  take(tokenHash: string): Promise<StoredSession | null>;
+  /**
+   * Write ONLY if the session still exists; `false` when it does not.
+   *
+   * Every mutation here is a read-then-write (`get`, edit the record, `put`),
+   * and a plain `put` does not care whether the row survived the gap.  So a
+   * concurrent rotation or revocation that deleted the session between the two
+   * was UNDONE by the write — it RESURRECTED the deleted session, carrying
+   * whatever privilege the edit was adding.  Two concurrent MFA verifications
+   * on one cookie ended with the rotated successor verified AND the old session
+   * back from the dead and verified: one single-use code, two live sessions.
+   */
+  putIfPresent(tokenHash: string, stored: StoredSession): Promise<boolean>;
   listForUser(userId: string): Promise<Array<{ tokenHash: string; stored: StoredSession }>>;
   clear(): Promise<void>;
 }
@@ -61,6 +85,25 @@ export class InMemorySessionStore implements SessionStore {
     const stored = this.#byHash.get(tokenHash);
     this.#byHash.delete(tokenHash);
     if (stored) this.#byUser.get(stored.record.user_id)?.delete(tokenHash);
+  }
+
+  async take(tokenHash: string): Promise<StoredSession | null> {
+    // Read and remove with NO `await` between them — on a single-threaded
+    // runtime that is the same guarantee Redis's GETDEL gives.
+    const stored = this.#byHash.get(tokenHash);
+    if (stored === undefined) return null;
+    this.#byHash.delete(tokenHash);
+    this.#byUser.get(stored.record.user_id)?.delete(tokenHash);
+    return stored;
+  }
+
+  async putIfPresent(tokenHash: string, stored: StoredSession): Promise<boolean> {
+    // Test and write with NO `await` between — the same guarantee Redis's
+    // `SET … XX` gives, so a session deleted while the caller was editing its
+    // record is not brought back by the write.
+    if (!this.#byHash.has(tokenHash)) return false;
+    this.#byHash.set(tokenHash, stored);
+    return true;
   }
 
   async listForUser(userId: string): Promise<Array<{ tokenHash: string; stored: StoredSession }>> {
@@ -180,7 +223,10 @@ export async function touchSession(
     ? SESSION_POLICY.rememberTtlMs
     : SESSION_POLICY.defaultTtlMs;
   const absolute = Date.parse(stored.record.absolute_expires_at);
-  await store.put(tokenHash, {
+  // A slide must never RE-CREATE a session revoked mid-request (see
+  // `putIfPresent`) — sign-out would otherwise be undone by the next in-flight
+  // request that happened to be due a refresh.
+  await store.putIfPresent(tokenHash, {
     record: { ...stored.record, last_active_at: iso(now) },
     expiresAt: Math.min(now + ttl, absolute),
   });
@@ -197,12 +243,22 @@ export async function rotateSession(
   now: number = Date.now(),
 ): Promise<CreatedSession | null> {
   const oldHash = sha256Hex(oldToken);
-  const stored = await store.get(oldHash);
+  // TAKE the old session, do not merely read it.  A rotation is a hand-off and
+  // exactly one caller may perform it: two concurrent requests carrying the same
+  // cookie both passed a read, both wrote a successor, and one session became
+  // TWO live ones — a privilege transition that multiplies instead of moving.
+  // On the recovery-code path that was one single-use code granting MFA to two
+  // sessions, which is also how a stolen cookie replayed alongside the genuine
+  // request kept a session of its own.
+  //
+  // The delete now precedes the write, so a failure loses the session rather
+  // than duplicating it: the caller signs in again, which is the right side to
+  // fail on for a privilege change.
+  const stored = await store.take(oldHash);
   if (!stored) return null;
   const token = randomToken(32);
   const tokenHash = sha256Hex(token);
   await store.put(tokenHash, stored);
-  await store.delete(oldHash);
   return {
     token,
     tokenHash,
@@ -229,7 +285,9 @@ export async function markStepUp(
 ): Promise<void> {
   const stored = await store.get(tokenHash);
   if (!stored) return;
-  await store.put(tokenHash, {
+  // Present at the WRITE too — see `putIfPresent`: a plain `put` would restore
+  // a session revoked while this one was being edited.
+  await store.putIfPresent(tokenHash, {
     ...stored,
     record: {
       ...stored.record,
@@ -259,7 +317,11 @@ export async function markMfaVerified(
 ): Promise<boolean> {
   const stored = await store.get(tokenHash);
   if (!stored) return false;
-  await store.put(tokenHash, {
+  // …AND STILL PRESENT AT THE WRITE.  A plain `put` here resurrected a session
+  // that a concurrent rotation had already taken, handing the grant to a row
+  // that was supposed to be gone — so one recovery code left the rotated
+  // successor verified AND the old session back from the dead and verified.
+  return store.putIfPresent(tokenHash, {
     ...stored,
     record: {
       ...stored.record,
@@ -267,35 +329,6 @@ export async function markMfaVerified(
       auth_assurance: { level: 'full', last_verified_at: iso(now) },
     },
   });
-  return true;
-}
-
-/**
- * Does this user hold a live session that has already cleared MFA?
- *
- * This is the durable-enough answer to "did the grant land?", asked of the store
- * the grant actually lives in.  A recovery code's continuation records WHICH
- * session it was spent for, and the verification then ROTATES that session — so
- * moments after a SUCCESS the recorded hash names a session that no longer
- * exists, which is indistinguishable from the failure the continuation exists
- * for.  Settling the continuation is what separates them, and settling is a
- * second write that can fail after the grant is already in Redis and the
- * rotated cookie already queued.
- *
- * A landed grant leaves exactly one trace that cannot be lost that way: a live,
- * `mfa_verified` session belonging to this user.  So a continuation may be
- * taken over by a DIFFERENT session only while no such session exists — which
- * is precisely the situation it was written for (the grant never applied, so the
- * user holds nothing) and never the situation where it would hand a single-use
- * code its second grant.
- */
-export async function hasVerifiedSession(
-  store: SessionStore,
-  userId: string,
-  now: number = Date.now(),
-): Promise<boolean> {
-  const sessions = await store.listForUser(userId);
-  return sessions.some((s) => s.stored.expiresAt > now && s.stored.record.mfa_verified);
 }
 
 /** Revoke all of a user's sessions except `exceptHash`; returns the revoked count. */

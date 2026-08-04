@@ -130,6 +130,62 @@ describe('rotateSession', () => {
     const store = new InMemorySessionStore();
     expect(await rotateSession(store, 'nope', Date.now())).toBeNull();
   });
+
+  it('gives ONE successor when two callers rotate the same token at once', async () => {
+    // A rotation is a HAND-OFF, so exactly one caller may perform it. Read-then-
+    // delete was not that: both callers passed the read, both wrote a successor,
+    // and one session became two — a privilege transition that multiplies
+    // instead of moving, and the shape a stolen cookie replayed alongside the
+    // genuine request used to keep a session of its own.
+    const store = new InMemorySessionStore();
+    const t0 = 1_700_000_000_000;
+    const a = await createSession(store, input(), t0);
+
+    const [first, second] = await Promise.all([
+      rotateSession(store, a.token, t0),
+      rotateSession(store, a.token, t0),
+    ]);
+
+    expect([first, second].filter((r) => r !== null)).toHaveLength(1);
+    expect(await validateSession(store, a.token, t0)).toBeNull(); // the old one is gone
+    // …and the user is left holding exactly one session, not two.
+    expect(await store.listForUser(USER)).toHaveLength(1);
+  });
+});
+
+describe('putIfPresent', () => {
+  it('does not RESURRECT a session deleted since the caller read it', async () => {
+    // Every session mutation is a read-then-write (`get`, edit, `put`), and a
+    // plain `put` does not care whether the row survived the gap — so a
+    // concurrent rotation or sign-out was UNDONE by the write, restoring the
+    // deleted session with whatever privilege the edit was adding. That is how
+    // two concurrent MFA verifications on one cookie left the rotated successor
+    // verified AND the old session back from the dead and verified.
+    const store = new InMemorySessionStore();
+    const t0 = 1_700_000_000_000;
+    const a = await createSession(store, input(), t0);
+
+    const read = await store.get(a.tokenHash); // the caller's read…
+    expect(read).not.toBeNull();
+    await store.delete(a.tokenHash); // …a rotation or revocation lands…
+
+    // …and the write finds nothing to update.
+    expect(await store.putIfPresent(a.tokenHash, read as NonNullable<typeof read>)).toBe(false);
+    expect(await store.get(a.tokenHash)).toBeNull();
+    expect(await store.listForUser(USER)).toHaveLength(0);
+  });
+
+  it('writes, and reports it, while the session is still there', async () => {
+    const store = new InMemorySessionStore();
+    const t0 = 1_700_000_000_000;
+    const a = await createSession(store, input(), t0);
+    const read = (await store.get(a.tokenHash)) as NonNullable<
+      Awaited<ReturnType<typeof store.get>>
+    >;
+    const updated = { ...read, record: { ...read.record, mfa_verified: true } };
+    expect(await store.putIfPresent(a.tokenHash, updated)).toBe(true);
+    expect((await store.get(a.tokenHash))?.record.mfa_verified).toBe(true);
+  });
 });
 
 describe('step-up', () => {

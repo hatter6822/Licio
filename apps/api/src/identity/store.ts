@@ -184,15 +184,23 @@ export interface IdentityStore {
     usedSince: string,
   ): Promise<{ remaining: number; verificationSessionHash: string } | null>;
   /**
-   * SETTLE a continuation once its grant has landed.
+   * SETTLE a continuation once its grant has landed — and CLAIM it while doing
+   * so.  Returns whether THIS caller was the one that cleared it.
    *
    * A pending row must mean "the grant never happened", or the two are
-   * indistinguishable: a successful verification ROTATES the session, so its
-   * recorded hash goes dead moments later, and a fallback that reads a dead
-   * session as "unfinished" would make every spent code reusable by its owner
-   * forever. Clearing on success is what keeps single-use intact.
+   * indistinguishable, and a fallback that reads a finished verification as
+   * unfinished would make every spent code reusable.
+   *
+   * The boolean is what makes the completion single-winner, and it is needed
+   * because the same-session resume arm has no compare-and-set to pass through:
+   * the continuation already names the caller, so rebinding it to that same
+   * value discriminates nothing.  Two concurrent retries carrying one cookie
+   * therefore both granted and both rotated, and a single-use code produced two
+   * live verified sessions.  Clearing is a one-row transition, so exactly one
+   * of them removes it — the loser is told to sign in again, which by then is
+   * true, because the winner's rotation has replaced the session they hold.
    */
-  clearResumableVerification(userId: string, codeHash: string): Promise<void>;
+  clearResumableVerification(userId: string, codeHash: string): Promise<boolean>;
   /**
    * COMPARE-AND-SET: take a continuation over, only while it still names
    * `expectedSessionHash`.
@@ -419,8 +427,10 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     return { remaining: pending.remaining, verificationSessionHash: pending.sessionHash };
   }
 
-  async clearResumableVerification(userId: string, codeHash: string): Promise<void> {
-    this.#pendingVerifications.delete(`${userId}:${codeHash}`);
+  async clearResumableVerification(userId: string, codeHash: string): Promise<boolean> {
+    // Test and delete with NO `await` between — the same single-winner
+    // guarantee the conditional DELETE gives on a single-threaded runtime.
+    return this.#pendingVerifications.delete(`${userId}:${codeHash}`);
   }
 
   async claimResumableVerification(

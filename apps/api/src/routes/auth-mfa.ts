@@ -18,7 +18,6 @@ import { constantTimeEqual } from '../identity/crypto.js';
 import type { IdentityServices, IdentityTx } from '../identity/services.js';
 import {
   buildSessionCookie,
-  hasVerifiedSession,
   markMfaVerified,
   readSessionToken,
   rotateSession,
@@ -54,6 +53,26 @@ const MFA_STEP_MEMORY_MS = 90_000; // remember the used step for ~3 windows
  * becomes usable a second time.
  */
 const RESUMABLE_VERIFICATION_WINDOW_MS = 15 * 60_000;
+
+/**
+ * Is the verification this continuation names still UNFINISHED?
+ *
+ * The only session that can answer is the one the continuation was spent for.
+ * Alive and `mfa_verified` ⇒ the grant landed, and a single-use code has no
+ * second grant to give.  Gone, or alive and unverified ⇒ it did not, and the
+ * holder may finish it — which is the lockout this whole path exists to
+ * prevent, since on the last code there is no other way back.
+ *
+ * This deliberately does NOT ask whether the USER holds a verified session
+ * anywhere.  That was the first cut and it read as evidence when it was not: a
+ * verified session on a device the holder cannot reach says nothing about this
+ * grant, and it permanently blocked a continuation their last code had paid
+ * for.
+ */
+async function isUnfinished(services: IdentityServices, sessionHash: string): Promise<boolean> {
+  const stored = await services.sessions.get(sessionHash);
+  return stored === null || !stored.record.mfa_verified;
+}
 
 const attemptsKey = (userId: string) => `mfaattempts:${userId}`;
 const usedStepKey = (userId: string) => `mfastep:${userId}`;
@@ -233,8 +252,16 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           if (matched !== undefined) {
             let spent: { remaining: number } | null;
             try {
-              spent = await finishMfa(services, auth.userId, auth.tokenHash, c, (tx) =>
-                tx.store.consumeRecoveryCode(auth.userId, matched, auth.tokenHash),
+              spent = await finishMfa(
+                services,
+                auth.userId,
+                auth.tokenHash,
+                c,
+                (tx) => tx.store.consumeRecoveryCode(auth.userId, matched, auth.tokenHash),
+                // SETTLED before the rotation that would otherwise hide it: the
+                // grant landed, so there is nothing left to resume, and the row
+                // is cleared while the session it names is still alive.
+                () => services.store.clearResumableVerification(auth.userId, matched),
               );
             } catch (error) {
               // The code IS spent and recorded, and its continuation is pending:
@@ -245,14 +272,6 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
                 return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
               }
               throw error;
-            }
-            // SETTLED: the grant landed, so there is nothing left to resume.
-            // Without this the verification's own rotation would leave a pending
-            // row pointing at a session that no longer exists — which the
-            // dead-session fallback would read as unfinished, making every spent
-            // code reusable by its owner forever.
-            if (spent !== null) {
-              await services.store.clearResumableVerification(auth.userId, matched);
             }
             // Lost the race — another request spent this code between the read
             // and the write. Nothing was consumed and nothing was recorded.
@@ -287,10 +306,17 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           // is exactly what "the grant never landed" looks like, and the code
           // would verify a second session.
           //
-          // So the takeover arm below asks the store the grant actually lives
-          // in: a landed grant leaves a live `mfa_verified` session, and that
-          // trace cannot be lost by a failed Postgres write. Settling remains,
-          // as the tidy-up it always was rather than the boundary.
+          // So the settle now runs BEFORE the rotation (`grantVerification`),
+          // which is what makes the continuation's own session the evidence: a
+          // settle that fails leaves the row naming a session that is alive AND
+          // VERIFIED, and the takeover arm below refuses exactly that.
+          //
+          // It asks about the NAMED session and not about the user. Asking "does
+          // this user hold any verified session" was the first cut, and it was
+          // too coarse in the ordinary multi-device case: a verified session on
+          // a phone the holder cannot reach is no evidence about THIS grant, and
+          // it permanently blocked the continuation their last code had paid
+          // for.
           const resumable = await services.store.findResumableVerification(
             auth.userId,
             presentedHash,
@@ -321,13 +347,11 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
             resumable === null
               ? false
               : resumable.verificationSessionHash === auth.tokenHash ||
-                ((await services.sessions.get(resumable.verificationSessionHash)) === null &&
-                  // DID THE GRANT ALREADY LAND?  A successful verification
-                  // leaves this user holding a live, mfa-verified session, and
-                  // a spent code has no second grant to give.  Without this,
-                  // the rotation alone made every success look unfinished the
-                  // moment the settle failed.
-                  !(await hasVerifiedSession(services.sessions, auth.userId)) &&
+                // DID THIS GRANT ALREADY LAND?  The one session that can answer
+                // is the one the continuation names: alive and verified means it
+                // landed and there is no second grant to give; gone, or alive
+                // and unverified, means it did not.
+                ((await isUnfinished(services, resumable.verificationSessionHash)) &&
                   (await services.store.claimResumableVerification(
                     auth.userId,
                     presentedHash,
@@ -335,22 +359,21 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
                     auth.tokenHash,
                   )));
           if (resumable !== null && claimed) {
-            if (await markMfaVerified(services.sessions, auth.tokenHash)) {
-              await services.store.clearResumableVerification(auth.userId, presentedHash);
-            } else {
-              // The session went away underneath us — say so rather than
-              // answering `mfa_verified` for a grant that did not happen. The
-              // continuation survives: the code stays spent and pending, and the
-              // next session this user opens can finish it.
-              return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
-            }
-            await services.otp.delete(attemptsKey(auth.userId));
-            const token = readSessionToken(c.req.header('cookie'));
-            const rotated = token ? await rotateSession(services.sessions, token) : null;
-            if (rotated) {
-              c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
-                append: true,
-              });
+            try {
+              // The SAME ordering as a fresh consumption — grant, settle (which
+              // is also the claim that makes concurrent retries single-winner),
+              // then rotate.
+              await grantVerification(services, auth.userId, auth.tokenHash, c, () =>
+                services.store.clearResumableVerification(auth.userId, presentedHash),
+              );
+            } catch (error) {
+              // The session went away underneath us, or another request is
+              // already finishing this continuation — say so rather than
+              // answering `mfa_verified` for a grant this request did not make.
+              if (error instanceof SessionVanishedError) {
+                return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
+              }
+              throw error;
             }
             return c.json({
               status: 'mfa_verified' as const,
@@ -459,6 +482,9 @@ async function finishMfa<T>(
    * and must not leave a record saying it did.
    */
   consume?: (tx: IdentityTx) => Promise<T | null>,
+  /** Settle the continuation this grant completes — run BEFORE the rotation,
+   *  and its `false` means another request is already completing it. */
+  settle?: () => Promise<boolean>,
 ): Promise<T | null> {
   // THE PRIVILEGE IS GRANTED AFTER THE COMMIT, and this ordering is the whole
   // point of the function.
@@ -490,19 +516,57 @@ async function finishMfa<T>(
       throw error;
     });
   if (spent === null) return null;
+  await grantVerification(services, userId, tokenHash, c, settle);
+  return spent;
+}
+
+/**
+ * The post-commit half of a verification: GRANT, then SETTLE, then ROTATE.
+ *
+ * One ordering, shared by the fresh consumption above and the resume path in
+ * the route, because the two had drifted and the drift was the bug.
+ *
+ * SETTLE BEFORE ROTATE.  The rotation deletes the session the continuation
+ * names, so a settle that runs after it — and fails — leaves a pending row
+ * pointing at a session that no longer exists, which is exactly what "the grant
+ * never landed" looks like.  Settling first means a failure there leaves the
+ * continuation naming a session that is alive AND verified, which no resume arm
+ * will touch.  That is also why the takeover arm can ask about the NAMED
+ * session rather than about the user: an unrelated verified session on another
+ * device is no evidence about THIS grant, and treating it as such locked a
+ * multi-device user out of the continuation their last code had paid for.
+ *
+ * AND THE SETTLE IS THE CLAIM.  It reports whether this caller cleared the row,
+ * so exactly one of several concurrent completions proceeds to the rotation.
+ * The same-session arm has no compare-and-set available — the continuation
+ * already names the caller — so without this, two retries carrying one cookie
+ * both granted and both rotated, and one single-use code left two live verified
+ * sessions behind.
+ */
+async function grantVerification(
+  services: IdentityServices,
+  userId: string,
+  tokenHash: string,
+  c: Context<AuthEnv>,
+  settle?: () => Promise<boolean>,
+): Promise<void> {
   // A grant that could not be applied must not be reported as one. The record
   // and any consumption are already committed, so the caller answers honestly
-  // and the continuation above is what makes the spent factor recoverable.
+  // and the continuation is what makes the spent factor recoverable.
   if (!(await markMfaVerified(services.sessions, tokenHash))) {
     throw new SessionVanishedError();
   }
+  if (settle !== undefined && !(await settle())) throw new SessionVanishedError();
   await services.otp.delete(attemptsKey(userId));
   const token = readSessionToken(c.req.header('cookie'));
-  const rotated = token ? await rotateSession(services.sessions, token) : null;
-  if (rotated) {
-    c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
-      append: true,
-    });
-  }
-  return spent;
+  if (token === undefined) return;
+  // `rotateSession` TAKES the old session, so a concurrent rotation of the same
+  // cookie yields null here rather than a second successor. Either way the
+  // session this request arrived on is gone, and answering `mfa_verified` with
+  // no usable cookie would be a success the caller cannot act on.
+  const rotated = await rotateSession(services.sessions, token);
+  if (rotated === null) throw new SessionVanishedError();
+  c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
+    append: true,
+  });
 }
