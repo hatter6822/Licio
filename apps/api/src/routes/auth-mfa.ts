@@ -284,11 +284,25 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           // is exactly the bar an UNSPENT code would have met. And it opens only
           // once the original session is unusable, so while that session lives
           // the code still grants MFA to precisely one.
-          const resumableHere =
-            resumable !== null &&
-            (resumable.verificationSessionHash === auth.tokenHash ||
-              (await services.sessions.get(resumable.verificationSessionHash)) === null);
-          if (resumable !== null && resumableHere) {
+          // TAKING IT OVER IS A COMPARE-AND-SET, not a decision made from a read.
+          //
+          // Two primary-authenticated sessions can both find the original gone
+          // and both conclude they may finish it — and a code that is single-use
+          // by construction would grant steward assurance to both. The rebind
+          // settles which; the loser is told the code is invalid, which for it
+          // now is.
+          const claimed =
+            resumable === null
+              ? false
+              : resumable.verificationSessionHash === auth.tokenHash ||
+                ((await services.sessions.get(resumable.verificationSessionHash)) === null &&
+                  (await services.store.claimResumableVerification(
+                    auth.userId,
+                    presentedHash,
+                    resumable.verificationSessionHash,
+                    auth.tokenHash,
+                  )));
+          if (resumable !== null && claimed) {
             if (await markMfaVerified(services.sessions, auth.tokenHash)) {
               await services.store.clearResumableVerification(auth.userId, presentedHash);
             } else {

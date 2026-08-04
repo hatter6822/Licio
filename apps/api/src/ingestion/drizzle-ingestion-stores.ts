@@ -207,18 +207,33 @@ export class DrizzleStoryStore implements StoryStore {
     limit: number,
   ): Promise<ThreadShellRecord[]> {
     const conditions = [eq(threadsTable.roomId, roomId)];
+    // MILLISECONDS ON BOTH SIDES, and on the ORDER BY that has to agree with them.
+    //
+    // `created_at` is microsecond `timestamptz`, but the cursor is built from a
+    // JS `Date` the driver already rounded down — so comparing it against the
+    // unrounded column names an instant strictly BEFORE the row it came from,
+    // and every thread sharing that millisecond with more microseconds is
+    // excluded from the next page. Silently: the page comes back short, and the
+    // SCOI report reads a short page as the end of the room. The `thread_id`
+    // tiebreaker cannot help, because it is only consulted once the timestamps
+    // compare EQUAL, which a rounded cursor never does against its own row.
+    //
+    // Truncating the column to the resolution the cursor can carry puts the
+    // predicate and the ordering on ONE total order, which is the same fix the
+    // search cursor in this file carries.
+    const orderedAt = sql`date_trunc('milliseconds', ${threadsTable.createdAt})`;
     if (before !== null) {
       conditions.push(
         // ISO string + explicit cast — a raw Date in a sql`` fragment is not
         // serializable by the postgres-js driver (gated-test-proven).
-        sql`(${threadsTable.createdAt}, ${threadsTable.threadId}) < (${before.createdAt}::timestamptz, ${before.threadId}::uuid)`,
+        sql`(${orderedAt}, ${threadsTable.threadId}) < (${before.createdAt}::timestamptz, ${before.threadId}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(threadsTable)
       .where(and(...conditions))
-      .orderBy(desc(threadsTable.createdAt), desc(threadsTable.threadId))
+      .orderBy(sql`${orderedAt} desc`, desc(threadsTable.threadId))
       .limit(limit);
     return rows.map((row) => this.#toThread(row));
   }

@@ -16,7 +16,7 @@
 // the ADMIT half drives an existing `session`.
 
 import type { InviteSecret } from '@licio/private-p2p';
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError } from '../../../lib/api.js';
 import { fetchPrivateRoomBootstrap } from '../../../lib/private-rooms-api.js';
@@ -121,6 +121,23 @@ function JoinerSection({
   const [pending, setPending] = useState<Awaited<
     ReturnType<typeof PrivateRoomSession.prepareJoinRequest>
   > | null>(null);
+  /**
+   * Is this panel still on screen?
+   *
+   * A join is several seconds of crypto and storage work, and the user can close
+   * the room (or the whole view) in the middle of it. Every branch below then
+   * sets state on a component that is gone — harmless-looking, and in a jsdom
+   * teardown it is a hard `ReferenceError: window is not defined` that fails a
+   * whole test run from a component nobody was looking at. The work is allowed
+   * to finish; only the reporting is dropped.
+   */
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   async function startPrepare(): Promise<void> {
     if (displayName.trim().length === 0 || busy) return;
@@ -221,12 +238,16 @@ function JoinerSection({
         return;
       }
       const room = await pending.completeJoin(grant);
+      // The room IS joined and persisted either way; only the announcement is
+      // conditional, because there is nobody left to announce it to.
+      if (!mounted.current) return;
       setJoined(true);
       onJoined?.(room.roomId);
     } catch {
+      if (!mounted.current) return;
       setError(t('privateRoom.join.finishError', 'Could not finish joining the room.'));
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   }
 
@@ -246,7 +267,25 @@ function JoinerSection({
         <Input
           label={t('privateRoom.join.displayName', 'Your display name')}
           value={displayName}
-          onChange={(e) => setDisplayName(e.target.value)}
+          onChange={(e) => {
+            setDisplayName(e.target.value);
+            // THE PREPARATION CAPTURED THE OLD NAME.
+            //
+            // `prepareJoinRequest` bakes the display name into the keys it
+            // generates, so editing the field afterwards left the panel showing
+            // "Bob" while the request it built still said "Alice" — a name the
+            // joiner never chose, presented to the room as theirs. Everything
+            // derived from that preparation goes with it, the same way the
+            // invite field already invalidates what it produced.
+            if (pending === null && recipientKey === null) return;
+            setPending(null);
+            setRecipientKey(null);
+            setRequest(null);
+            setRecordCheck(null);
+            setGrantJson('');
+            setError(null);
+          }}
+          disabled={busy}
           className="flex-1"
         />
         <Button

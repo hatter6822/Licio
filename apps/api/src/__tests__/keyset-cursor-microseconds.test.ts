@@ -30,6 +30,7 @@ import { createDbClient, migrationsFolder } from '@licio/db';
 import { sql } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DrizzleStoryStore } from '../ingestion/drizzle-ingestion-stores.js';
 import { DrizzleGovernanceAuditStore } from '../knomosis/drizzle-knomosis-stores.js';
 import {
   DrizzleCoordinatedReportIncidentStore,
@@ -72,6 +73,9 @@ describe.skipIf(!DB_URL)('keyset cursors under sub-millisecond timestamps', () =
     await db.transaction(async (tx) => {
       await tx.execute(sql`SET LOCAL session_replication_role = replica`);
       await tx.execute(sql`delete from knomosis.governance_audit_log where room_id = ${roomId}`);
+      await tx.execute(sql`delete from threads where room_id = ${roomId}`);
+      await tx.execute(sql`delete from stories where room_id = ${roomId}`);
+      await tx.execute(sql`delete from users where handle like 'ks\\_%'`);
       await tx.execute(sql`delete from rooms where room_id = ${roomId}`);
       await tx.execute(
         sql`delete from coordinated_report_incidents where summary like 'keyset-microsecond%'`,
@@ -134,6 +138,55 @@ describe.skipIf(!DB_URL)('keyset cursors under sub-millisecond timestamps', () =
       const oldest = batch.at(-1);
       if (batch.length < PAGE || !oldest) break;
       before = { createdAt: oldest.createdAt, entryId: oldest.entryId };
+    }
+
+    expect(new Set(seen).size).toBe(ROWS);
+    expect(seen).toHaveLength(ROWS);
+  });
+
+  it('the room-thread page (DESC) loses nothing between pages', async () => {
+    ran = true;
+    // The SCOI room report walks this cursor, and a short page is how it decides
+    // it has reached the end of the room — so a dropped row does not merely
+    // vanish, it makes an incomplete scan report itself complete.
+    // One story per thread (`threads.story_id` is NOT NULL and cascades), with
+    // the thread timestamps written EXPLICITLY so several land per millisecond.
+    const submitter = randomUUID();
+    // `topic_ids` is a bare uuid[] with a non-empty CHECK and no FK.
+    const topicId = randomUUID();
+    await db.execute(sql`
+      insert into users (user_id, handle, display_name, account_state, roles,
+                         privacy_settings, personalization_settings)
+      values (${submitter}::uuid, ${`ks_${submitter.replace(/-/g, '').slice(0, 12)}`}, 'Keyset', 'active',
+              ARRAY['user']::text[], '{}'::jsonb, '{}'::jsonb)`);
+    await db.execute(sql`
+      WITH seeded AS (
+        INSERT INTO stories
+          (story_id, title, title_hash, submitted_by, room_id, visibility, language,
+           topic_ids, proposed_topic_ids, sensitivity_labels, lifecycle_state,
+           submission_type, submission_metadata, extraction_state)
+        SELECT gen_random_uuid(), 'keyset-microsecond',
+               'keyset-microsecond-' || n, ${submitter}::uuid, ${roomId}::uuid,
+               'public', 'en', ARRAY[${topicId}::uuid], ARRAY[${topicId}::uuid], ARRAY[]::text[],
+               'gathering_attention', 'original_brief', '{}'::jsonb, 'pending'
+          FROM generate_series(1, ${ROWS}) AS n
+        RETURNING story_id, title_hash
+      )
+      INSERT INTO threads (thread_id, story_id, room_id, branch_index, created_at)
+      SELECT gen_random_uuid(), story_id, ${roomId}::uuid, 0,
+             timestamptz '2026-03-01 00:00:00+00'
+               + (split_part(title_hash, '-', 3)::int * ${STEP_US}) * interval '1 microsecond'
+        FROM seeded`);
+
+    const store = new DrizzleStoryStore(db);
+    const seen: string[] = [];
+    let before: { createdAt: string; threadId: string } | null = null;
+    for (let page = 0; page < ROWS + 5; page += 1) {
+      const batch = await store.listThreadsByRoom(roomId, before, PAGE);
+      seen.push(...batch.map((t) => t.threadId));
+      const oldest = batch.at(-1);
+      if (batch.length < PAGE || !oldest) break;
+      before = { createdAt: oldest.createdAt, threadId: oldest.threadId };
     }
 
     expect(new Set(seen).size).toBe(ROWS);

@@ -379,6 +379,79 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect(afterRotation.status).toBe(400);
   });
 
+  it('lets only ONE session adopt an abandoned continuation', async () => {
+    // Two primary-authenticated sessions can both find the original session gone
+    // and both conclude they may finish it — and a code that is single-use by
+    // construction would then grant steward assurance to both.
+    const { app, sid } = await signup('mfaadopt');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const sid2 = cookie(confirm, '__Host-sid');
+    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
+      .recovery_codes[0] as string;
+    const userId = (await services.sessions.get(sha256Hex(sid2.split('=')[1] as string)))?.record
+      .user_id as string;
+    const { token: doomed } = await createSession(services.sessions, {
+      userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'doomed',
+      rememberMe: false,
+    });
+
+    // Spend the code with the grant failing, then destroy that session.
+    const realPut = services.sessions.put.bind(services.sessions);
+    let failed = false;
+    services.sessions.put = async (tokenHash: string, record: StoredSession) => {
+      if (!failed && record.record.mfa_verified === true) {
+        failed = true;
+        throw new Error('session store unavailable');
+      }
+      return realPut(tokenHash, record);
+    };
+    await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${doomed}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    services.sessions.put = realPut;
+    await services.sessions.delete(sha256Hex(doomed));
+
+    // Two fresh sessions race to adopt it.
+    const tokens = await Promise.all([
+      createSession(services.sessions, {
+        userId,
+        authMethod: 'email_otp',
+        deviceLabel: 'a',
+        rememberMe: false,
+      }),
+      createSession(services.sessions, {
+        userId,
+        authMethod: 'email_otp',
+        deviceLabel: 'b',
+        rememberMe: false,
+      }),
+    ]);
+    const results = await Promise.all(
+      tokens.map((t) =>
+        app.request('/v1/auth/mfa/totp/verify', {
+          method: 'POST',
+          headers: headers(`__Host-sid=${t.token}`),
+          body: JSON.stringify({ code: recovery }),
+        }),
+      ),
+    );
+    const verified = results.filter((r) => r.status === 200);
+    expect(verified).toHaveLength(1);
+  });
+
   it('does NOT let a pending code survive a factor RESET', async () => {
     // A continuation is about the factor it was issued for. Nothing bound it to
     // an enrollment generation, so a second verified session could disable MFA

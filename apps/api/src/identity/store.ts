@@ -183,6 +183,22 @@ export interface IdentityStore {
    * forever. Clearing on success is what keeps single-use intact.
    */
   clearResumableVerification(userId: string, codeHash: string): Promise<void>;
+  /**
+   * COMPARE-AND-SET: take a continuation over, only while it still names
+   * `expectedSessionHash`.
+   *
+   * `false` ⇒ someone else took it first. Two primary-authenticated sessions can
+   * both find the original session gone and both decide they may finish it —
+   * and a code that is single-use by construction would then grant steward
+   * assurance to both. The rebind is the one statement that can settle which,
+   * and the loser is told the code is not valid, which for it is now true.
+   */
+  claimResumableVerification(
+    userId: string,
+    codeHash: string,
+    expectedSessionHash: string,
+    nextSessionHash: string,
+  ): Promise<boolean>;
   // --- WebAuthn credentials ---
   /** UPSERT by `credentialId` — counter/last-used updates re-add the credential. */
   addWebauthn(cred: StoredWebauthnCredential): Promise<void>;
@@ -384,6 +400,21 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
 
   async clearResumableVerification(userId: string, codeHash: string): Promise<void> {
     this.#pendingVerifications.delete(`${userId}:${codeHash}`);
+  }
+
+  async claimResumableVerification(
+    userId: string,
+    codeHash: string,
+    expectedSessionHash: string,
+    nextSessionHash: string,
+  ): Promise<boolean> {
+    // Test and write with NO `await` between — the same guarantee the
+    // conditional UPDATE gives on a single-threaded runtime.
+    const key = `${userId}:${codeHash}`;
+    const pending = this.#pendingVerifications.get(key);
+    if (pending === undefined || pending.sessionHash !== expectedSessionHash) return false;
+    this.#pendingVerifications.set(key, { ...pending, sessionHash: nextSessionHash });
+    return true;
   }
 
   // --- WebAuthn credentials ------------------------------------------------

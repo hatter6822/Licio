@@ -425,6 +425,30 @@ export class DrizzleIdentityStore implements IdentityStore {
     return { remaining: remaining.length, verificationSessionHash: sessionHash };
   }
 
+  async claimResumableVerification(
+    userId: string,
+    codeHash: string,
+    expectedSessionHash: string,
+    nextSessionHash: string,
+  ): Promise<boolean> {
+    if (!isUuid(userId)) return false;
+    // The PRECONDITION IS THE WHERE CLAUSE: the row still names the session this
+    // caller saw. Two callers racing to adopt an abandoned continuation both
+    // pass the read that preceded this; exactly one passes the write.
+    const rebound = await this.#db
+      .update(mfaRecoveryCodes)
+      .set({ verificationSessionHash: nextSessionHash })
+      .where(
+        and(
+          eq(mfaRecoveryCodes.userId, userId),
+          eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
+          eq(mfaRecoveryCodes.verificationSessionHash, expectedSessionHash),
+        ),
+      )
+      .returning({ id: mfaRecoveryCodes.id });
+    return rebound.length > 0;
+  }
+
   async clearResumableVerification(userId: string, codeHash: string): Promise<void> {
     if (!isUuid(userId)) return;
     await this.#db

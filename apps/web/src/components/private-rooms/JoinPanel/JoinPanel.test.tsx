@@ -82,6 +82,33 @@ describe('JoinPanel — joiner half', () => {
     expect((reqField as HTMLTextAreaElement).value).toContain('licio.private.join_request.v1');
   });
 
+  it('discards a preparation when the display NAME changes', async () => {
+    // `prepareJoinRequest` bakes the display name into the keys it generates, so
+    // editing the field afterwards left the panel showing "Bob" while the
+    // request it built still said "Alice" — a name the joiner never chose,
+    // presented to the room as theirs.
+    const user = userEvent.setup();
+    const admin = await makeSession();
+    render(<JoinPanel />);
+    await user.type(screen.getByLabelText(/your display name/i), 'Alice');
+    await user.click(screen.getByRole('button', { name: /get my recipient key/i }));
+    await screen.findByLabelText(/your recipient key/i);
+
+    // Change the name: the preparation and everything derived from it go.
+    await user.type(screen.getByLabelText(/your display name/i), 'Bob');
+    expect(screen.queryByLabelText(/your recipient key/i)).not.toBeInTheDocument();
+
+    // Preparing again carries the name on screen, not the one it started with.
+    await user.click(screen.getByRole('button', { name: /get my recipient key/i }));
+    const keyField = (await screen.findByLabelText(/your recipient key/i)) as HTMLTextAreaElement;
+    const { inviteUrl } = await admin.createInvite({ inviteePublicKey: keyField.value });
+    await user.type(screen.getByLabelText(/paste the invite link/i), inviteUrl);
+    await user.click(screen.getByRole('button', { name: /build join request/i }));
+    const request = (await screen.findByLabelText(/your join request/i)) as HTMLTextAreaElement;
+    expect(request.value).toContain('AliceBob');
+    expect(JSON.parse(request.value).proposed_display_name).toBe('AliceBob');
+  });
+
   it('surfaces an open error for a malformed invite', async () => {
     const user = userEvent.setup();
     render(<JoinPanel />);

@@ -1778,6 +1778,17 @@ export class PrivateRoomSession {
       const cred = verdict.keyPackage.leafNode.credential;
       const credIdentity = cred.credentialType === 'basic' ? this.p2p.fromUtf8(cred.identity) : '';
       if (credIdentity !== newDeviceId || this.engine.state().devices.has(newDeviceId)) {
+        // A REJECTION RELEASES THE CLAIM, like every other one. This arm returns
+        // rather than throwing, so it slipped past the catch below and burned a
+        // single-use invite for a request that created no member and no grant —
+        // the opposite of the "NO state changes on rejection" this method
+        // promises. The verdict is a rejection wherever it is decided.
+        //
+        // Defensive rather than reachable from outside: a duplicate device is
+        // refused by MLS first (which throws, and the catch releases), and a
+        // mismatched credential identity requires a forged KeyPackage. It is
+        // released here for the same reason the check exists at all.
+        if (claimed !== null) await inviteStore.releaseInviteUse(invite.invite_id);
         return { verdict: { ok: false, reason: 'malformed_key_package' } };
       }
       const { op, sealParams } = await this.p2p.buildMemberAddOp(

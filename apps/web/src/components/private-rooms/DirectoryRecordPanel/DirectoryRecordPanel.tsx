@@ -518,7 +518,49 @@ export function DirectoryRecordPanel({
                 deleting the record — and the re-registration that follows is
                 unlisted-only, which cannot restore a listing at all. §21.3
                 exists to make exactly these correctable. */}
-            {owned && record !== null && record.directory_mode === 'listed' ? (
+            {owned && record !== null && record.directory_mode === 'listed' && restricted ? (
+              // A RESTRICTED OWNER MAY CLEAR, NOT PUBLISH — the same line the
+              // route draws (`publishesDisplay && isRestricted`): setting a name
+              // is the public act, and clearing one publishes nothing. Offering
+              // the ordinary editor walked a sanctioned owner into a
+              // deterministic `account_restricted` on save, while the thing they
+              // most plausibly need — taking the published text DOWN — was
+              // reachable only through that same refused form.
+              <div className="flex flex-col gap-2">
+                <p className="text-ink-muted text-xs" role="note">
+                  {t(
+                    'privateRoom.record.editRestricted',
+                    'This account cannot publish a name or description right now. You can still remove what is published.',
+                  )}
+                </p>
+                {record.display_name !== null || record.display_description !== null ? (
+                  <div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run('display', async () => {
+                          const next = await updatePrivateRoomStub(roomServerId ?? '', {
+                            displayName: null,
+                            displayDescription: null,
+                          });
+                          if (!(await accept(next))) return;
+                          setStatus(
+                            t(
+                              'privateRoom.record.editCleared',
+                              'Removed the published name and description.',
+                            ),
+                          );
+                        })
+                      }
+                    >
+                      {t('privateRoom.record.clearDisplay', 'Remove the published name')}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            ) : owned && record !== null && record.directory_mode === 'listed' ? (
               editing === null ? (
                 <div>
                   <Button

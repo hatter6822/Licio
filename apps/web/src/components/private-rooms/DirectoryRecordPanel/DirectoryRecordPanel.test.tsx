@@ -492,6 +492,36 @@ describe('DirectoryRecordPanel', () => {
     });
   });
 
+  it('offers a restricted OWNER the clear, not the editor', async () => {
+    // The route draws the line at PUBLISHING (`publishesDisplay &&
+    // isRestricted`): setting a name is the public act, clearing one is not. The
+    // panel offered the ordinary editor, so a sanctioned owner met a
+    // deterministic `account_restricted` on save — and the thing they most
+    // plausibly need, taking the text DOWN, was only reachable through that same
+    // refused form.
+    ownsRecord = true;
+    useAuthStore.setState({
+      status: 'authenticated',
+      user: { id: 'u1', account_state: 'restricted' },
+    } as never);
+    let patched: Record<string, unknown> | null = null;
+    mockApi((_url, init) => {
+      if (init?.method === 'PATCH' && typeof init.body === 'string') {
+        patched = JSON.parse(init.body) as Record<string, unknown>;
+        return bootstrapBody({ display_name: null, display_description: null });
+      }
+      return bootstrapBody();
+    });
+    render(<DirectoryRecordPanel session={sessionDouble(STUB)} />);
+    await screen.findByText('Neighbourhood watch');
+    expect(screen.queryByRole('button', { name: /edit the published name/i })).toBeNull();
+    expect(screen.getByText(/cannot publish a name or description right now/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /remove the published name/i }));
+    await screen.findByRole('status');
+    expect(patched).toMatchObject({ display_name: null, display_description: null });
+  });
+
   it('withholds the LISTED choice from a restricted account', async () => {
     // `POST /v1/private-rooms` refuses a listed creation with
     // `account_restricted`, and the creation wizard already withholds the
