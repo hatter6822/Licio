@@ -20,6 +20,7 @@ import {
   buildSessionCookie,
   markMfaVerified,
   readSessionToken,
+  revokeMfaVerified,
   rotateSession,
 } from '../identity/sessions.js';
 import {
@@ -368,11 +369,31 @@ async function finishTotpVerification(
   tokenHash: string,
   c: Context<AuthEnv>,
 ): Promise<void> {
-  await services.transact(async (tx) => {
-    await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
-  });
-  // A grant that could not be applied must not be reported as one.
+  // THE GRANT FIRST, then the record of it — the opposite of the recovery path,
+  // and for the reason that separates them.
+  //
+  // A TOTP step spends nothing durable, so there is no resource to lose by
+  // granting first: a failure costs the holder one retry with the next code.
+  // What the audit trail must never do is claim a clearance that did not
+  // happen. Committing `mfa_verify` before the grant did exactly that — the
+  // session could be revoked between the middleware's check and this call, or
+  // the store could throw, and the request answered 401/500 leaving a durable
+  // success row behind. Splitting `mfa_verify_failed` out for invalid codes made
+  // that row MORE misleading, not less: an investigator asking "did this account
+  // clear MFA?" now reads it as an unambiguous yes.
   if (!(await markMfaVerified(services.sessions, tokenHash))) throw new SessionVanishedError();
+  try {
+    await services.transact(async (tx) => {
+      await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
+    });
+  } catch (error) {
+    // Granted but unrecorded is the other lie, so it is taken back. The revert
+    // is best-effort — nothing durable was spent, so the honest answer to the
+    // caller is "that did not work, try again", and the trail says nothing
+    // rather than something untrue.
+    await revokeMfaVerified(services.sessions, tokenHash).catch(() => undefined);
+    throw error;
+  }
   await services.otp.delete(attemptsKey(userId));
   const token = readSessionToken(c.req.header('cookie'));
   if (token === undefined) return;

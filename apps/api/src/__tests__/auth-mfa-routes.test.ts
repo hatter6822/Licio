@@ -435,6 +435,49 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect(events).not.toContain('mfa_verify');
   });
 
+  it('does NOT record a TOTP clearance that never happened', async () => {
+    // The audit row used to commit BEFORE the grant, so a session revoked
+    // between the middleware's check and the grant — or a store that threw —
+    // left a durable `mfa_verify` behind while the request answered 401. Now
+    // that invalid codes have their own event, an investigator asking "did this
+    // account clear MFA?" reads that row as an unambiguous yes.
+    const { app, sid } = await signup('mfaphantom');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const sid2 = cookie(confirm, '__Host-sid');
+    const token = sid2.split('=')[1] as string;
+    const userId = (await services.sessions.get(sha256Hex(token)))?.record.user_id as string;
+    await services.otp.delete(`mfastep:${userId}`);
+
+    // The session is revoked after the middleware validated it, which is what
+    // makes the grant fail with a VALID code in hand.
+    const realMark = services.sessions.putIfVersion.bind(services.sessions);
+    services.sessions.putIfVersion = async (hash: string, version: number, record) => {
+      await services.sessions.delete(sha256Hex(token));
+      services.sessions.putIfVersion = realMark;
+      return realMark(hash, version, record);
+    };
+    const attempt = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(sid2),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    services.sessions.putIfVersion = realMark;
+
+    expect(attempt.status).toBe(401);
+    // No session cleared MFA, so the trail must not say one did.
+    const events = (await services.audit.securityActivityForUser(userId)).map((e) => e.event_type);
+    expect(events).not.toContain('mfa_verify');
+  });
+
   it('burns the confirm code so it cannot be replayed at /verify (WS-D.1.5b)', async () => {
     const { app, sid } = await signup('confirmreplay');
     const enroll = await app.request('/v1/auth/mfa/totp/enroll', {

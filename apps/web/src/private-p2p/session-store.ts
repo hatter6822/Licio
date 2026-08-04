@@ -64,6 +64,17 @@ const storedRoomSessionSchema = z
           roomServerId: z.string().min(1),
           bootstrapBlindId: z.string().min(1),
         }),
+        // THE TRUST FLAGS ARE PART OF THE BOUNDARY, not passengers on it.
+        //
+        // `createInvite` treats `verified === true` as proof that this handle was
+        // checked against THIS room's key, and refuses to propagate a
+        // `quarantined` one. Leaving them undeclared meant a malformed or
+        // foreign row carrying `verified: true` satisfied the schema and came
+        // straight back out, so a poisoned cross-room handle survived a reload
+        // and walked past the quarantine it exists to enforce. Declared, a
+        // non-boolean discards the whole record.
+        verified: z.boolean().optional(),
+        quarantined: z.boolean().optional(),
       })
       .optional(),
   })
@@ -71,9 +82,13 @@ const storedRoomSessionSchema = z
 
 /** Validate (discard on failure) + normalize a row read from IndexedDB. */
 function readStoredSession(raw: unknown): StoredRoomSession | undefined {
-  if (!storedRoomSessionSchema.safeParse(raw).success) return undefined;
+  // The PARSED value, not the raw one. Discarding it and normalizing the input
+  // meant the schema decided whether to keep the row and then had no say in
+  // what was kept — every check above was advisory.
+  const parsed = storedRoomSessionSchema.safeParse(raw);
+  if (!parsed.success) return undefined;
   try {
-    return normalizeSession(raw as StoredRoomSession);
+    return normalizeSession(parsed.data as unknown as StoredRoomSession);
   } catch {
     return undefined; // a byte field that is not byte-shaped after all
   }

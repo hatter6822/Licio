@@ -478,7 +478,12 @@ export function registersTheSame(
     existing.rendezvousPolicy === input.rendezvousPolicy &&
     existing.bootstrapBlindId === input.bootstrapBlindId &&
     existing.stubSignature === input.stubSignature &&
-    JSON.stringify(existing.signedStub) === JSON.stringify(input.signedStub)
+    JSON.stringify(existing.signedStub) === JSON.stringify(input.signedStub) &&
+    // The hints are stored from the input like everything else above, so a
+    // registration differing only in its relay/rendezvous pointers is still a
+    // different registration — and the loser would be told 201 while the
+    // pointers it asked for were never written.
+    JSON.stringify(existing.bootstrapHints) === JSON.stringify(input.bootstrapHints)
   );
 }
 

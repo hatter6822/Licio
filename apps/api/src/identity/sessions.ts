@@ -430,6 +430,25 @@ export async function markMfaVerified(
   }));
 }
 
+/**
+ * Take an MFA grant back off a session.
+ *
+ * The compensating half of `markMfaVerified`, for the one caller that can end up
+ * having granted something it cannot record: a TOTP verification whose audit
+ * append fails. Granted-but-unrecorded and recorded-but-not-granted are both
+ * lies about the same event; a TOTP step spends nothing, so the honest outcome
+ * is neither — the caller retries and the trail says nothing.
+ *
+ * Under the same CAS as every other mutation, so it cannot resurrect a session
+ * revoked meanwhile or revert a change made since it read.
+ */
+export async function revokeMfaVerified(store: SessionStore, tokenHash: string): Promise<boolean> {
+  return mutateSession(store, tokenHash, (current) => ({
+    ...current,
+    record: { ...current.record, mfa_verified: false },
+  }));
+}
+
 /** Revoke all of a user's sessions except `exceptHash`; returns the revoked count. */
 export async function revokeOthersForUser(
   store: SessionStore,
