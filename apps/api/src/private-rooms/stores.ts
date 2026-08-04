@@ -455,6 +455,33 @@ export interface PrivateRoomStubPatch {
  * rather than a race the caller's pre-check happened to lose. The service maps
  * it to `room_already_registered`; nothing else should catch it.
  */
+/**
+ * Would this input have registered the row that is already there?
+ *
+ * Every field a caller SUPPLIES and the row then holds immutably.  Adopting an
+ * existing registration as "the same one" is only honest when the two describe
+ * the same thing; otherwise the caller is handed somebody else's decision — or
+ * their own earlier, different one — and told it was what they asked for.
+ *
+ * `directoryMode` above all: listed versus unlisted is the difference between a
+ * room that appears in the §21 directory and one that does not.
+ */
+export function registersTheSame(
+  existing: StoredPrivateRoomStub,
+  input: PrivateRoomStubInsertInput,
+): boolean {
+  return (
+    existing.directoryMode === input.directoryMode &&
+    existing.displayName === input.displayName &&
+    existing.displayDescription === input.displayDescription &&
+    existing.displayAvatarPublicCid === input.displayAvatarPublicCid &&
+    existing.rendezvousPolicy === input.rendezvousPolicy &&
+    existing.bootstrapBlindId === input.bootstrapBlindId &&
+    existing.stubSignature === input.stubSignature &&
+    JSON.stringify(existing.signedStub) === JSON.stringify(input.signedStub)
+  );
+}
+
 export class RoomAlreadyRegisteredError extends Error {
   constructor() {
     super('A directory record already exists for this room');
@@ -633,7 +660,14 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore, InMem
       (stub) => stub.roomPublicKey === input.signedStub.room_public_key,
     );
     if (forRoom !== undefined) {
-      if (forRoom.createdByAccountId === input.createdByAccountId) {
+      // The same ACCOUNT is not the same REGISTRATION. The row is immutable in
+      // the parts that matter, so returning it to a caller that asked for
+      // something else reports success and hands them the opposite — a wizard
+      // that requested `listed` dismissing on an `unlisted` record.
+      if (
+        forRoom.createdByAccountId === input.createdByAccountId &&
+        registersTheSame(forRoom, input)
+      ) {
         return Promise.resolve(forRoom);
       }
       return Promise.reject(new RoomAlreadyRegisteredError());

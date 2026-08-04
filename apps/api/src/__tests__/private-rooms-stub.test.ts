@@ -1214,6 +1214,30 @@ describe('ONE record per room — adopted by its owner, refused to anyone else',
     const mine = await insert(ACCOUNT);
     expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(1);
     expect(mine.createdByAccountId).toBe(ACCOUNT);
+
+    // …but the same ACCOUNT is not the same REGISTRATION.  The row is immutable
+    // in the parts that matter, so adopting it for a request that asked for
+    // something else reports success and hands the caller the opposite — a
+    // wizard that requested `listed` dismissing on an `unlisted` record.
+    await expect(
+      store.create({
+        stubId: randomUUID(),
+        roomServerId: randomUUID(),
+        directoryMode: 'listed',
+        displayName: 'A different answer',
+        displayDescription: null,
+        displayAvatarPublicCid: null,
+        rendezvousPolicy: 'licio_blind',
+        bootstrapHints: [],
+        signedStub: SIGNED_STUB,
+        stubSignature:
+          'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+        bootstrapBlindId: TOKEN,
+        createdByAccountId: ACCOUNT,
+      }),
+    ).rejects.toThrow(RoomAlreadyRegisteredError);
+    // …and nothing was created for it.
+    expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(1);
   });
 
   it('REFUSES another account registering a room that already has a record', async () => {

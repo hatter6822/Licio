@@ -28,7 +28,7 @@ import type {
   SignedStubBody,
   StoredPrivateRoomStub,
 } from './stores.js';
-import { RoomAlreadyRegisteredError } from './stores.js';
+import { RoomAlreadyRegisteredError, registersTheSame } from './stores.js';
 
 /**
  * The opaque shell name/slug for a P2P room (§8.1 — never the real title), from
@@ -95,7 +95,13 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
     // retry converges on the record it was trying to create.
     const forRoom = await this.findByRoomKey(input.signedStub.room_public_key);
     if (forRoom !== null) {
-      if (forRoom.createdByAccountId === input.createdByAccountId) return forRoom;
+      // …but only when it IS the record the caller was trying to create. Same
+      // account, same registration — see `registersTheSame`.
+      if (
+        forRoom.createdByAccountId === input.createdByAccountId &&
+        registersTheSame(forRoom, input)
+      )
+        return forRoom;
       throw new RoomAlreadyRegisteredError();
     }
     const { name, slug } = shellIdentity();
@@ -173,7 +179,20 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
         if (!isUniqueViolation(error)) throw error;
         const winner = await this.findByRoomKey(input.signedStub.room_public_key);
         if (winner === null) throw error;
-        if (winner.createdByAccountId !== input.createdByAccountId) {
+        // ADOPTING THE WINNER MEANS IT IS THE SAME REGISTRATION, and the same
+        // ACCOUNT is not the same registration.
+        //
+        // The row is immutable in the parts that matter, so a caller that
+        // registered `listed` and adopted an `unlisted` winner would be told its
+        // request had succeeded and hold the opposite of what it asked for —
+        // with a wizard that dismisses on success, silently and permanently.
+        // Two requests differing in what they REGISTER are a conflict, whoever
+        // sent them; only a genuine retry — the same account asking for the same
+        // thing — gets the answer a moment earlier would have given.
+        if (
+          winner.createdByAccountId !== input.createdByAccountId ||
+          !registersTheSame(winner, input)
+        ) {
           throw new RoomAlreadyRegisteredError();
         }
         return winner;
