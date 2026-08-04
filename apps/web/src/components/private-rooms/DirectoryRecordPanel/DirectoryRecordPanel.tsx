@@ -95,6 +95,12 @@ export function DirectoryRecordPanel({
   const token = stub?.bootstrapBlindId;
   /** Ownership is per ACCOUNT, so the lookup is keyed to the signed-in one. */
   const accountId = useAuthStore((auth) => auth.user?.id ?? null);
+  /** A restricted account may not PUBLISH: `POST /v1/private-rooms` refuses a
+   *  `listed` creation with `account_restricted`, and the creation wizard
+   *  already withholds the choice. Offering it here would walk a sanctioned
+   *  member into a deterministic refusal after the signing work is done — and
+   *  leave the two surfaces disagreeing about the same sanction. */
+  const restricted = useAuthStore((auth) => auth.user?.account_state === 'restricted');
 
   /**
    * Accept a record ONLY if the room signed it — for every response, not just
@@ -378,11 +384,15 @@ export function DirectoryRecordPanel({
                       let created: Awaited<ReturnType<typeof createPrivateRoomStub>> | null = null;
                       try {
                         created = await createPrivateRoomStub({
-                          directoryMode: listPublicly ? 'listed' : 'unlisted',
+                          // `restricted` is re-read here rather than trusted from
+                          // the checkbox: a sanction landing between the render
+                          // and the click must not send a request the server will
+                          // refuse.
+                          directoryMode: listPublicly && !restricted ? 'listed' : 'unlisted',
                           // Display metadata is `listed`-only — the server
                           // REFUSES it on an unlisted record rather than
                           // dropping it — so it is sent only where it belongs.
-                          ...(listPublicly ? { displayName: session.name } : {}),
+                          ...(listPublicly && !restricted ? { displayName: session.name } : {}),
                           rendezvousPolicy: 'licio_blind',
                           signedStub: payload.signedStub,
                           stubSignature: payload.stubSignature,
@@ -444,21 +454,32 @@ export function DirectoryRecordPanel({
                     path. A creation whose directory step failed after the user
                     chose "listed" was therefore told to "try listing it again
                     later" with no way to do so. */}
-                <Checkbox
-                  label={t(
-                    'privateRoom.record.alsoList',
-                    'Also list this room publicly, under its name',
-                  )}
-                  checked={listPublicly}
-                  onCheckedChange={setListPublicly}
-                  disabled={busy !== null}
-                />
-                <p className="text-ink-muted text-xs" role="note">
-                  {t(
-                    'privateRoom.record.alsoListNote',
-                    'A listed room appears in Licio’s public directory by name. The room’s contents stay private either way, and you can delist it later.',
-                  )}
-                </p>
+                {restricted ? (
+                  <p className="text-ink-muted text-xs" role="note">
+                    {t(
+                      'privateRoom.record.listRestricted',
+                      'This account cannot publish a public listing right now, so the record is stored unlisted. Invites work either way.',
+                    )}
+                  </p>
+                ) : (
+                  <>
+                    <Checkbox
+                      label={t(
+                        'privateRoom.record.alsoList',
+                        'Also list this room publicly, under its name',
+                      )}
+                      checked={listPublicly}
+                      onCheckedChange={setListPublicly}
+                      disabled={busy !== null}
+                    />
+                    <p className="text-ink-muted text-xs" role="note">
+                      {t(
+                        'privateRoom.record.alsoListNote',
+                        'A listed room appears in Licio’s public directory by name. The room’s contents stay private either way, and you can delist it later.',
+                      )}
+                    </p>
+                  </>
+                )}
               </div>
             )}
           </div>

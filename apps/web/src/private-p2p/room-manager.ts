@@ -1717,144 +1717,173 @@ export class PrivateRoomSession {
     request: JoinRequest,
     options?: { readonly usesSoFar?: number; readonly now?: Date },
   ): Promise<AdmitResult> {
-    // Enforce the invite's §10.3 `max_uses` budget from the PERSISTED per-invite
-    // counter (this admin device) — the caller's explicit `usesSoFar` still wins
-    // when provided (tests / alternate drivers).  Without this a single-use invite
-    // verified fresh forever (nothing was ever charged against it).
+    // CLAIM the §10.3 budget before anything else, in ONE conditional write.
+    //
+    // Reading the counter here and charging it at the end is a check, not a
+    // budget. `runExclusive` is a per-INSTANCE mutex, so the same room open in
+    // two tabs gives two managers that never see each other: both read
+    // `usesSoFar = 0` on a single-use invite, both pass this gate, both add a
+    // member through their own MLS commit, and the room acquires two members on
+    // one use plus a pair of divergent branches. The claim is a compare-and-set
+    // inside an IndexedDB readwrite transaction, which is shared across tabs.
+    //
+    // `options.usesSoFar` still wins when a caller supplies it (tests /
+    // alternate drivers): that caller owns the accounting, so nothing is
+    // claimed and the charge stays where it was.
     const inviteStore = new IndexedDbPrivateRoomStorage(this.session.roomId);
-    const usesSoFar = options?.usesSoFar ?? (await inviteStore.getInviteUses(invite.invite_id));
+    const driverOwnsBudget = options?.usesSoFar !== undefined;
+    let claimed: number | null = null;
+    if (!driverOwnsBudget) {
+      claimed = await inviteStore.claimInviteUse(invite.invite_id, invite.max_uses);
+      if (claimed === null) return { verdict: { ok: false, reason: 'exhausted' } };
+    }
+    // The claim already took this use, so verification sees the budget as it
+    // stood BEFORE it — every other rejection (expiry, proof, key package) is
+    // unchanged, and a rejection releases the claim below.
+    const usesSoFar = options?.usesSoFar ?? (claimed as number) - 1;
     const verdict = await this.p2p.verifyJoinRequest(invite, request, {
       now: options?.now ?? new Date(),
       usesSoFar,
     });
-    if (!verdict.ok) return { verdict };
-
-    const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
-    const invited = await this.p2p.inviteDevice(group, verdict.keyPackage);
-    const newEpochState = await this.p2p.deriveEpochState(
-      invited.group,
-      this.session.roomIdCommitment,
-      this.session.manifestCommitment,
-    );
-    const epoch = Number(newEpochState.epoch);
-    this.engine.addEpochKeys(epoch, this.p2p.heldKeysOf(newEpochState));
-
-    const newMemberId = globalThis.crypto.randomUUID();
-    // SECURITY: the reducer device id is DERIVED from the proof-bound signing key, NOT
-    // taken from the joiner-chosen KeyPackage credential identity (which the joiner fully
-    // controls + MLS dedups only by signature key, so a joiner could otherwise collide an
-    // existing device_id, desyncing the reducer from MLS and mis-targeting removal).  The
-    // joiner set its KeyPackage identity to this SAME derived value (prepareJoinRequest),
-    // so `utf8(deviceId)` still resolves the leaf for §10.9 removal.  Fail-closed: reject
-    // a KeyPackage whose credential identity does not match the derived id, or a collision
-    // with an existing device.
-    const newDeviceId = await deviceIdFromSigningKey(this.p2p, verdict.deviceSigningPublicKey);
-    const cred = verdict.keyPackage.leafNode.credential;
-    const credIdentity = cred.credentialType === 'basic' ? this.p2p.fromUtf8(cred.identity) : '';
-    if (credIdentity !== newDeviceId || this.engine.state().devices.has(newDeviceId)) {
-      return { verdict: { ok: false, reason: 'malformed_key_package' } };
+    if (!verdict.ok) {
+      if (claimed !== null) await inviteStore.releaseInviteUse(invite.invite_id);
+      return { verdict };
     }
-    const { op, sealParams } = await this.p2p.buildMemberAddOp(
-      {
-        roomId: this.session.roomId,
-        roomIdCommitment: this.session.roomIdCommitment,
-        epochState: newEpochState,
+
+    // A CLAIM WHOSE ADMISSION DOES NOT COMPLETE IS HANDED BACK. Everything below
+    // can throw — MLS operations, the engine, the session write — and the use is
+    // already taken, so without this a transient failure would silently spend a
+    // single-use invite and leave the invitee with nothing to retry against.
+    try {
+      const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
+      const invited = await this.p2p.inviteDevice(group, verdict.keyPackage);
+      const newEpochState = await this.p2p.deriveEpochState(
+        invited.group,
+        this.session.roomIdCommitment,
+        this.session.manifestCommitment,
+      );
+      const epoch = Number(newEpochState.epoch);
+      this.engine.addEpochKeys(epoch, this.p2p.heldKeysOf(newEpochState));
+
+      const newMemberId = globalThis.crypto.randomUUID();
+      // SECURITY: the reducer device id is DERIVED from the proof-bound signing key, NOT
+      // taken from the joiner-chosen KeyPackage credential identity (which the joiner fully
+      // controls + MLS dedups only by signature key, so a joiner could otherwise collide an
+      // existing device_id, desyncing the reducer from MLS and mis-targeting removal).  The
+      // joiner set its KeyPackage identity to this SAME derived value (prepareJoinRequest),
+      // so `utf8(deviceId)` still resolves the leaf for §10.9 removal.  Fail-closed: reject
+      // a KeyPackage whose credential identity does not match the derived id, or a collision
+      // with an existing device.
+      const newDeviceId = await deviceIdFromSigningKey(this.p2p, verdict.deviceSigningPublicKey);
+      const cred = verdict.keyPackage.leafNode.credential;
+      const credIdentity = cred.credentialType === 'basic' ? this.p2p.fromUtf8(cred.identity) : '';
+      if (credIdentity !== newDeviceId || this.engine.state().devices.has(newDeviceId)) {
+        return { verdict: { ok: false, reason: 'malformed_key_package' } };
+      }
+      const { op, sealParams } = await this.p2p.buildMemberAddOp(
+        {
+          roomId: this.session.roomId,
+          roomIdCommitment: this.session.roomIdCommitment,
+          epochState: newEpochState,
+          author: {
+            memberId: this.session.memberId,
+            deviceId: this.session.deviceId,
+            signingKey: this.session.signingPrivateKey,
+            seq: this.engine.nextAuthorSeq(this.session.deviceId),
+          },
+          parents: this.engine.heads(),
+          lamport: this.engine.nextLamport(),
+        },
+        {
+          memberId: newMemberId,
+          deviceId: newDeviceId,
+          // The signed `member.add` records the joining device's LONG-TERM keys: its
+          // dedicated Ed25519 op-signing key (proof-bound in the §12.3 request, so a relay
+          // cannot substitute it — and SEPARATE from the MLS leaf key, no cross-protocol
+          // reuse) and its HPKE init key (authenticated by the verified KeyPackage).
+          signingPublicKey: verdict.deviceSigningPublicKey,
+          hpkePublicKey: this.p2p.toBase64Url(verdict.keyPackage.initKey),
+          mlsKeyPackage: request.recipient_device_key_package,
+          role: verdict.grantedRole,
+          displayName: request.proposed_display_name,
+        },
+      );
+      await this.engine.applyLocalOp(op, sealParams);
+
+      const epochs = [
+        ...this.session.epochs.filter((e) => e.epoch !== epoch),
+        {
+          epoch,
+          roomEpochSecret: newEpochState.roomEpochSecret,
+          contentWrapKey: newEpochState.keys.contentWrapKey,
+        },
+      ];
+      this.session = {
+        ...this.session,
+        mlsGroupState: this.p2p.serializeGroupState(invited.group),
+        epochs,
+      };
+      await putRoomSession(this.session);
+      // §10.9: deliver the epoch-rotating commit to every currently-connected member so
+      // they advance to the new epoch and can open the new-epoch content (otherwise their
+      // engines would quarantine it no_epoch_key).
+      this.broadcastCommit(this.p2p.encodeCommit(invited.commit), epoch);
+
+      // Build the joiner's bootstrap GRANT: a §14.5 snapshot sealed under the NEW epoch
+      // (the only epoch the joiner holds) carries the FULL reduced state — members,
+      // devices, content — so a fresh joiner sees the current room WITHOUT the historical
+      // epoch keys it never held (forward secrecy preserved).  commitSnapshot covers the
+      // just-applied member.add, so the snapshot already includes the joiner.
+      const snapshotBase = await this.engine.commitSnapshot({
+        epoch,
+        roomEpochSecret: newEpochState.roomEpochSecret,
+        contentWrapKey: newEpochState.keys.contentWrapKey,
         author: {
           memberId: this.session.memberId,
           deviceId: this.session.deviceId,
           signingKey: this.session.signingPrivateKey,
-          seq: this.engine.nextAuthorSeq(this.session.deviceId),
         },
-        parents: this.engine.heads(),
-        lamport: this.engine.nextLamport(),
-      },
-      {
-        memberId: newMemberId,
-        deviceId: newDeviceId,
-        // The signed `member.add` records the joining device's LONG-TERM keys: its
-        // dedicated Ed25519 op-signing key (proof-bound in the §12.3 request, so a relay
-        // cannot substitute it — and SEPARATE from the MLS leaf key, no cross-protocol
-        // reuse) and its HPKE init key (authenticated by the verified KeyPackage).
-        signingPublicKey: verdict.deviceSigningPublicKey,
-        hpkePublicKey: this.p2p.toBase64Url(verdict.keyPackage.initKey),
-        mlsKeyPackage: request.recipient_device_key_package,
-        role: verdict.grantedRole,
-        displayName: request.proposed_display_name,
-      },
-    );
-    await this.engine.applyLocalOp(op, sealParams);
-
-    const epochs = [
-      ...this.session.epochs.filter((e) => e.epoch !== epoch),
-      {
-        epoch,
-        roomEpochSecret: newEpochState.roomEpochSecret,
-        contentWrapKey: newEpochState.keys.contentWrapKey,
-      },
-    ];
-    this.session = {
-      ...this.session,
-      mlsGroupState: this.p2p.serializeGroupState(invited.group),
-      epochs,
-    };
-    await putRoomSession(this.session);
-    // §10.9: deliver the epoch-rotating commit to every currently-connected member so
-    // they advance to the new epoch and can open the new-epoch content (otherwise their
-    // engines would quarantine it no_epoch_key).
-    this.broadcastCommit(this.p2p.encodeCommit(invited.commit), epoch);
-
-    // Build the joiner's bootstrap GRANT: a §14.5 snapshot sealed under the NEW epoch
-    // (the only epoch the joiner holds) carries the FULL reduced state — members,
-    // devices, content — so a fresh joiner sees the current room WITHOUT the historical
-    // epoch keys it never held (forward secrecy preserved).  commitSnapshot covers the
-    // just-applied member.add, so the snapshot already includes the joiner.
-    const snapshotBase = await this.engine.commitSnapshot({
-      epoch,
-      roomEpochSecret: newEpochState.roomEpochSecret,
-      contentWrapKey: newEpochState.keys.contentWrapKey,
-      author: {
-        memberId: this.session.memberId,
-        deviceId: this.session.deviceId,
-        signingKey: this.session.signingPrivateKey,
-      },
-      snapshotId: globalThis.crypto.randomUUID(),
-    });
-    if (snapshotBase) {
-      this.session = { ...this.session, snapshotBase };
-      await putRoomSession(this.session);
+        snapshotId: globalThis.crypto.randomUUID(),
+      });
+      if (snapshotBase) {
+        this.session = { ...this.session, snapshotBase };
+        await putRoomSession(this.session);
+      }
+      // …NOW re-announce (AFTER the commit + the grant snapshot).  This must follow `commitSnapshot`,
+      // not precede it: `commitSnapshot` compacts A's log — dropping the just-authored `member.add` — so
+      // announcing BEFORE it would advertise a head the peer can no longer pull (A would serve 0), and
+      // the peer would strand on the missing prefix.  Announcing AFTER advertises the SNAPSHOT head +
+      // `latest_snapshot_id`, so a connected member that already advanced the epoch (via the commit
+      // above) bootstraps the new member/device/content over the §14.5 snapshot archive
+      // (PRIV-WEB-SESSION-NUDGE).
+      this.nudgeActiveSessions();
+      const archive = await this.engine.exportArchive({
+        kind: 'encrypted_member_backup',
+        createdAtBucket: coarseBucket(),
+      });
+      const grant: JoinGrant = {
+        welcome: this.p2p.encodeWelcomeMessage(invited.welcome),
+        roomId: this.session.roomId,
+        roomIdCommitment: this.session.roomIdCommitment,
+        manifest: this.session.manifest,
+        manifestCommitment: this.session.manifestCommitment,
+        assignedMemberId: newMemberId,
+        assignedDeviceId: newDeviceId,
+        // The current device roster (public keys) — the joiner's bootstrap trust set,
+        // authenticated by the admin it is joining through (the §10.3 channel).
+        bootstrapDevices: [...this.engine.state().devices.values()]
+          .filter((d) => !d.removed)
+          .map((d) => ({ deviceId: d.deviceId, signingPublicKey: d.signingPublicKey })),
+        archive,
+      };
+      // Already charged by the claim above; only a driver that owns the
+      // accounting still charges here.
+      if (driverOwnsBudget) await inviteStore.incrementInviteUses(invite.invite_id);
+      return { verdict, grant };
+    } catch (error) {
+      if (claimed !== null) await inviteStore.releaseInviteUse(invite.invite_id);
+      throw error;
     }
-    // …NOW re-announce (AFTER the commit + the grant snapshot).  This must follow `commitSnapshot`,
-    // not precede it: `commitSnapshot` compacts A's log — dropping the just-authored `member.add` — so
-    // announcing BEFORE it would advertise a head the peer can no longer pull (A would serve 0), and
-    // the peer would strand on the missing prefix.  Announcing AFTER advertises the SNAPSHOT head +
-    // `latest_snapshot_id`, so a connected member that already advanced the epoch (via the commit
-    // above) bootstraps the new member/device/content over the §14.5 snapshot archive
-    // (PRIV-WEB-SESSION-NUDGE).
-    this.nudgeActiveSessions();
-    const archive = await this.engine.exportArchive({
-      kind: 'encrypted_member_backup',
-      createdAtBucket: coarseBucket(),
-    });
-    const grant: JoinGrant = {
-      welcome: this.p2p.encodeWelcomeMessage(invited.welcome),
-      roomId: this.session.roomId,
-      roomIdCommitment: this.session.roomIdCommitment,
-      manifest: this.session.manifest,
-      manifestCommitment: this.session.manifestCommitment,
-      assignedMemberId: newMemberId,
-      assignedDeviceId: newDeviceId,
-      // The current device roster (public keys) — the joiner's bootstrap trust set,
-      // authenticated by the admin it is joining through (the §10.3 channel).
-      bootstrapDevices: [...this.engine.state().devices.values()]
-        .filter((d) => !d.removed)
-        .map((d) => ({ deviceId: d.deviceId, signingPublicKey: d.signingPublicKey })),
-      archive,
-    };
-    // The admit fully succeeded — charge this join against the invite so a
-    // single-use invite cannot be replayed for a second member (persisted AFTER
-    // the session write, so a mid-admit failure never burns a use).
-    await inviteStore.incrementInviteUses(invite.invite_id);
-    return { verdict, grant };
   }
 
   /**

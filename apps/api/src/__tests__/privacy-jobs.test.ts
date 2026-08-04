@@ -25,6 +25,7 @@ import {
   MAX_EXPORT_ATTEMPTS,
   mintExportDownloadToken,
   processExportJob,
+  reconcileDeletionRevocations,
   runDeletionPurge,
   startPrivacyScheduler,
   sweepExpiredExports,
@@ -292,7 +293,7 @@ describe('startPrivacyScheduler', () => {
   });
 
   it('reports task errors through onError without dying', async () => {
-    const failures: Array<'sweep' | 'purge' | 'lease'> = [];
+    const failures: Array<'sweep' | 'purge' | 'lease' | 'revoke_reconcile'> = [];
     services.objectStore.expiredKeys = async () => {
       throw new Error('boom');
     };
@@ -300,6 +301,49 @@ describe('startPrivacyScheduler', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     stop();
     expect(failures).toContain('sweep');
+  });
+});
+
+describe('reconcileDeletionRevocations', () => {
+  it('ends sessions a deletion request could not end itself', async () => {
+    // The request commits before the revoke — only one of the two can be retried
+    // — so a Redis fault leaves an account deactivated with sessions present.
+    // The client cannot retry it: the same commit deactivated the account, so
+    // `authMiddleware` refuses every route that is not deletion-pending-aware,
+    // which made the endpoint's "please retry" advice unreachable. The row is
+    // the durable job.
+    const user = await services.store.createUser({
+      handle: 'lingering',
+      displayName: 'Lingering',
+      email: null,
+      accountState: 'deactivated',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: defaultPrivacySettings(),
+      personalizationSettings: defaultPersonalizationSettings(),
+      roles: ['user'],
+    });
+    await createSession(services.sessions, {
+      userId: user.userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'left behind',
+      rememberMe: false,
+    });
+    const now = Date.now();
+    await services.store.setDeletion({
+      userId: user.userId,
+      state: 'grace_period',
+      requestedAt: new Date(now).toISOString(),
+      purgeAt: new Date(now + 30 * 24 * 3_600_000).toISOString(),
+      cancelledAt: null,
+      completedAt: null,
+    });
+    expect(await services.sessions.listForUser(user.userId)).toHaveLength(1);
+
+    expect(await reconcileDeletionRevocations(services)).toBe(1);
+    expect(await services.sessions.listForUser(user.userId)).toHaveLength(0);
+    // Idempotent: a second pass finds nothing left to do.
+    expect(await reconcileDeletionRevocations(services)).toBe(0);
   });
 });
 

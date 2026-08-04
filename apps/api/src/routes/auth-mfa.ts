@@ -184,7 +184,17 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
               String(result.step),
               MFA_STEP_MEMORY_MS,
             );
-            await finishMfa(services, auth.userId, auth.tokenHash, c);
+            try {
+              await finishMfa(services, auth.userId, auth.tokenHash, c);
+            } catch (error) {
+              // The TOTP path spends nothing, so a vanished session is simply a
+              // sign-in-again — never a success reported for a grant that did
+              // not land.
+              if (error instanceof SessionVanishedError) {
+                return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
+              }
+              throw error;
+            }
             return c.json({ status: 'mfa_verified' as const });
           }
 
@@ -204,9 +214,29 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
             constantTimeEqual(presentedHash, h),
           );
           if (matched !== undefined) {
-            const spent = await finishMfa(services, auth.userId, auth.tokenHash, c, (tx) =>
-              tx.store.consumeRecoveryCode(auth.userId, matched, auth.tokenHash),
-            );
+            let spent: { remaining: number } | null;
+            try {
+              spent = await finishMfa(services, auth.userId, auth.tokenHash, c, (tx) =>
+                tx.store.consumeRecoveryCode(auth.userId, matched, auth.tokenHash),
+              );
+            } catch (error) {
+              // The code IS spent and recorded, and its continuation is pending:
+              // the next session this user opens finishes it (see the resume
+              // block below). Reporting success here would be a lie, and
+              // reporting an unrecoverable failure would be the lockout.
+              if (error instanceof SessionVanishedError) {
+                return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
+              }
+              throw error;
+            }
+            // SETTLED: the grant landed, so there is nothing left to resume.
+            // Without this the verification's own rotation would leave a pending
+            // row pointing at a session that no longer exists — which the
+            // dead-session fallback would read as unfinished, making every spent
+            // code reusable by its owner forever.
+            if (spent !== null) {
+              await services.store.clearResumableVerification(auth.userId, matched);
+            }
             // Lost the race — another request spent this code between the read
             // and the write. Nothing was consumed and nothing was recorded.
             if (spent === null) return c.json(err('invalid_code', 'Invalid code.'), 400);
@@ -232,17 +262,42 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           // gets nothing. No second consumption and no second `mfa_verify` row —
           // this is the same verification finishing, not a new one.
           //
-          // The window closes ITSELF: completing rotates the session id on the
-          // privilege change, so the stored hash stops matching the moment the
-          // grant lands. A spent code is therefore resumable only between the
-          // commit that spent it and the completion it was spent for.
+          // The window is closed by SETTLING, not by the rotation: a completed
+          // verification clears its continuation, so a pending row means the
+          // grant never landed. Resting on the rotation instead would have made
+          // every spent code look unfinished the moment it succeeded.
           const resumable = await services.store.findResumableVerification(
             auth.userId,
             presentedHash,
-            auth.tokenHash,
           );
-          if (resumable !== null) {
-            await markMfaVerified(services.sessions, auth.tokenHash);
+          // WHO MAY FINISH IT: this session, or — if the session it was spent
+          // for no longer exists — any session of the same user.
+          //
+          // The strict rule alone stranded the very case it was written for.
+          // `markMfaVerified` returns silently when the session is gone, so a
+          // session that expired or was revoked between the middleware check and
+          // the post-commit grant left the code spent, the continuation bound to
+          // a dead token hash, and (on the last code) no way back at all.
+          //
+          // The fallback costs nothing: the holder already proved possession of
+          // a recovery code and this session already cleared primary auth, which
+          // is exactly the bar an UNSPENT code would have met. And it opens only
+          // once the original session is unusable, so while that session lives
+          // the code still grants MFA to precisely one.
+          const resumableHere =
+            resumable !== null &&
+            (resumable.verificationSessionHash === auth.tokenHash ||
+              (await services.sessions.get(resumable.verificationSessionHash)) === null);
+          if (resumable !== null && resumableHere) {
+            if (await markMfaVerified(services.sessions, auth.tokenHash)) {
+              await services.store.clearResumableVerification(auth.userId, presentedHash);
+            } else {
+              // The session went away underneath us — say so rather than
+              // answering `mfa_verified` for a grant that did not happen. The
+              // continuation survives: the code stays spent and pending, and the
+              // next session this user opens can finish it.
+              return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
+            }
             await services.otp.delete(attemptsKey(auth.userId));
             const token = readSessionToken(c.req.header('cookie'));
             const rotated = token ? await rotateSession(services.sessions, token) : null;
@@ -316,6 +371,17 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
   );
 }
 
+/** The session disappeared between the middleware's check and the post-commit
+ *  grant (expired, or revoked from elsewhere). The verification is recorded and
+ *  its factor spent, but no session was verified — so the caller is told to sign
+ *  in again, and the pending continuation lets the next session finish it. */
+class SessionVanishedError extends Error {
+  constructor() {
+    super('the session no longer exists');
+    this.name = 'SessionVanishedError';
+  }
+}
+
 /** The presented recovery code was spent by another request between the read
  *  and the conditional write. Thrown INSIDE the unit so the verification rolls
  *  back whole rather than half-applying. */
@@ -378,7 +444,12 @@ async function finishMfa<T>(
       throw error;
     });
   if (spent === null) return null;
-  await markMfaVerified(services.sessions, tokenHash);
+  // A grant that could not be applied must not be reported as one. The record
+  // and any consumption are already committed, so the caller answers honestly
+  // and the continuation above is what makes the spent factor recoverable.
+  if (!(await markMfaVerified(services.sessions, tokenHash))) {
+    throw new SessionVanishedError();
+  }
   await services.otp.delete(attemptsKey(userId));
   const token = readSessionToken(c.req.header('cookie'));
   const rotated = token ? await rotateSession(services.sessions, token) : null;

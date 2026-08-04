@@ -161,16 +161,28 @@ export interface IdentityStore {
   /**
    * A code already SPENT for this session, whose verification did not finish.
    *
-   * The resume half of `consumeRecoveryCode`: a retry presenting the same code
-   * from the same session gets its grant re-attempted rather than being told the
-   * code is invalid. Single-use is unchanged — the code grants MFA to exactly
-   * one session, and it is the session hash that says which.
+   * The resume half of `consumeRecoveryCode`. Returns the session the code was
+   * spent for; the CALLER decides whether the presenter may finish it, because
+   * that question needs the session store and this one does not have it.
+   *
+   * Cleared whenever the recovery-code set is replaced (`setAuth`): a pending
+   * continuation is about the factor it was issued for, and re-enrolling ends
+   * that factor.
    */
   findResumableVerification(
     userId: string,
     codeHash: string,
-    verificationSessionHash: string,
-  ): Promise<{ remaining: number } | null>;
+  ): Promise<{ remaining: number; verificationSessionHash: string } | null>;
+  /**
+   * SETTLE a continuation once its grant has landed.
+   *
+   * A pending row must mean "the grant never happened", or the two are
+   * indistinguishable: a successful verification ROTATES the session, so its
+   * recorded hash goes dead moments later, and a fallback that reads a dead
+   * session as "unfinished" would make every spent code reusable by its owner
+   * forever. Clearing on success is what keeps single-use intact.
+   */
+  clearResumableVerification(userId: string, codeHash: string): Promise<void>;
   // --- WebAuthn credentials ---
   /** UPSERT by `credentialId` — counter/last-used updates re-add the credential. */
   addWebauthn(cred: StoredWebauthnCredential): Promise<void>;
@@ -195,6 +207,16 @@ export interface IdentityStore {
   setDeletion(req: StoredDeletionRequest): Promise<void>;
   /** Grace-period deletion requests whose purge instant has passed (scheduler). */
   duePurgeDeletions(now: number): Promise<StoredDeletionRequest[]>;
+  /**
+   * EVERY grace-period request, due or not — the reconciliation set.
+   *
+   * A deletion request commits before its session revoke (only one of the two
+   * can be retried), and the revoke can fail. The client cannot retry it: the
+   * same commit deactivates the account, so `authMiddleware` refuses every route
+   * that is not deletion-pending-aware. The row itself is therefore the durable
+   * record of unfinished work, and the sweep finishes it.
+   */
+  pendingDeletions(): Promise<StoredDeletionRequest[]>;
   // --- Lifecycle ---
   /** Hard-remove every trace of a user (tests / hard purge). */
   purgeUser(userId: string): Promise<void>;
@@ -318,6 +340,16 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     if (!auth) return null;
     const updated = { ...auth, ...patch };
     this.#auth.set(userId, updated);
+    // A FACTOR RESET INVALIDATES EVERY PENDING RESUME — see the Drizzle twin: a
+    // continuation is about the factor it was issued for, and replacing the code
+    // set ends that factor. Without this an old session could present its
+    // already-spent old code after a re-enrollment and be verified against the
+    // NEW one.
+    if (patch.recoveryCodeHashes !== undefined) {
+      for (const key of [...this.#pendingVerifications.keys()]) {
+        if (key.startsWith(`${userId}:`)) this.#pendingVerifications.delete(key);
+      }
+    }
     return updated;
   }
 
@@ -344,11 +376,14 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
   async findResumableVerification(
     userId: string,
     codeHash: string,
-    verificationSessionHash: string,
-  ): Promise<{ remaining: number } | null> {
+  ): Promise<{ remaining: number; verificationSessionHash: string } | null> {
     const pending = this.#pendingVerifications.get(`${userId}:${codeHash}`);
-    if (pending === undefined || pending.sessionHash !== verificationSessionHash) return null;
-    return { remaining: pending.remaining };
+    if (pending === undefined) return null;
+    return { remaining: pending.remaining, verificationSessionHash: pending.sessionHash };
+  }
+
+  async clearResumableVerification(userId: string, codeHash: string): Promise<void> {
+    this.#pendingVerifications.delete(`${userId}:${codeHash}`);
   }
 
   // --- WebAuthn credentials ------------------------------------------------
@@ -444,6 +479,10 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     return [...this.#deletions.values()].filter(
       (d) => d.state === 'grace_period' && Date.parse(d.purgeAt) <= now,
     );
+  }
+
+  async pendingDeletions(): Promise<StoredDeletionRequest[]> {
+    return [...this.#deletions.values()].filter((d) => d.state === 'grace_period');
   }
 
   /** Hard-remove every trace of a user (used by tests / hard purge). */

@@ -244,20 +244,25 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
     // consumption committed. (The code above was spent by raw SQL standing in
     // for a concurrent winner, so it carries no session — which is exactly what
     // `null` should say.)
-    expect(await store.findResumableVerification(userId, target, 'session-hash-a')).toBeNull();
+    expect(await store.findResumableVerification(userId, target)).toBeNull();
     const second = codes[1] as string;
     expect(await store.consumeRecoveryCode(userId, second, 'session-hash-b')).toEqual({
       remaining: 1,
     });
-    expect(await store.findResumableVerification(userId, second, 'session-hash-b')).toEqual({
+    // The lookup reports WHICH session it was spent for; the route decides who
+    // may finish it (that session, or any of the user's once it is gone).
+    expect(await store.findResumableVerification(userId, second)).toEqual({
       remaining: 1,
+      verificationSessionHash: 'session-hash-b',
     });
-    // Not from any other session: the code grants MFA to exactly one.
-    expect(await store.findResumableVerification(userId, second, 'session-hash-a')).toBeNull();
-    // And an ACTIVE code has no verification to resume.
-    expect(
-      await store.findResumableVerification(userId, codes[2] as string, 'session-hash-b'),
-    ).toBeNull();
+    // An ACTIVE code has no verification to resume.
+    expect(await store.findResumableVerification(userId, codes[2] as string)).toBeNull();
+
+    // A FACTOR RESET clears every pending continuation: re-enrolling ends the
+    // factor the continuation was about, and without this an old session could
+    // present its already-spent old code and be verified against the NEW one.
+    await store.setAuth(userId, { recoveryCodeHashes: [sha256Hex('fresh-1')] });
+    expect(await store.findResumableVerification(userId, second)).toBeNull();
 
     // An unknown code and an unknown user are both "not active", never a throw.
     expect(

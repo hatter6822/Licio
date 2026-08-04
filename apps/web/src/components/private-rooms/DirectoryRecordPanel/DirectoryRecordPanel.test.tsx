@@ -492,6 +492,40 @@ describe('DirectoryRecordPanel', () => {
     });
   });
 
+  it('withholds the LISTED choice from a restricted account', async () => {
+    // `POST /v1/private-rooms` refuses a listed creation with
+    // `account_restricted`, and the creation wizard already withholds the
+    // choice — so offering it here walked a sanctioned member into a
+    // deterministic refusal after the signing work, and left the two surfaces
+    // disagreeing about the same sanction.
+    ownsRecord = false;
+    useAuthStore.setState({
+      status: 'authenticated',
+      user: { id: 'u1', account_state: 'restricted' },
+    } as never);
+    let posted: Record<string, unknown> | null = null;
+    mockApi((url, init) => {
+      if (init?.method === 'POST' && typeof init.body === 'string' && !url.includes('csrf')) {
+        posted = JSON.parse(init.body) as Record<string, unknown>;
+      }
+      return {
+        room_server_id: ROOM_SERVER_ID,
+        stub_id: STUB.stubId,
+        bootstrap_endpoints: [],
+        created_at: '2026-08-02T00:00:00.000Z',
+      };
+    });
+    render(<DirectoryRecordPanel session={sessionDouble(undefined)} />);
+    await screen.findByText(/Licio holds no record of this room/i);
+    expect(screen.queryByLabelText(/also list this room publicly/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/cannot publish a public listing right now/i)).toBeInTheDocument();
+
+    // …and registration still works, unlisted.
+    await userEvent.click(screen.getByRole('button', { name: /store a bootstrap record/i }));
+    await screen.findByRole('status');
+    expect(posted).toMatchObject({ directory_mode: 'unlisted' });
+  });
+
   it('shows a member whose ACCOUNT does not own the record none of the controls', async () => {
     // Ownership is resolved against the current account, not against device
     // history: a private-room session survives a logout, so the next account to

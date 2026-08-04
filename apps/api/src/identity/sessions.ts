@@ -243,13 +243,22 @@ export async function markStepUp(
  * steward session is reduced-capability until this is set; it grants steward
  * capabilities only afterwards.  Also refreshes the step-up clock.
  */
+/**
+ * Grant the session its MFA-verified standing.
+ *
+ * Returns FALSE when there is no such session — expired, or revoked between the
+ * middleware's check and this call. Silently returning made the caller report
+ * `mfa_verified` for a grant that did not happen, which on the recovery-code
+ * path meant a spent code, a success in the audit trail, and a session that was
+ * never verified.
+ */
 export async function markMfaVerified(
   store: SessionStore,
   tokenHash: string,
   now: number = Date.now(),
-): Promise<void> {
+): Promise<boolean> {
   const stored = await store.get(tokenHash);
-  if (!stored) return;
+  if (!stored) return false;
   await store.put(tokenHash, {
     ...stored,
     record: {
@@ -258,6 +267,7 @@ export async function markMfaVerified(
       auth_assurance: { level: 'full', last_verified_at: iso(now) },
     },
   });
+  return true;
 }
 
 /** Revoke all of a user's sessions except `exceptHash`; returns the revoked count. */

@@ -170,6 +170,28 @@ export async function sweepExpiredExports(
  *   the user (all personal data removed, FK stub kept) → write a
  *   deletion_complete audit entry carrying only a HASHED user id.
  */
+/**
+ * Finish the session revocations a deletion request could not complete.
+ *
+ * The request commits BEFORE the revoke — only one of the two can be retried,
+ * and only the record cannot be reconstructed — so a Redis fault leaves an
+ * account deactivated with sessions still present. The client cannot retry it:
+ * the same commit deactivated the account, so `authMiddleware` refuses every
+ * route that is not deletion-pending-aware, which made the endpoint's "please
+ * retry" advice unreachable.
+ *
+ * The row IS the durable job. Revoking is idempotent and costs one list per
+ * pending request, so this converges without any new state, and the endpoint can
+ * promise something true.
+ */
+export async function reconcileDeletionRevocations(services: IdentityServices): Promise<number> {
+  let revoked = 0;
+  for (const req of await services.store.pendingDeletions()) {
+    revoked += await revokeAllForUser(services.sessions, req.userId);
+  }
+  return revoked;
+}
+
 export async function runDeletionPurge(
   services: IdentityServices,
   now: number = Date.now(),
@@ -240,7 +262,10 @@ export const PRIVACY_JOB_LEASE = 'privacy_hourly';
  */
 export function startPrivacyScheduler(
   services: IdentityServices,
-  onError: (err: unknown, task: 'sweep' | 'purge' | 'lease') => void = () => {},
+  onError: (
+    err: unknown,
+    task: 'sweep' | 'purge' | 'lease' | 'revoke_reconcile',
+  ) => void = () => {},
   intervalMs: number = PRIVACY_SCHEDULER_INTERVAL_MS,
   runner?: { lease: JobLeaseStore; holder?: string },
 ): () => void {
@@ -264,6 +289,11 @@ export function startPrivacyScheduler(
       await runDeletionPurge(services);
     } catch (err) {
       onError(err, 'purge');
+    }
+    try {
+      await reconcileDeletionRevocations(services);
+    } catch (err) {
+      onError(err, 'revoke_reconcile');
     }
   };
   const timer = setInterval(() => void tick(), intervalMs);

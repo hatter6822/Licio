@@ -122,6 +122,92 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
     expect(second.verdict.reason).toBe('exhausted');
   });
 
+  it('admits ONCE when two managers race the same single-use invite (two tabs)', async () => {
+    // `runExclusive` is a per-INSTANCE mutex, so the same room open in two tabs
+    // gives two managers that never see each other. Reading the counter, doing
+    // the whole admit, and charging the use at the end let both read
+    // `usesSoFar = 0`, both pass the §10.3 budget check, and both add a member
+    // through their own MLS commit — two members on one use, and a pair of
+    // divergent branches. The budget is claimed in one conditional IndexedDB
+    // write now, which IS shared across tabs.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'One-shot Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const { request } = await prep.complete(
+      inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+
+    // A SECOND manager over the same persisted room — the second tab. Its
+    // op-lock is its own, so nothing but the shared store can order these.
+    const secondTab = await PrivateRoomSession.load(founder.roomId);
+    if (secondTab === null) throw new Error('expected the room to reopen');
+
+    const [a, b] = await Promise.all([
+      founder.admitJoinRequest(invite, request),
+      secondTab.admitJoinRequest(invite, request),
+    ]);
+    const accepted = [a, b].filter((r) => r.verdict.ok);
+    expect(accepted).toHaveLength(1);
+    const refused = [a, b].find((r) => !r.verdict.ok);
+    if (refused === undefined || refused.verdict.ok) throw new Error('expected one refusal');
+    expect(refused.verdict.reason).toBe('exhausted');
+  });
+
+  it('hands the claim back when the request is REJECTED', async () => {
+    // Claiming first is what makes the budget a budget — but a claim whose
+    // admission does not complete would silently spend a single-use invite and
+    // leave the invitee nothing to retry against, which is the guarantee the
+    // charge-at-the-end ordering used to provide. A rejected request is the
+    // ordinary way that happens.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'One-shot Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const target = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    // A request built from a DIFFERENT invite: it cannot prove it holds this
+    // one, so the verdict refuses it after the budget has been claimed.
+    const other = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const { request: wrong } = await prep.complete(
+      other.inviteUrl.slice(other.inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const refused = await founder.admitJoinRequest(target.invite, wrong);
+    expect(refused.verdict.ok).toBe(false);
+
+    // The use went back, so the invite still admits the RIGHT request.
+    const { request } = await prep.complete(
+      target.inviteUrl.slice(target.inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const accepted = await founder.admitJoinRequest(target.invite, request);
+    expect(accepted.verdict.ok).toBe(true);
+  });
+
   it('removeMember rotates the epoch — the evicted device cannot read post-removal content (§10.9)', async () => {
     const mkStore = await storeFactory();
     const founder = await PrivateRoomSession.create({

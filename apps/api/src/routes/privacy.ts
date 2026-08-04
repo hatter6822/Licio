@@ -357,19 +357,28 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
             // LOUD: the deletion is recorded and the account deactivated, so a
             // session store that did not answer is a discrepancy an operator has
             // to be able to see — not something to swallow behind a 200.
+            // FINISHED BY THE SWEEP, not by a client retry.
+            //
+            // The same commit deactivated this account, so `authMiddleware`
+            // refuses every route that is not deletion-pending-aware — the
+            // caller cannot reach this endpoint again, and telling them to try
+            // was advice they could not take. The grace-period row IS the
+            // durable record of the unfinished revoke, and
+            // `reconcileDeletionRevocations` completes it on the next sweep.
             privacyLogger.error(
               {
                 auditAction: 'deletion_revoke_incomplete',
                 userId: auth.userId,
                 message: error instanceof Error ? error.message : 'unknown',
               },
-              'a deletion request is committed with sessions that may still be live',
+              'a deletion request is committed with sessions still live; the sweep will end them',
             );
             return c.json(
               {
                 error: {
                   code: 'revoke_incomplete',
-                  message: 'The request was recorded but sessions could not be ended.',
+                  message:
+                    'Your deletion request was recorded. Existing sessions could not be ended just now and will be ended shortly.',
                 },
               },
               503,

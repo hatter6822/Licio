@@ -40,7 +40,7 @@ import {
   type SecurityActivityEntry,
   type StewardRoleId,
 } from '@licio/shared';
-import { and, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import {
   type AuditEntryInput,
   type AuditStore,
@@ -335,6 +335,24 @@ export class DrizzleIdentityStore implements IdentityStore {
               ),
             );
         }
+        // A FACTOR RESET INVALIDATES EVERY PENDING RESUME.
+        //
+        // `verification_session_hash` marks a spent code whose grant did not
+        // land, so it can be completed later. Nothing bound it to an enrollment
+        // GENERATION: a second verified session could disable MFA and enrol a
+        // fresh secret with fresh codes, and the old session could then present
+        // its already-spent OLD code and be granted verification against the NEW
+        // factor. Replacing the code set is exactly the moment every outstanding
+        // continuation stops being about the factor it was issued for.
+        await tx
+          .update(mfaRecoveryCodes)
+          .set({ verificationSessionHash: null })
+          .where(
+            and(
+              eq(mfaRecoveryCodes.userId, userId),
+              isNotNull(mfaRecoveryCodes.verificationSessionHash),
+            ),
+          );
         const known = new Set(active);
         const fresh = [...next].filter((hex) => !known.has(hex));
         if (fresh.length > 0) {
@@ -388,23 +406,36 @@ export class DrizzleIdentityStore implements IdentityStore {
   async findResumableVerification(
     userId: string,
     codeHash: string,
-    verificationSessionHash: string,
-  ): Promise<{ remaining: number } | null> {
+  ): Promise<{ remaining: number; verificationSessionHash: string } | null> {
     if (!isUuid(userId)) return null;
     const rows = await this.#db
-      .select({ id: mfaRecoveryCodes.id })
+      .select({ sessionHash: mfaRecoveryCodes.verificationSessionHash })
       .from(mfaRecoveryCodes)
       .where(
         and(
           eq(mfaRecoveryCodes.userId, userId),
           eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
-          eq(mfaRecoveryCodes.verificationSessionHash, verificationSessionHash),
+          isNotNull(mfaRecoveryCodes.verificationSessionHash),
         ),
       )
       .limit(1);
-    if (rows.length === 0) return null;
+    const sessionHash = rows[0]?.sessionHash;
+    if (sessionHash === undefined || sessionHash === null) return null;
     const remaining = await this.#activeRecoveryCodes(this.#db, userId);
-    return { remaining: remaining.length };
+    return { remaining: remaining.length, verificationSessionHash: sessionHash };
+  }
+
+  async clearResumableVerification(userId: string, codeHash: string): Promise<void> {
+    if (!isUuid(userId)) return;
+    await this.#db
+      .update(mfaRecoveryCodes)
+      .set({ verificationSessionHash: null })
+      .where(
+        and(
+          eq(mfaRecoveryCodes.userId, userId),
+          eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
+        ),
+      );
   }
 
   /** Active (unconsumed) recovery-code hashes, as hex strings. */
@@ -620,6 +651,14 @@ export class DrizzleIdentityStore implements IdentityStore {
           lte(deletionRequests.purgeAt, new Date(now)),
         ),
       );
+    return rows.map(rowToDeletion);
+  }
+
+  async pendingDeletions(): Promise<StoredDeletionRequest[]> {
+    const rows = await this.#db
+      .select()
+      .from(deletionRequests)
+      .where(eq(deletionRequests.state, 'grace_period'));
     return rows.map(rowToDeletion);
   }
 

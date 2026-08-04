@@ -14,7 +14,7 @@ import {
   setIdentityServices,
 } from '../identity/services.js';
 import { createSession, type StoredSession } from '../identity/sessions.js';
-import { base32Decode, totp } from '../identity/totp.js';
+import { base32Decode, hashRecoveryCode, totp } from '../identity/totp.js';
 import { signupCaptcha } from './pow-test-helpers.js';
 
 const CONFIG: IdentityConfig = {
@@ -377,6 +377,67 @@ describe('TOTP MFA enroll → confirm → verify', () => {
       body: JSON.stringify({ code: recovery }),
     });
     expect(afterRotation.status).toBe(400);
+  });
+
+  it('does NOT let a pending code survive a factor RESET', async () => {
+    // A continuation is about the factor it was issued for. Nothing bound it to
+    // an enrollment generation, so a second verified session could disable MFA
+    // and enrol a fresh secret with fresh codes — and the old session could then
+    // present its already-spent OLD code and be verified against the NEW factor.
+    const { app, sid } = await signup('mfareset');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const sid2 = cookie(confirm, '__Host-sid');
+    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
+      .recovery_codes[0] as string;
+    const userId = (await services.sessions.get(sha256Hex(sid2.split('=')[1] as string)))?.record
+      .user_id as string;
+    const { token: sid3 } = await createSession(services.sessions, {
+      userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'test',
+      rememberMe: false,
+    });
+
+    // The grant fails after the unit commits: the code is spent and pending.
+    const realPut = services.sessions.put.bind(services.sessions);
+    let failed = false;
+    services.sessions.put = async (tokenHash: string, record: StoredSession) => {
+      if (!failed && record.record.mfa_verified === true) {
+        failed = true;
+        throw new Error('session store unavailable');
+      }
+      return realPut(tokenHash, record);
+    };
+    await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${sid3}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    services.sessions.put = realPut;
+
+    // …then MFA is re-enrolled from elsewhere, which replaces the code set.
+    await services.store.setAuth(userId, {
+      mfaEnabled: true,
+      recoveryCodeHashes: [hashRecoveryCode('brand-new-code')],
+    });
+
+    // The old code is no longer a way in, spent or not.
+    const stale = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${sid3}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    expect(stale.status).toBe(400);
+    expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
   });
 
   it('records a REJECTED attempt as a failure, not as a verification', async () => {
