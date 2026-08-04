@@ -149,7 +149,28 @@ export interface IdentityStore {
    * burns the code without granting access — worst on the last one, where it
    * costs the account its remaining way in.
    */
-  consumeRecoveryCode(userId: string, codeHash: string): Promise<{ remaining: number } | null>;
+  consumeRecoveryCode(
+    userId: string,
+    codeHash: string,
+    /** The session this code is being spent to verify, so the verification can
+     *  be RESUMED if the (Redis) grant fails after this commits. Without it the
+     *  last recovery code is consumed by a fault on our side and the account is
+     *  locked out with no retry that can work. */
+    verificationSessionHash: string,
+  ): Promise<{ remaining: number } | null>;
+  /**
+   * A code already SPENT for this session, whose verification did not finish.
+   *
+   * The resume half of `consumeRecoveryCode`: a retry presenting the same code
+   * from the same session gets its grant re-attempted rather than being told the
+   * code is invalid. Single-use is unchanged — the code grants MFA to exactly
+   * one session, and it is the session hash that says which.
+   */
+  findResumableVerification(
+    userId: string,
+    codeHash: string,
+    verificationSessionHash: string,
+  ): Promise<{ remaining: number } | null>;
   // --- WebAuthn credentials ---
   /** UPSERT by `credentialId` — counter/last-used updates re-add the credential. */
   addWebauthn(cred: StoredWebauthnCredential): Promise<void>;
@@ -186,6 +207,9 @@ export interface IdentityStore {
 export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
   readonly #users = new Map<string, StoredUser>();
   readonly #auth = new Map<string, StoredUserAuth>();
+  /** `${userId}:${codeHash}` → the session a spent code was spent to verify.
+   *  The in-memory twin of `mfa_recovery_codes.verification_session_hash`. */
+  readonly #pendingVerifications = new Map<string, { sessionHash: string; remaining: number }>();
   readonly #webauthn = new Map<string, StoredWebauthnCredential>();
   readonly #walletAuth = new Map<string, StoredWalletAuthCredential>();
   readonly #exportJobs = new Map<string, StoredExportJob>();
@@ -204,6 +228,7 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     const undo = [
       mapRollback(this.#users),
       mapRollback(this.#auth),
+      mapRollback(this.#pendingVerifications),
       mapRollback(this.#webauthn),
       mapRollback(this.#walletAuth),
       mapRollback(this.#exportJobs),
@@ -299,6 +324,7 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
   async consumeRecoveryCode(
     userId: string,
     codeHash: string,
+    verificationSessionHash: string,
   ): Promise<{ remaining: number } | null> {
     // Test and write with NO `await` between them — on a single-threaded
     // runtime that is the same guarantee the conditional UPDATE gives.
@@ -308,7 +334,21 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     if (idx < 0) return null;
     const remaining = auth.recoveryCodeHashes.filter((_, i) => i !== idx);
     this.#auth.set(userId, { ...auth, recoveryCodeHashes: remaining });
+    this.#pendingVerifications.set(`${userId}:${codeHash}`, {
+      sessionHash: verificationSessionHash,
+      remaining: remaining.length,
+    });
     return { remaining: remaining.length };
+  }
+
+  async findResumableVerification(
+    userId: string,
+    codeHash: string,
+    verificationSessionHash: string,
+  ): Promise<{ remaining: number } | null> {
+    const pending = this.#pendingVerifications.get(`${userId}:${codeHash}`);
+    if (pending === undefined || pending.sessionHash !== verificationSessionHash) return null;
+    return { remaining: pending.remaining };
   }
 
   // --- WebAuthn credentials ------------------------------------------------

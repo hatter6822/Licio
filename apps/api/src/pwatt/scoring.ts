@@ -36,8 +36,9 @@ import {
 } from '@licio/shared';
 import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
-import type { AggregationWindowSize } from '../events/stores.js';
+import type { AggregationWindowSize, ItemSafetyStateStore } from '../events/stores.js';
 import { PRIVACY_BUCKET, PSEUDONYMOUS_USER_ID, type SignalLedgerRecord } from '../events/stores.js';
+import type { AuditEntryInput } from '../identity/audit.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { StoredUser } from '../identity/store.js';
 import {
@@ -772,13 +773,29 @@ export async function resolveItemSafetyState(
   itemId: string,
   action: 'clear' | 'remove',
   actor = 'system:moderation',
+  /**
+   * The unit's own handles, when the caller holds them.
+   *
+   * Lifting a freeze is a durable decision that belongs with whatever decided
+   * it: called from inside the MFCI resolution unit with the process-wide
+   * services, the clear committed on its own, so a later failure rolled the case
+   * back while the target stayed unfrozen — and the retry could no longer make
+   * the same transition. Passing the handles in is what puts the two on one
+   * commit; the event emission below stays outside either way.
+   */
+  bound?: {
+    safetyStore: ItemSafetyStateStore;
+    audit: (input: AuditEntryInput) => Promise<unknown>;
+  },
 ): Promise<{ ok: boolean; reason?: string }> {
-  const current = await events.safetyStore.get(itemId);
+  const safetyStore = bound?.safetyStore ?? events.safetyStore;
+  const appendAudit = bound?.audit ?? ((input: AuditEntryInput) => identity.audit.append(input));
+  const current = await safetyStore.get(itemId);
   const state = current?.safetyState ?? 'normal';
   const transition = transitionItemSafetyState(state, action);
   if (!transition.ok) return { ok: false, reason: transition.reason };
   const stayFrozen = transition.next === 'frozen';
-  await events.safetyStore.set({
+  await safetyStore.set({
     itemId,
     safetyState: transition.next,
     frozenScore: stayFrozen ? (current?.frozenScore ?? null) : null,
@@ -788,7 +805,7 @@ export async function resolveItemSafetyState(
     updatedBy: actor,
     updatedAt: new Date(events.now()).toISOString(),
   });
-  await identity.audit.append({
+  await appendAudit({
     actorUserId: null,
     eventType: 'safety_state_change',
     targetRef: itemId,

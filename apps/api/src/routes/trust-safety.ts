@@ -255,12 +255,22 @@ export function createTrustSafetyRoutes() {
             // at the case trail took away the only path that could. The capture
             // is idempotent per case, so this costs one read once the row is
             // there.
+            // THE STORED TARGET, never the retry's: a replay has skipped every
+            // target check, so the body it arrives with is unvalidated input.
+            // Keyed on the request instead, a retry reusing a committed
+            // operation id with a different `target_id` could attach one room's
+            // listing to another room's case — or to an account case, which has
+            // no listing at all.
+            const replayTarget = replay.targetType === 'room' ? replay.targetId : null;
             await captureListingEvidence(mod, {
-              enabled: request.target_type === 'room',
+              enabled: replayTarget !== null,
               caseId: replay.caseId,
-              targetId: request.target_id,
+              targetId: replayTarget ?? '',
               reportedAt: replay.response.created_at,
-              listing: await getPrivateRoomStubService().listingSnapshot(request.target_id),
+              listing:
+                replayTarget === null
+                  ? null
+                  : await getPrivateRoomStubService().listingSnapshot(replayTarget),
             });
             return c.json(reportCreatedResponseSchema.parse(replay.response), 200);
           }

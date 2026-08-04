@@ -205,7 +205,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           );
           if (matched !== undefined) {
             const spent = await finishMfa(services, auth.userId, auth.tokenHash, c, (tx) =>
-              tx.store.consumeRecoveryCode(auth.userId, matched),
+              tx.store.consumeRecoveryCode(auth.userId, matched, auth.tokenHash),
             );
             // Lost the race — another request spent this code between the read
             // and the write. Nothing was consumed and nothing was recorded.
@@ -214,6 +214,47 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
               status: 'mfa_verified' as const,
               recovery_used: true,
               recovery_remaining: spent.remaining,
+            });
+          }
+
+          // …OR A VERIFICATION TO RESUME.
+          //
+          // The consumption commits before the Redis grant (a privilege must
+          // not be granted ahead of the record of it), which leaves one case the
+          // ordering cannot fix: the unit commits and the grant then fails. On
+          // any code but the last that costs a retry with another one; on the
+          // LAST it costs the account, permanently, for a fault on our side.
+          //
+          // So a code already spent FOR THIS SESSION resumes its own
+          // verification rather than being called invalid. Single-use is
+          // untouched: the code grants MFA to exactly one session, the session
+          // hash says which, and a holder presenting it from anywhere else still
+          // gets nothing. No second consumption and no second `mfa_verify` row —
+          // this is the same verification finishing, not a new one.
+          //
+          // The window closes ITSELF: completing rotates the session id on the
+          // privilege change, so the stored hash stops matching the moment the
+          // grant lands. A spent code is therefore resumable only between the
+          // commit that spent it and the completion it was spent for.
+          const resumable = await services.store.findResumableVerification(
+            auth.userId,
+            presentedHash,
+            auth.tokenHash,
+          );
+          if (resumable !== null) {
+            await markMfaVerified(services.sessions, auth.tokenHash);
+            await services.otp.delete(attemptsKey(auth.userId));
+            const token = readSessionToken(c.req.header('cookie'));
+            const rotated = token ? await rotateSession(services.sessions, token) : null;
+            if (rotated) {
+              c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
+                append: true,
+              });
+            }
+            return c.json({
+              status: 'mfa_verified' as const,
+              recovery_used: true,
+              recovery_remaining: resumable.remaining,
             });
           }
 

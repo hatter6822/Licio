@@ -13,7 +13,7 @@ import {
   type IdentityServices,
   setIdentityServices,
 } from '../identity/services.js';
-import { createSession } from '../identity/sessions.js';
+import { createSession, type StoredSession } from '../identity/sessions.js';
 import { base32Decode, totp } from '../identity/totp.js';
 import { signupCaptcha } from './pow-test-helpers.js';
 
@@ -288,6 +288,95 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     // The session is STILL unverified: no privilege was granted by a request
     // whose record did not survive.
     expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
+  });
+
+  it('RESUMES a verification whose grant failed, so the last code is not lost', async () => {
+    // The consumption commits before the Redis grant, which is the right order
+    // — a privilege must not be granted ahead of the record of it. What that
+    // leaves is the unit committing and the grant then failing: on any code but
+    // the last, a retry with another one; on the LAST, the account, permanently,
+    // for a fault on our side. So the spent code resumes its own verification.
+    const { app, sid } = await signup('mfaresume');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
+      .recovery_codes[0] as string;
+    // A session that has NOT cleared MFA (the confirm rotated the other one).
+    const userId = (
+      await services.sessions.get(sha256Hex(cookie(confirm, '__Host-sid').split('=')[1] as string))
+    )?.record.user_id as string;
+    const { token: sid3 } = await createSession(services.sessions, {
+      userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'test',
+      rememberMe: false,
+    });
+
+    // The grant fails after the unit commits.
+    // `markMfaVerified` is a free function over the store's `put`, so the fault
+    // is injected there — the first write of the verified flag fails.
+    const realPut = services.sessions.put.bind(services.sessions);
+    let failed = false;
+    services.sessions.put = async (tokenHash: string, record: StoredSession) => {
+      if (!failed && record.record.mfa_verified === true) {
+        failed = true;
+        throw new Error('session store unavailable');
+      }
+      return realPut(tokenHash, record);
+    };
+    const attempt = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${sid3}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    services.sessions.put = realPut;
+    expect(attempt.status).toBeGreaterThanOrEqual(500);
+    expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
+
+    // The SAME code, from the SAME session, completes it.
+    const retry = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${sid3}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    expect(retry.status).toBe(200);
+    // The completion rotates the session id on the privilege change, exactly as
+    // an ordinary verification does, so the verified session is the rotated one.
+    expect(await sessionMfaVerified(cookie(retry, '__Host-sid'))).toBe(true);
+
+    // …and from ANY OTHER session it is still spent: the code grants MFA to
+    // exactly one session, which is what single-use means here.
+    const { token: sid4 } = await createSession(services.sessions, {
+      userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'other',
+      rememberMe: false,
+    });
+    const elsewhere = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${sid4}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    expect(elsewhere.status).toBe(400);
+
+    // …and not from the ROTATED session either: completing rotates the id on the
+    // privilege change, so the stored hash stops matching the moment the grant
+    // lands. The resume window is only ever between the commit that spent the
+    // code and the completion it was spent for.
+    const afterRotation = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(cookie(retry, '__Host-sid')),
+      body: JSON.stringify({ code: recovery }),
+    });
+    expect(afterRotation.status).toBe(400);
   });
 
   it('records a REJECTED attempt as a failure, not as a verification', async () => {

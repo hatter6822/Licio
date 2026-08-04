@@ -474,6 +474,14 @@ describe('JoinPanel — admit half', () => {
     // …and locked for the whole of it, so no edit can reach the in-flight call.
     await waitFor(() => expect(screen.getByLabelText(/paste the grant/i)).toBeDisabled());
     expect(screen.getByLabelText(/paste the invite link/i)).toBeDisabled();
+
+    // SETTLE before leaving. The completion is still in flight at the assertion
+    // above — that is the point of it — and a test that ends there lets React
+    // update a torn-down jsdom, which surfaces as an unhandled
+    // `window is not defined` and fails the whole run rather than this test.
+    await waitFor(() => expect(screen.getByRole('status')).toBeInTheDocument(), {
+      timeout: 10_000,
+    });
   });
 
   it('has no accessibility violations', async () => {

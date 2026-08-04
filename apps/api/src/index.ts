@@ -753,6 +753,9 @@ if (db) {
         // no second chance to write one.
         mfciCases: new DrizzleMfciCaseStore(tx),
         mfciRiskStates: new DrizzleMfciRiskStateStore(tx),
+        // Clearing an MFCI case LIFTS a safety freeze, so the freeze moves on
+        // the same handle as the resolution that decided it.
+        safety: new DrizzleItemSafetyStateStore(tx),
       }),
     );
 }

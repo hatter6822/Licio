@@ -274,12 +274,18 @@ export function createInvariantsAdminRoutes(
           // AND releases the held risk state through the analyst-override
           // evidence path (WS-H.3.4a: downward needs clearing or an override).
           if (action === 'cleared') {
+            // ON THIS UNIT'S HANDLES. Called with the process-wide services the
+            // clear committed on its own, so a failure in the risk-state write,
+            // the append, or the commit rolled the case back while the target
+            // stayed unfrozen — protection removed by a decision that did not
+            // happen, and a retry that can no longer make the same transition.
             await resolveItemSafetyState(
               resolveEvents(),
               identity,
               outcome.targetId,
               'clear',
               `steward:${auth.userId}`,
+              { safetyStore: tx.safety, audit: tx.audit },
             );
             const current = (await tx.mfciRiskStates.get(outcome.targetId))?.state ?? 'normal';
             const transition = nextRiskState(current, 0, invariants.config().mfciRiskThresholds, {

@@ -117,11 +117,30 @@ export async function findIdempotentReplay(
   services: ModerationServices,
   reporterUserId: string,
   localOperationId: string,
-): Promise<{ ok: true; response: ReportCreatedResponse; caseId: string } | null> {
+): Promise<{
+  ok: true;
+  response: ReportCreatedResponse;
+  caseId: string;
+  /** THE STORED target, not the retry's. A replay skips every target check, so
+   *  anything the caller re-sends is unvalidated: a retry that reuses a
+   *  committed operation id with a different `target_id` would otherwise let a
+   *  caller attach one room's listing evidence to another room's case, or to an
+   *  account case entirely. What the report was FILED about is the only version
+   *  of that fact this endpoint may act on. */
+  targetType: ModerationReportRecord['targetType'];
+  /** NULL after a right-to-erasure purge scrubbed the target id. */
+  targetId: string | null;
+} | null> {
   const byOp = await services.reports.findByOperationId(reporterUserId, localOperationId);
   if (!byOp) return null;
   services.metrics.increment('reports.idempotent_op');
-  return { ok: true, response: toResponse(byOp, true), caseId: byOp.caseId };
+  return {
+    ok: true,
+    response: toResponse(byOp, true),
+    caseId: byOp.caseId,
+    targetType: byOp.targetType,
+    targetId: byOp.targetId,
+  };
 }
 
 function toResponse(report: ModerationReportRecord, idempotent: boolean): ReportCreatedResponse {

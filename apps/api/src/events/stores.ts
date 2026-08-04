@@ -1023,8 +1023,14 @@ export interface ItemSafetyStateStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryItemSafetyStateStore implements ItemSafetyStateStore {
+export class InMemoryItemSafetyStateStore implements ItemSafetyStateStore, InMemoryRollback {
   readonly #rows = new Map<string, ItemSafetyRecord>();
+
+  /** The unit of work's undo: lifting a safety freeze is a durable decision that
+   *  commits with the record of the steward who made it. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
 
   async get(itemId: string): Promise<ItemSafetyRecord | null> {
     return this.#rows.get(itemId) ?? null;

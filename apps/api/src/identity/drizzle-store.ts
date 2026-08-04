@@ -355,6 +355,7 @@ export class DrizzleIdentityStore implements IdentityStore {
   async consumeRecoveryCode(
     userId: string,
     codeHash: string,
+    verificationSessionHash: string,
   ): Promise<{ remaining: number } | null> {
     if (!isUuid(userId)) return null;
     return this.#db.transaction(async (tx) => {
@@ -364,7 +365,10 @@ export class DrizzleIdentityStore implements IdentityStore {
       // code is not valid, which it no longer is.
       const spent = await tx
         .update(mfaRecoveryCodes)
-        .set({ usedAt: new Date() })
+        // The session rides the SAME statement as the consumption: a code spent
+        // with no note of what it was spent for is the lockout this column
+        // exists to prevent, and a second write could fail on its own.
+        .set({ usedAt: new Date(), verificationSessionHash })
         .where(
           and(
             eq(mfaRecoveryCodes.userId, userId),
@@ -379,6 +383,28 @@ export class DrizzleIdentityStore implements IdentityStore {
       const remaining = await this.#activeRecoveryCodes(tx, userId);
       return { remaining: remaining.length };
     });
+  }
+
+  async findResumableVerification(
+    userId: string,
+    codeHash: string,
+    verificationSessionHash: string,
+  ): Promise<{ remaining: number } | null> {
+    if (!isUuid(userId)) return null;
+    const rows = await this.#db
+      .select({ id: mfaRecoveryCodes.id })
+      .from(mfaRecoveryCodes)
+      .where(
+        and(
+          eq(mfaRecoveryCodes.userId, userId),
+          eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
+          eq(mfaRecoveryCodes.verificationSessionHash, verificationSessionHash),
+        ),
+      )
+      .limit(1);
+    if (rows.length === 0) return null;
+    const remaining = await this.#activeRecoveryCodes(this.#db, userId);
+    return { remaining: remaining.length };
   }
 
   /** Active (unconsumed) recovery-code hashes, as hex strings. */

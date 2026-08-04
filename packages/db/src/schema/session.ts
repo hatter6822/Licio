@@ -10,6 +10,7 @@
 //   • No IP and no location, ever — not even hashed (the §19.1 amendment removed
 //     the former `ip_hash` column): only a coarse device descriptor is recorded.
 //   • `user_auth` has NO password column — the schema cannot store a password.
+import { sql } from 'drizzle-orm';
 import { boolean, index, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { bytea } from './_custom.js';
 import { users } from './user.js';
@@ -71,9 +72,21 @@ export const mfaRecoveryCodes = pgTable(
       .references(() => users.userId, { onDelete: 'cascade' }),
     codeHash: bytea('code_hash').notNull(),
     usedAt: timestamp('used_at', { withTimezone: true }),
+    /** The session this code was spent to verify — see migration 0128. Set with
+     *  `used_at`, so a retry from that same session can resume a verification
+     *  whose Redis grant failed after the consumption committed. */
+    verificationSessionHash: text('verification_session_hash'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('mfa_recovery_user_idx').on(t.userId)],
+  (t) => [
+    index('mfa_recovery_user_idx').on(t.userId),
+    /** The resume lookup (migration 0128): a code spent for a session whose
+     *  verification did not finish. Partial, because only a pending row is ever
+     *  looked up this way. */
+    index('mfa_recovery_pending_idx')
+      .on(t.userId, t.codeHash)
+      .where(sql`${t.verificationSessionHash} IS NOT NULL`),
+  ],
 );
 
 export type SessionRow = typeof sessions.$inferSelect;

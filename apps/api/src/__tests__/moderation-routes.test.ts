@@ -1111,6 +1111,63 @@ describe('trust-safety route branches', () => {
     }
   });
 
+  it('a replay uses the STORED target, never the retry’s body', async () => {
+    // A replay skips every target check, so whatever the caller re-sends is
+    // unvalidated input. Keyed on the request, a retry reusing a committed
+    // operation id with a different `target_id` would attach room B's listing
+    // to room A's case — or to a case that is not about a room at all.
+    const { getPrivateRoomStubService, PrivateRoomStubService, setPrivateRoomStubService } =
+      await import('../private-rooms/service.js');
+    const previous = getPrivateRoomStubService();
+    const { InMemoryPrivateRoomStubStore } = await import('../private-rooms/stores.js');
+    const service = new PrivateRoomStubService(new InMemoryPrivateRoomStubStore());
+    const roomA = randomUUID();
+    const roomB = randomUUID();
+    service.isPubliclyListed = async () => true;
+    service.listingSnapshot = async (id: string) => ({
+      display_name: id === roomB ? 'ROOM B NAME' : 'room a name',
+      display_description: null,
+      updated_at: '2026-08-01T00:00:00.000Z',
+    });
+    setPrivateRoomStubService(service);
+    const mod = getModerationServices();
+    const chain = mod.auditChain.store;
+    const realAppend = chain.appendChained.bind(chain);
+    try {
+      const reporter = await seedUser({ handle: `rt${randomUUID().slice(0, 6)}` });
+      const body = reportBody({ target_type: 'room', target_id: roomA, content_kind: undefined });
+      // The first attempt commits the report and loses the evidence append, so
+      // the retry is the one that captures.
+      chain.appendChained = async (entry, seal) => {
+        if (entry.action === 'private_room_listing_reported') throw new Error('chain unavailable');
+        return realAppend(entry, seal);
+      };
+      expect((await app().request(post('/v1/reports', body, reporter.cookie))).status).toBe(201);
+      chain.appendChained = realAppend;
+
+      // The retry reuses the operation id but names a DIFFERENT room.
+      const retry = await app().request(
+        post('/v1/reports', { ...body, target_id: roomB }, reporter.cookie),
+      );
+      expect(retry.status).toBe(200);
+
+      const caseId = (await mod.cases.findOpenByTarget('room', roomA))?.caseId as string;
+      const evidence = await mod.audit.list({
+        caseId,
+        action: 'private_room_listing_reported',
+        limit: 1,
+      });
+      expect(evidence).toHaveLength(1);
+      // Room A's listing, on room A's case. Room B is never consulted.
+      expect(evidence[0]?.targetId).toBe(roomA);
+      expect(evidence[0]?.notes).toContain('room a name');
+      expect(evidence[0]?.notes).not.toContain('ROOM B NAME');
+    } finally {
+      chain.appendChained = realAppend;
+      setPrivateRoomStubService(previous);
+    }
+  });
+
   it('#12b records evidence for a listed room whose listing VANISHED before the capture', async () => {
     // The most urgent version of this report — filed, then the room delisted or
     // its record removed before the capture ran — was the one case that carried

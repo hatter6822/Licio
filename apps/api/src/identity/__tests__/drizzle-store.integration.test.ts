@@ -219,7 +219,7 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
     });
     // Give the winner its lock before the loser reads.
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const loser = store.consumeRecoveryCode(userId, target);
+    const loser = store.consumeRecoveryCode(userId, target, 'session-hash-a');
     await new Promise((resolve) => setTimeout(resolve, 50));
     release?.();
     await winner;
@@ -238,10 +238,33 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
     );
     expect(counts[0]).toMatchObject({ active: '2', used: '1' });
 
+    // …and a code spent THROUGH THE API can resume its own verification, from
+    // the session it was spent for and no other. This is what stops the last
+    // recovery code being lost to a Redis grant that failed after the
+    // consumption committed. (The code above was spent by raw SQL standing in
+    // for a concurrent winner, so it carries no session — which is exactly what
+    // `null` should say.)
+    expect(await store.findResumableVerification(userId, target, 'session-hash-a')).toBeNull();
+    const second = codes[1] as string;
+    expect(await store.consumeRecoveryCode(userId, second, 'session-hash-b')).toEqual({
+      remaining: 1,
+    });
+    expect(await store.findResumableVerification(userId, second, 'session-hash-b')).toEqual({
+      remaining: 1,
+    });
+    // Not from any other session: the code grants MFA to exactly one.
+    expect(await store.findResumableVerification(userId, second, 'session-hash-a')).toBeNull();
+    // And an ACTIVE code has no verification to resume.
+    expect(
+      await store.findResumableVerification(userId, codes[2] as string, 'session-hash-b'),
+    ).toBeNull();
+
     // An unknown code and an unknown user are both "not active", never a throw.
-    expect(await store.consumeRecoveryCode(userId, sha256Hex('never-issued'))).toBeNull();
-    expect(await store.consumeRecoveryCode(randomUUID(), target)).toBeNull();
-    expect(await store.consumeRecoveryCode('not-a-uuid', target)).toBeNull();
+    expect(
+      await store.consumeRecoveryCode(userId, sha256Hex('never-issued'), 'session-hash-a'),
+    ).toBeNull();
+    expect(await store.consumeRecoveryCode(randomUUID(), target, 'session-hash-a')).toBeNull();
+    expect(await store.consumeRecoveryCode('not-a-uuid', target, 'session-hash-a')).toBeNull();
   });
 
   // --- WebAuthn credentials -----------------------------------------------------

@@ -338,6 +338,74 @@ describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
     expect(again.status).toBe(404);
   });
 
+  it('leaves the freeze IN PLACE when the resolution fails to record', async () => {
+    // Clearing a case lifts a safety freeze. Called with the process-wide
+    // services the clear committed on its own, so an append failure rolled the
+    // case back while the target stayed unfrozen — protection removed by a
+    // decision that did not happen, and `resolve` is a compare-and-set, so the
+    // retry could no longer make the same transition.
+    //
+    // The two halves are covered separately, and this is the in-memory one: the
+    // twin's undo (the safety store's rollback registration). The PRODUCTION
+    // half is the binding — `tx.safety` is a `DrizzleItemSafetyStateStore` over
+    // the same transaction — and `unit-of-work-rollback.test.ts` is what refuses
+    // a tx surface carrying a store the unit cannot undo.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { storyId } = await seedStory(fixture);
+    const caseId = randomUUID();
+    await fixture.events.safetyStore.set({
+      itemId: storyId,
+      safetyState: 'frozen',
+      frozenScore: 1,
+      frozenActiveAttention: null,
+      frozenParticipation: null,
+      caseId,
+      updatedBy: 'system:test',
+      updatedAt: new Date().toISOString(),
+    });
+    await fixture.invariants.mfciCases.insert({
+      caseId,
+      targetType: 'story',
+      targetId: storyId,
+      riskState: 'high',
+      statistic: 'target_concentration',
+      mfciScore: 6,
+      pHat: 0.002,
+      sampleCount: 1000,
+      fixedMarginsRef: 'margins:test',
+      summary: 'Coordination signal',
+      appealSummary: 'What was detected: …',
+      status: 'open',
+      openedAt: new Date().toISOString(),
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+
+    // The unit's record fails.
+    const realAppend = fixture.identity.audit.append.bind(fixture.identity.audit);
+    fixture.identity.audit.append = async (entry, createdAt) => {
+      if (entry.eventType === 'mfci_case_action') throw new Error('audit unavailable');
+      return realAppend(entry, createdAt);
+    };
+    const resolved = await adminRequest(fixture, steward.cookie, `/mfci/cases/${caseId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'cleared' }),
+    });
+    fixture.identity.audit.append = realAppend;
+    expect(resolved.status).toBeGreaterThanOrEqual(500);
+
+    // The freeze is STILL ON and the case still open, so the retry can make the
+    // same transition.
+    expect((await fixture.events.safetyStore.get(storyId))?.safetyState).toBe('frozen');
+    const retried = await adminRequest(fixture, steward.cookie, `/mfci/cases/${caseId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'cleared' }),
+    });
+    expect(retried.status).toBe(200);
+    expect((await fixture.events.safetyStore.get(storyId))?.safetyState).toBe('normal');
+  });
+
   it('a fixed_margins_ref dereferences to the persisted conditioning (MFCI-4)', async () => {
     const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });

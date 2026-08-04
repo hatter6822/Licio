@@ -166,7 +166,15 @@ interfaces.
   A rejected attempt is `mfa_verify_failed`, distinct from the `mfa_verify` a
   success writes: the trail has to be able to answer "did this account clear
   MFA?", which it could not while a brute-force run and a sign-in produced
-  identical rows.
+  identical rows.  The session flag itself is granted AFTER the commit (a
+  privilege must not be handed out ahead of the record of it), and the
+  consumption records which session it was spent for
+  (`mfa_recovery_codes.verification_session_hash`, migration 0128) so that a
+  grant which fails after the commit can be RESUMED by presenting the same code
+  from the same session — otherwise the last recovery code is burned by a fault
+  on our side and the account is locked out.  Single-use is unchanged: the code
+  grants MFA to exactly one session, and completing rotates the session id, so
+  the resume window closes itself.
 
 WS-D endpoints rely on `SameSite=Strict` + the opaque session model + a per-flow
 `login_attempt_id` binding as the CSRF defense (so they are exempt from the WS-C

@@ -34,6 +34,7 @@ import {
 } from '@licio/invariants';
 import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
+import { InMemoryItemSafetyStateStore, type ItemSafetyStateStore } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
 import type { RoomStore } from '../forum/stores.js';
 import { type AuditEntryInput, InMemoryAuditStore } from '../identity/audit.js';
@@ -123,6 +124,10 @@ export interface InvariantTx {
    *  is no second chance to write that row. */
   readonly mfciCases: MfciCaseStore;
   readonly mfciRiskStates: MfciRiskStateStore;
+  /** WS-E item safety state, on this handle: CLEARING a case lifts a freeze,
+   *  and a freeze lifted by a resolution that rolled back is a target left
+   *  unprotected by a decision that did not happen. */
+  readonly safety: ItemSafetyStateStore;
 }
 
 export interface InvariantPlatformServices {
@@ -228,6 +233,9 @@ export function createInMemoryInvariantServices(
       get mfciRiskStates(): MfciRiskStateStore {
         return services.mfciRiskStates;
       },
+      get safety(): ItemSafetyStateStore {
+        return events.safetyStore;
+      },
     },
     // The AUDIT belongs in the undo too, and its absence was the same silent
     // hole the ingestion stores had: `tx.audit` appends through the identity
@@ -242,6 +250,7 @@ export function createInMemoryInvariantServices(
       ...(services.mfciRiskStates instanceof InMemoryMfciRiskStateStore
         ? [services.mfciRiskStates]
         : []),
+      ...(events.safetyStore instanceof InMemoryItemSafetyStateStore ? [events.safetyStore] : []),
     ],
   );
 
