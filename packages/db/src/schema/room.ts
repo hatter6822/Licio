@@ -18,11 +18,10 @@ import {
   pgTable,
   primaryKey,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { tsvector } from './_custom.js';
+import { instant, tsvector } from './_custom.js';
 import { users } from './user.js';
 
 export const roomTypeEnum = pgEnum('room_type', [
@@ -123,7 +122,7 @@ export const rooms = pgTable(
     /** Per-type creation fields (initial_topics / geographic_scope / …). */
     typeMetadata: jsonb('type_metadata').$type<Record<string, unknown>>().notNull().default({}),
     /** Activity recency for listing — a timestamp, never a popularity count. */
-    latestActivityAt: timestamp('latest_activity_at', { withTimezone: true }),
+    latestActivityAt: instant('latest_activity_at'),
     // WS-S.9 (PRIVATE_SPEC §24, phase 5) — a Members-only server room is FROZEN
     // read-only during/after migration to a Private P2P replacement: all new
     // submissions/contributions are rejected (fail-closed at the service layer),
@@ -133,8 +132,8 @@ export const rooms = pgTable(
     // server row) the old room points at, surfaced honestly in the §8 disclosure.
     frozen: boolean('frozen').notNull().default(false),
     migratedToRoomId: text('migrated_to_room_id'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
     /**
      * WS-F.3.1a generated full-text column (unified public-content search):
      * name at weight A (the title analogue), description + charter summary at
@@ -221,7 +220,7 @@ export const roomStewards = pgTable(
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
     role: roomStewardRoleEnum('role').notNull(),
-    assignedAt: timestamp('assigned_at', { withTimezone: true }).notNull().defaultNow(),
+    assignedAt: instant('assigned_at').notNull().defaultNow(),
   },
   (t) => [
     /** A user may hold multiple roles in a room (WS-G.2.1 acceptance). */
@@ -255,8 +254,8 @@ export const roomSubscriptions = pgTable(
     lensId: uuid('lens_id').references(() => lenses.lensId, { onDelete: 'set null' }),
     /** Stable id so stewards can address PATCH /join-requests/:requestId. */
     requestId: uuid('request_id').notNull().defaultRandom(),
-    requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
-    joinedAt: timestamp('joined_at', { withTimezone: true }),
+    requestedAt: instant('requested_at').notNull().defaultNow(),
+    joinedAt: instant('joined_at'),
   },
   (t) => [
     primaryKey({ columns: [t.roomId, t.userId] }),
@@ -278,8 +277,8 @@ export const lenses = pgTable(
     name: text('name').notNull(),
     lensType: lensTypeEnum('lens_type').notNull(),
     description: text('description'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('lenses_room_type_uq').on(t.roomId, t.lensType),

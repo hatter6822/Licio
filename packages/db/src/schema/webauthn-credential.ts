@@ -3,8 +3,8 @@
 // WebAuthn credential storage (WS-D.1.2c).  Only PUBLIC keys are stored — Licio
 // never possesses private key material.  `counter` powers cloned-authenticator
 // detection (WS-D.1.3a).  A user may enrol multiple credentials (devices/keys).
-import { bigint, boolean, index, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
-import { bytea } from './_custom.js';
+import { bigint, boolean, index, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { bytea, instant } from './_custom.js';
 import { users } from './user.js';
 
 export const webauthnCredentials = pgTable(
@@ -20,8 +20,8 @@ export const webauthnCredentials = pgTable(
     deviceName: text('device_name'), // user-editable label
     transports: text('transports').array(), // ["internal","hybrid",...]
     backedUp: boolean('backed_up').notNull().default(false),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    lastUsedAt: instant('last_used_at'),
   },
   (t) => [index('webauthn_cred_user_idx').on(t.userId)],
 );

@@ -680,16 +680,18 @@ describe('moderation console (role-gated)', () => {
     expect(list.status).toBe(200);
     expect(((await list.json()) as { count: number }).count).toBe(1);
 
-    // A MALFORMED CURSOR RESTARTS THE PAGE, it does not fail the read.  `cursor` is a
-    // client-supplied string whose two parts are cast `::timestamptz` and `::uuid` in the
-    // store; this queue's decoder checked only that both were non-empty, so two arbitrary
-    // tokens reached Postgres and came back as a 500 on a plain GET.
+    // A MALFORMED CURSOR IS REFUSED — never a 500, and never a silent page 1.
+    // `cursor` is a client-supplied string whose two parts are cast
+    // `::timestamptz` and `::uuid` in the store, so the decoder must reject them
+    // (it once checked only non-emptiness and two arbitrary tokens reached
+    // Postgres as a 500). Restarting instead is the failure this queue shares
+    // with every paging surface: a client that appends re-appends page one and
+    // gets the same `next_cursor` back, duplicating rows on every scroll.
     const garbage = Buffer.from('yesterday|not-a-uuid', 'utf-8').toString('base64url');
     const bad = await app().request(
       get(`/v1/moderation/incidents?cursor=${garbage}`, integrity.cookie),
     );
-    expect(bad.status).toBe(200);
-    expect(((await bad.json()) as { count: number }).count).toBe(1);
+    expect(bad.status).toBe(400);
 
     const resolved = await app().request(
       post(
@@ -1008,6 +1010,206 @@ describe('trust-safety route branches', () => {
       (await app().request(post(`/v1/moderation/notices/${randomUUID()}/read`, {}, AUTHOR_COOKIE)))
         .status,
     ).toBe(404);
+  });
+
+  it('answers a lost-response RETRY even after the listing is gone', async () => {
+    // `submitReport` replays a stored report ahead of its own gates, but the
+    // route's target-existence check ran before it was ever called — and that
+    // check reads a world that moves. A listed-room report whose response was
+    // lost, retried after the owner delists, met `target_not_found`: an accepted
+    // report reported as a failure, by a check the stored row makes irrelevant,
+    // to an offline queue that cannot tell this from a real rejection.
+    const { getPrivateRoomStubService, PrivateRoomStubService, setPrivateRoomStubService } =
+      await import('../private-rooms/service.js');
+    const previous = getPrivateRoomStubService();
+    const { InMemoryPrivateRoomStubStore } = await import('../private-rooms/stores.js');
+    const service = new PrivateRoomStubService(new InMemoryPrivateRoomStubStore());
+    const roomServerId = randomUUID();
+    let listed = true;
+    service.isPubliclyListed = async () => listed;
+    service.listingSnapshot = async () => null;
+    setPrivateRoomStubService(service);
+    try {
+      const reporter = await seedUser({ handle: `rr${randomUUID().slice(0, 6)}` });
+      const body = reportBody({
+        target_type: 'room',
+        target_id: roomServerId,
+        content_kind: undefined,
+      });
+      const first = await app().request(post('/v1/reports', body, reporter.cookie));
+      expect(first.status).toBe(201);
+      const original = (await first.json()) as { report_id: string };
+
+      // …the owner delists (or removes) the record, then the client retries.
+      listed = false;
+      const retry = await app().request(post('/v1/reports', body, reporter.cookie));
+      expect(retry.status).toBe(200);
+      const replayed = (await retry.json()) as { report_id: string; idempotent: boolean };
+      expect(replayed.idempotent).toBe(true);
+      expect(replayed.report_id).toBe(original.report_id);
+    } finally {
+      setPrivateRoomStubService(previous);
+    }
+  });
+
+  it('a RETRY repairs listing evidence the first attempt failed to capture', async () => {
+    // The capture is best-effort — losing it must not un-take the report — so
+    // the case it failed for is exactly the case a retry should repair. Moving
+    // the idempotent replay ahead of the mutable target checks quietly took that
+    // path away: every retry returned the stored response without ever looking
+    // at the case trail, and the one path that could add the missing row stopped
+    // taking it.
+    const { getPrivateRoomStubService, PrivateRoomStubService, setPrivateRoomStubService } =
+      await import('../private-rooms/service.js');
+    const previous = getPrivateRoomStubService();
+    const { InMemoryPrivateRoomStubStore } = await import('../private-rooms/stores.js');
+    const service = new PrivateRoomStubService(new InMemoryPrivateRoomStubStore());
+    const roomServerId = randomUUID();
+    service.isPubliclyListed = async () => true;
+    service.listingSnapshot = async () => ({
+      display_name: 'Abusive name',
+      display_description: 'Abusive text',
+      updated_at: '2026-08-01T00:00:00.000Z',
+    });
+    setPrivateRoomStubService(service);
+    const mod = getModerationServices();
+    const chain = mod.auditChain.store;
+    const realAppend = chain.appendChained.bind(chain);
+    try {
+      const reporter = await seedUser({ handle: `re${randomUUID().slice(0, 6)}` });
+      const body = reportBody({
+        target_type: 'room',
+        target_id: roomServerId,
+        content_kind: undefined,
+      });
+      // The first attempt commits the report and LOSES the evidence append.
+      chain.appendChained = async (entry, seal) => {
+        if (entry.action === 'private_room_listing_reported') throw new Error('chain unavailable');
+        return realAppend(entry, seal);
+      };
+      const first = await app().request(post('/v1/reports', body, reporter.cookie));
+      chain.appendChained = realAppend;
+      expect(first.status).toBe(201);
+      const caseId = (await mod.cases.findOpenByTarget('room', roomServerId))?.caseId as string;
+      expect(
+        await mod.audit.list({ caseId, action: 'private_room_listing_reported', limit: 1 }),
+      ).toHaveLength(0);
+
+      // …the client's response was lost, so it retries the same operation id.
+      const retry = await app().request(post('/v1/reports', body, reporter.cookie));
+      expect(retry.status).toBe(200);
+      const evidence = await mod.audit.list({
+        caseId,
+        action: 'private_room_listing_reported',
+        limit: 1,
+      });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.notes).toContain('Abusive name');
+    } finally {
+      chain.appendChained = realAppend;
+      setPrivateRoomStubService(previous);
+    }
+  });
+
+  it('a replay uses the STORED target, never the retry’s body', async () => {
+    // A replay skips every target check, so whatever the caller re-sends is
+    // unvalidated input. Keyed on the request, a retry reusing a committed
+    // operation id with a different `target_id` would attach room B's listing
+    // to room A's case — or to a case that is not about a room at all.
+    const { getPrivateRoomStubService, PrivateRoomStubService, setPrivateRoomStubService } =
+      await import('../private-rooms/service.js');
+    const previous = getPrivateRoomStubService();
+    const { InMemoryPrivateRoomStubStore } = await import('../private-rooms/stores.js');
+    const service = new PrivateRoomStubService(new InMemoryPrivateRoomStubStore());
+    const roomA = randomUUID();
+    const roomB = randomUUID();
+    service.isPubliclyListed = async () => true;
+    service.listingSnapshot = async (id: string) => ({
+      display_name: id === roomB ? 'ROOM B NAME' : 'room a name',
+      display_description: null,
+      updated_at: '2026-08-01T00:00:00.000Z',
+    });
+    setPrivateRoomStubService(service);
+    const mod = getModerationServices();
+    const chain = mod.auditChain.store;
+    const realAppend = chain.appendChained.bind(chain);
+    try {
+      const reporter = await seedUser({ handle: `rt${randomUUID().slice(0, 6)}` });
+      const body = reportBody({ target_type: 'room', target_id: roomA, content_kind: undefined });
+      // The first attempt commits the report and loses the evidence append, so
+      // the retry is the one that captures.
+      chain.appendChained = async (entry, seal) => {
+        if (entry.action === 'private_room_listing_reported') throw new Error('chain unavailable');
+        return realAppend(entry, seal);
+      };
+      expect((await app().request(post('/v1/reports', body, reporter.cookie))).status).toBe(201);
+      chain.appendChained = realAppend;
+
+      // The retry reuses the operation id but names a DIFFERENT room.
+      const retry = await app().request(
+        post('/v1/reports', { ...body, target_id: roomB }, reporter.cookie),
+      );
+      expect(retry.status).toBe(200);
+
+      const caseId = (await mod.cases.findOpenByTarget('room', roomA))?.caseId as string;
+      const evidence = await mod.audit.list({
+        caseId,
+        action: 'private_room_listing_reported',
+        limit: 1,
+      });
+      expect(evidence).toHaveLength(1);
+      // Room A's listing, on room A's case. Room B is never consulted.
+      expect(evidence[0]?.targetId).toBe(roomA);
+      expect(evidence[0]?.notes).toContain('room a name');
+      expect(evidence[0]?.notes).not.toContain('ROOM B NAME');
+    } finally {
+      chain.appendChained = realAppend;
+      setPrivateRoomStubService(previous);
+    }
+  });
+
+  it('#12b records evidence for a listed room whose listing VANISHED before the capture', async () => {
+    // The most urgent version of this report — filed, then the room delisted or
+    // its record removed before the capture ran — was the one case that carried
+    // no evidence at all, because the append was keyed on the SNAPSHOT
+    // surviving. A reviewer cannot tell that from a report about nothing, so the
+    // trail says which it is.
+    const { getPrivateRoomStubService, PrivateRoomStubService, setPrivateRoomStubService } =
+      await import('../private-rooms/service.js');
+    // RESTORED after this case: the stub service is a process singleton, so a
+    // patched one left installed makes the next test's room report succeed
+    // against a room that does not exist.
+    const previous = getPrivateRoomStubService();
+    const { InMemoryPrivateRoomStubStore } = await import('../private-rooms/stores.js');
+    const service = new PrivateRoomStubService(new InMemoryPrivateRoomStubStore());
+    const roomServerId = randomUUID();
+    // Listed at validation time, gone by the time the snapshot is taken: the
+    // interleaving a single-threaded test cannot produce, stated directly.
+    service.isPubliclyListed = async () => true;
+    service.listingSnapshot = async () => null;
+    setPrivateRoomStubService(service);
+
+    const reporter = await seedUser({ handle: `rv${randomUUID().slice(0, 6)}` });
+    const res = await app().request(
+      post(
+        '/v1/reports',
+        reportBody({ target_type: 'room', target_id: roomServerId, content_kind: undefined }),
+        reporter.cookie,
+      ),
+    );
+    expect(res.status).toBe(201);
+
+    const mod = getModerationServices();
+    const [theCase] = await mod.cases.list({ limit: 1 });
+    const trail = await mod.audit.list({
+      caseId: theCase?.caseId ?? '',
+      action: 'private_room_listing_reported',
+      limit: 5,
+    });
+    expect(trail).toHaveLength(1);
+    expect(trail[0]?.notes).toMatch(/UNAVAILABLE/);
+    expect(trail[0]?.notes).toMatch(/delisted or its record removed/i);
+    setPrivateRoomStubService(previous);
   });
 
   it('#12 rejects a room report for a nonexistent room (404)', async () => {

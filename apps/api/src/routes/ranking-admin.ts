@@ -172,39 +172,54 @@ export function createRankingAdminRoutes(
               422,
             );
           }
-          const state = await engageKillSwitch(
-            ranking.events,
-            {
-              global: body.global,
-              surfaces: body.surfaces,
-              profileIds: body.profile_ids,
-              owner: body.owner,
-              triggerCondition: body.trigger_condition,
-              rollbackPath: body.rollback_path,
-              reviewDate: body.review_date,
-            },
-            new Date(ranking.now()).toISOString(),
-          );
-          await resolveIdentity().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'ranking_killswitch_change',
-            context: {
-              setting: 'engage',
-              new_value: JSON.stringify({
-                global: state.global,
-                surfaces: state.surfaces,
-                profile_ids: state.profile_ids,
-                reason: state.trigger_condition,
-              }).slice(0, 256),
-            },
+          // Turning ranking OFF and the record of who turned it off are one
+          // unit: an incident review reconstructs a kill switch from its trail,
+          // and a switch that moved with nothing accounting for it is the one
+          // event that review cannot explain.
+          const state = await resolveIdentity().transact(async (tx) => {
+            const engaged = await engageKillSwitch(
+              ranking.events,
+              {
+                global: body.global,
+                surfaces: body.surfaces,
+                profileIds: body.profile_ids,
+                owner: body.owner,
+                triggerCondition: body.trigger_condition,
+                rollbackPath: body.rollback_path,
+                reviewDate: body.review_date,
+              },
+              new Date(ranking.now()).toISOString(),
+              tx.config ?? ranking.events.configStore,
+            );
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'ranking_killswitch_change',
+              context: {
+                setting: 'engage',
+                new_value: JSON.stringify({
+                  global: engaged.global,
+                  surfaces: engaged.surfaces,
+                  profile_ids: engaged.profile_ids,
+                  reason: engaged.trigger_condition,
+                }).slice(0, 256),
+              },
+            });
+            return engaged;
           });
           return c.json({ engaged: true, state });
         }
-        await releaseKillSwitch(ranking.events, auth.userId);
-        await resolveIdentity().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'ranking_killswitch_change',
-          context: { setting: 'release' },
+        // RELEASE is the direction that matters most — ranking coming back on.
+        await resolveIdentity().transact(async (tx) => {
+          await releaseKillSwitch(
+            ranking.events,
+            auth.userId,
+            tx.config ?? ranking.events.configStore,
+          );
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'ranking_killswitch_change',
+            context: { setting: 'release' },
+          });
         });
         return c.json({ engaged: false });
       })
@@ -217,13 +232,16 @@ export function createRankingAdminRoutes(
         const problem = validateRankingConfigValue(key, value);
         if (problem !== null) return c.json(deny('invalid_config', problem), 422);
         const ranking = resolveRanking();
-        await ranking.events.configStore.set(key, value);
-        await ranking.reloadConfig();
-        await resolveIdentity().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'ranking_config_change',
-          context: { setting: key },
+        // One unit; the reload follows the commit.
+        await resolveIdentity().transact(async (tx) => {
+          await (tx.config ?? ranking.events.configStore).set(key, value);
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'ranking_config_change',
+            context: { setting: key },
+          });
         });
+        await ranking.reloadConfig();
         ranking.log('ranking.config.changed', { key });
         return c.json({ key, ok: true });
       })

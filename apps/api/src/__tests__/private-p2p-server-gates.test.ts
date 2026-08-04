@@ -57,6 +57,20 @@ async function makeP2pRoom(): Promise<string> {
   return roomId;
 }
 
+describe('WS-S §8/§21 — a p2p shell is not a server room surface', () => {
+  it('GET /v1/rooms/:roomId 404s a p2p room exactly as it 404s an unknown one', async () => {
+    // Without this the ordinary room API confirms an `unlisted` room exists and
+    // serves its shell, defeating the identical-404 contract the bootstrap
+    // endpoint enforces one route away.
+    const p2pRoom = await makeP2pRoom();
+    const found = await app().request(`/v1/rooms/${p2pRoom}`);
+    const unknown = await app().request('/v1/rooms/00000000-0000-4000-8000-999999999999');
+    expect(found.status).toBe(404);
+    expect(unknown.status).toBe(404);
+    expect(await found.json()).toEqual(await unknown.json());
+  });
+});
+
 describe('WS-S.1.3 submission guard', () => {
   it('rejects POST /v1/stories to a p2p room with 409 p2p_room_requires_client_sync', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity);
@@ -112,12 +126,16 @@ describe('WS-S.1.3 contribution guard (defense in depth)', () => {
 });
 
 describe('WS-S.1.3 room-feed guard', () => {
-  it('returns p2p_room_local_only for a p2p room feed (rendered locally, never served)', async () => {
+  it('answers the UNKNOWN-ROOM 404 for a p2p room feed, not a distinctive code', async () => {
+    // §23.5 allows a 404 or a `p2p_room_local_only` 409, and the distinctive
+    // one is an oracle: anyone holding or guessing an `unlisted`
+    // `room_server_id` could confirm the room exists here — the identical-404
+    // contract of the bootstrap read, undone through another endpoint.
     const roomId = await makeP2pRoom();
     const res = await app().request(`/v1/rooms/${roomId}/feed`);
-    expect(res.status).toBe(409);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe('p2p_room_local_only');
+    const unknown = await app().request('/v1/rooms/00000000-0000-4000-8000-999999999999/feed');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(await unknown.json());
   });
 });
 

@@ -43,6 +43,8 @@
 // and two bulk operations over overlapping sets in different orders would deadlock.  One
 // case per unit keeps a single lock order — case row, then the chain — which no cycle
 // can form across.
+
+import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import type { AuditWriteInput } from './audit.js';
 import type { ModerationContentPort } from './ports.js';
@@ -112,6 +114,29 @@ export interface ModerationTx {
    *  appeal is no longer pending and every retry answers `already_decided` — so its audit
    *  row has to commit with it or there is no second chance to write one. */
   readonly appeals: ModerationAppealStore;
+  /** The moderation runtime-config store. A live policy change with no record of
+   *  who made it is the same defect as an unrecorded enforcement — the console's
+   *  denylists and thresholds decide what the platform blocks. */
+  readonly config: PwattConfigStore;
+  /**
+   * The WS-S §21.4 directory DEMOTION, bound to this transaction.
+   *
+   * The only private-room write a moderation unit may make, and the only one it
+   * needs: §11.4 grants staff exactly one power over a P2P room, and this is it.
+   * It arrives from the composition root for the same reason `content` does —
+   * moderation does not reach into another domain to construct its store.
+   *
+   * It is here because ordering could not carry the guarantee alone. Writing the
+   * audit first refuses an unrecorded demotion, but leaves the opposite hole: a
+   * store failure after the append leaves a permanent record of a transition
+   * that never happened, and the compensating write is best-effort itself. With
+   * the demotion inside the unit, `audit` throwing takes it down and a store
+   * failure takes the record down — neither can land alone.
+   *
+   * Returns false when nothing matched, which is the raced case: the owner
+   * delisted first, so there was no listing for staff to remove.
+   */
+  delistListedRoom(roomServerId: string): Promise<boolean>;
   /**
    * Append this unit's audit record, chained, inside this transaction.
    *

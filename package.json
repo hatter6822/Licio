@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.9.14",
+  "version": "0.10.0",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@11.15.1",
@@ -44,6 +44,8 @@
     "check:workspace-deps": "tsx scripts/check-workspace-deps.ts",
     "check:policy": "tsx scripts/check-policy.ts",
     "check:sql-identifiers": "tsx scripts/check-sql-identifiers.ts",
+    "check:timestamp-precision": "tsx scripts/check-timestamp-precision.ts",
+    "check:audited-writes": "tsx scripts/check-audited-writes.ts",
     "check:prod-parity": "tsx scripts/check-prod-parity.ts",
     "check:csp-parity": "tsx scripts/check-csp-parity.ts",
     "check:dead-exports": "tsx scripts/check-dead-exports.ts",

@@ -35,6 +35,7 @@ import type {
   ReportTargetType,
   ReviewerAvailability,
 } from '@licio/shared';
+import { OPEN_CASE_STATUSES } from '@licio/shared';
 import {
   and,
   asc,
@@ -51,8 +52,9 @@ import {
   type SQL,
   sql,
 } from 'drizzle-orm';
+import { DrizzlePwattConfigStore } from '../events/drizzle-event-stores.js';
 import { keysetAfterRow } from '../lib/keyset.js';
-import { isUniqueViolation } from '../lib/pg-errors.js';
+import { isUniqueViolation, uniqueViolationConstraint } from '../lib/pg-errors.js';
 import { appendAudit } from './audit.js';
 import type { AuditChainDeps } from './audit-chain.js';
 import type {
@@ -82,10 +84,14 @@ import type {
   ReviewerStatusRecord,
   ReviewerStatusStore,
 } from './stores.js';
+import { DuplicateAuditKeyError } from './stores.js';
 import type { ModerationTransactor, ModerationTx } from './transactor.js';
 
 /** Binds the enforcement writes to one executor (see `ModerationTx.content`). */
 type TxEnforcement = (exec: Db) => ModerationTx['content'];
+/** The §21.4 directory demotion, bound to a transaction — supplied by the
+ *  composition root, which is the only place that knows both domains. */
+type TxDirectory = (exec: Db) => ModerationTx['delistListedRoom'];
 
 // The base client OR an open transaction, the same seam the forum/ingestion adapters
 // take.  Without it these stores can only ever run standalone — which is what kept the
@@ -183,6 +189,9 @@ function mapAudit(row: typeof moderationAudit.$inferSelect): ModerationAuditReco
     reportIds: row.reportIds,
     coApproverUserId: row.coApproverUserId,
     notes: row.notes,
+    // PROJECTED, because the MAC covers it: a verifier that never reads the
+    // key cannot notice one being cleared.
+    idempotencyKey: row.idempotencyKey,
     createdAt: iso(row.createdAt),
   };
 }
@@ -336,6 +345,32 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
       .update(moderationCases)
       .set({ enforcementDelayed: true, updatedAt: new Date() })
       .where(and(eq(moderationCases.caseId, caseId), eq(moderationCases.enforcementDelayed, false)))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapCase(row);
+  }
+
+  async resolveIfOpen(
+    caseId: string,
+    target: { targetType: ReportTargetType; targetId: string },
+  ): Promise<ModerationCaseRecord | null> {
+    // ONE STATEMENT, like `claimIfUnassigned` below: the whole precondition —
+    // this case, about THIS target, still open — lives in the UPDATE, so a case
+    // resolved between a caller's read and its write cannot be rewritten. Note
+    // what is NOT in the `set`: `resolvedActionId` stays as it is. A delist is
+    // not a `moderation_actions` row, so writing null there would erase a
+    // completed case's link to the enforcement that actually closed it.
+    const rows = await this.#db
+      .update(moderationCases)
+      .set({ status: 'resolved', updatedAt: new Date() })
+      .where(
+        and(
+          eq(moderationCases.caseId, caseId),
+          eq(moderationCases.targetType, target.targetType),
+          eq(moderationCases.targetId, target.targetId),
+          inArray(moderationCases.status, [...OPEN_CASE_STATUSES]),
+        ),
+      )
       .returning();
     const row = rows[0];
     return row === undefined ? null : mapCase(row);
@@ -969,10 +1004,22 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
           reportIds: full.reportIds,
           coApproverUserId: full.coApproverUserId,
           notes: full.notes,
+          idempotencyKey: full.idempotencyKey ?? null,
         });
       });
       return full;
     } catch (error) {
+      // A collision on the AT-MOST-ONCE key is settled, not contended: retrying
+      // it would spin until the budget ran out, since the winner's row is
+      // exactly what makes this one refuse. It is reported as its own outcome so
+      // the retry loop never sees it (`writeAudit` turns it into the no-op it
+      // is).
+      if (
+        isUniqueViolation(error) &&
+        uniqueViolationConstraint(error) === 'moderation_audit_idempotency_uq'
+      ) {
+        throw new DuplicateAuditKeyError(full.idempotencyKey ?? '');
+      }
       // A collision on the fork-proof parent/genesis indexes means a concurrent writer
       // took this slot: the caller re-reads the head and retries.  Anything else is a
       // real failure and must not be swallowed as contention.
@@ -1076,20 +1123,24 @@ export class DrizzleAccountBlockStore implements AccountBlockStore {
 
   async listByBlocker(
     blockerUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly blockId: string } | null,
     limit: number,
   ): Promise<AccountBlockRecord[]> {
     const c: SQL[] = [eq(accountBlocks.blockerUserId, blockerUserId)];
-    if (afterCreatedAt !== null) {
+    if (after !== null) {
+      // A ROW comparison over the same `(created_at, block_id)` the ORDER BY
+      // uses.  On the timestamp alone this dropped every block that shared a
+      // millisecond with the one the page ended on — permanently, and with a
+      // `next_cursor` that looked like it had worked.
       c.push(
-        sql`${accountBlocks.createdAt} < ${new Date(afterCreatedAt).toISOString()}::timestamptz`,
+        sql`(${accountBlocks.createdAt}, ${accountBlocks.blockId}) < (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.blockId}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(accountBlocks)
       .where(and(...c))
-      .orderBy(desc(accountBlocks.createdAt))
+      .orderBy(desc(accountBlocks.createdAt), desc(accountBlocks.blockId))
       .limit(Math.max(0, limit));
     return rows.map(mapBlock);
   }
@@ -1190,20 +1241,22 @@ export class DrizzleAccountMuteStore implements AccountMuteStore {
 
   async listByMuter(
     muterUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly muteId: string } | null,
     limit: number,
   ): Promise<AccountMuteRecord[]> {
     const c: SQL[] = [eq(accountMutes.muterUserId, muterUserId)];
-    if (afterCreatedAt !== null) {
+    if (after !== null) {
+      // See `listByBlocker` — the id half is what makes a shared millisecond a
+      // tie to break rather than a row to lose.
       c.push(
-        sql`${accountMutes.createdAt} < ${new Date(afterCreatedAt).toISOString()}::timestamptz`,
+        sql`(${accountMutes.createdAt}, ${accountMutes.muteId}) < (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.muteId}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(accountMutes)
       .where(and(...c))
-      .orderBy(desc(accountMutes.createdAt))
+      .orderBy(desc(accountMutes.createdAt), desc(accountMutes.muteId))
       .limit(Math.max(0, limit));
     return rows.map(mapMute);
   }
@@ -1428,20 +1481,24 @@ export class DrizzleModerationNoticeStore implements ModerationNoticeStore {
 
   async listByUser(
     userId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly noticeId: string } | null,
     limit: number,
   ): Promise<ModerationNoticeRecord[]> {
     const c: SQL[] = [eq(moderationNotices.userId, userId)];
-    if (afterCreatedAt !== null) {
+    if (after !== null) {
+      // A ROW COMPARISON, not a timestamp: several inserts in one transaction
+      // share a `now()`, and `created_at < cursor` then skips every row tied
+      // with the last one on the page — silently, and in an export that calls
+      // itself complete.
       c.push(
-        sql`${moderationNotices.createdAt} < ${new Date(afterCreatedAt).toISOString()}::timestamptz`,
+        sql`(${moderationNotices.createdAt}, ${moderationNotices.noticeId}) < (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.noticeId}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(moderationNotices)
       .where(and(...c))
-      .orderBy(desc(moderationNotices.createdAt))
+      .orderBy(desc(moderationNotices.createdAt), desc(moderationNotices.noticeId))
       .limit(Math.max(0, limit));
     return rows.map(mapNotice);
   }
@@ -1877,11 +1934,18 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
   readonly #db: Db;
   readonly #auditChain: () => AuditChainDeps;
   readonly #enforcementOver: TxEnforcement;
+  readonly #directoryOver: TxDirectory;
 
-  constructor(db: Db, auditChain: () => AuditChainDeps, enforcementOver: TxEnforcement) {
+  constructor(
+    db: Db,
+    auditChain: () => AuditChainDeps,
+    enforcementOver: TxEnforcement,
+    directoryOver: TxDirectory,
+  ) {
     this.#db = db;
     this.#auditChain = auditChain;
     this.#enforcementOver = enforcementOver;
+    this.#directoryOver = directoryOver;
   }
 
   async run<T>(work: (tx: ModerationTx) => Promise<T>): Promise<T> {
@@ -1892,6 +1956,9 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
         notices: new DrizzleModerationNoticeStore(tx),
         appeals: new DrizzleModerationAppealStore(tx),
         incidents: new DrizzleCoordinatedReportIncidentStore(tx),
+        // The console's runtime config, on this handle: one `pwatt_config`
+        // table, so a policy change and its record commit together.
+        config: new DrizzlePwattConfigStore(tx),
         // `hashtext` rather than a literal: the scope is a uuid, and the lock space is
         // shared, so it is namespaced to keep it clear of the chain key and of the
         // rendezvous store's own `hashtext` pairs.
@@ -1901,6 +1968,7 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
         // Supplied by the composition root: moderation declares that it needs the
         // enforcement bound to THIS handle, and never constructs another domain's store.
         content: this.#enforcementOver(tx),
+        delistListedRoom: this.#directoryOver(tx),
         audit: async (input) => {
           // SERIALISE the chain append, rather than colliding and retrying.
           //
@@ -1941,9 +2009,10 @@ export function createDrizzleModerationStores(
   db: Db,
   auditChain: () => AuditChainDeps,
   enforcementOver: TxEnforcement,
+  directoryOver: TxDirectory,
 ): DrizzleModerationStores {
   return {
-    transactor: new DrizzleModerationTransactor(db, auditChain, enforcementOver),
+    transactor: new DrizzleModerationTransactor(db, auditChain, enforcementOver, directoryOver),
     cases: new DrizzleModerationCaseStore(db),
     reports: new DrizzleModerationReportStore(db),
     actions: new DrizzleModerationActionStore(db),

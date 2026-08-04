@@ -93,11 +93,55 @@ export function maxSeverity(a: ReportSeverity, b: ReportSeverity): ReportSeverit
 }
 
 export type SubmitReportOutcome =
-  | { ok: true; response: ReportCreatedResponse }
+  /** `caseId` so a caller can attach evidence to the CASE the trail is fetched
+   *  by — `report_id` addresses the report, which the case panel does not read. */
+  | { ok: true; response: ReportCreatedResponse; caseId: string }
   | { ok: false; code: 'rate_limited'; retryAfter: number }
   /** WS-N.2.3e: key-like material in the free text — blocked with the
    *  standing warning; the matched value is discarded, never stored. */
   | { ok: false; code: 'key_material_blocked'; message: string };
+
+/**
+ * The stored answer to a report this reporter has ALREADY filed, or null.
+ *
+ * Exported because the ROUTE has to ask it before its own target-existence
+ * gates, not only `submitReport` before its mint-only ones. A lost-response
+ * retry arrives after the world may have moved: the reported room can be
+ * delisted or removed by then, and a P2P shell can never satisfy
+ * `roomVisibleToUser`, so the retry was answered `target_not_found` — a report
+ * that WAS accepted, reported as a failure, by a check the stored row makes
+ * irrelevant. Replay first, validate second: the row already exists, so nothing
+ * about the current world can change what happened.
+ */
+export async function findIdempotentReplay(
+  services: ModerationServices,
+  reporterUserId: string,
+  localOperationId: string,
+): Promise<{
+  ok: true;
+  response: ReportCreatedResponse;
+  caseId: string;
+  /** THE STORED target, not the retry's. A replay skips every target check, so
+   *  anything the caller re-sends is unvalidated: a retry that reuses a
+   *  committed operation id with a different `target_id` would otherwise let a
+   *  caller attach one room's listing evidence to another room's case, or to an
+   *  account case entirely. What the report was FILED about is the only version
+   *  of that fact this endpoint may act on. */
+  targetType: ModerationReportRecord['targetType'];
+  /** NULL after a right-to-erasure purge scrubbed the target id. */
+  targetId: string | null;
+} | null> {
+  const byOp = await services.reports.findByOperationId(reporterUserId, localOperationId);
+  if (!byOp) return null;
+  services.metrics.increment('reports.idempotent_op');
+  return {
+    ok: true,
+    response: toResponse(byOp, true),
+    caseId: byOp.caseId,
+    targetType: byOp.targetType,
+    targetId: byOp.targetId,
+  };
+}
 
 function toResponse(report: ModerationReportRecord, idempotent: boolean): ReportCreatedResponse {
   return {
@@ -152,11 +196,8 @@ export async function submitReport(
   //    filter shipped, or before a detector tuning, whose stored text the scan
   //    now trips) instead of its stored response, storing no new secret either
   //    way (WS-N.2.3e is about a NEW row).
-  const byOp = await services.reports.findByOperationId(reporterUserId, request.local_operation_id);
-  if (byOp) {
-    services.metrics.increment('reports.idempotent_op');
-    return { ok: true, response: toResponse(byOp, true) };
-  }
+  const replay = await findIdempotentReplay(services, reporterUserId, request.local_operation_id);
+  if (replay) return replay;
   // 2. Idempotency by reporter+target+reason within the 24h cooldown (edit-then-
   //    resubmit to evade the per-target cap is the same logical report).
   const cooldownIso = new Date(nowMs - 24 * 3_600_000).toISOString();
@@ -169,7 +210,7 @@ export async function submitReport(
   );
   if (dup) {
     services.metrics.increment('reports.idempotent_dup');
-    return { ok: true, response: toResponse(dup, true) };
+    return { ok: true, response: toResponse(dup, true), caseId: dup.caseId };
   }
 
   // 3. WS-N.2.3e — the no-private-key filter on the support channel: a report
@@ -373,7 +414,10 @@ export async function submitReport(
     });
   }
 
-  return { ok: true, response: toResponse(report, idempotent) };
+  // The CASE id travels with the outcome: a caller attaching evidence to this
+  // report (the §21 listing capture) needs the case the trail is fetched by,
+  // and the response's `report_id` is not it.
+  return { ok: true, response: toResponse(report, idempotent), caseId: theCase.caseId };
 }
 
 /**

@@ -28,9 +28,9 @@ import {
   pgTable,
   primaryKey,
   text,
-  timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 
 /** WS-I.2.1d — append-only per-item feature-vector revisions. */
 export const rankingFeatureVectors = pgTable(
@@ -41,7 +41,7 @@ export const rankingFeatureVectors = pgTable(
     /** The full validated WS-I.2.1a feature vector. */
     payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
     featureVersion: integer('feature_version').notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+    updatedAt: instant('updated_at').notNull(),
   },
   (t) => [
     primaryKey({ columns: [t.itemId, t.revision] }),
@@ -65,9 +65,9 @@ export const rankingDecisionLogs = pgTable(
     featureVersion: integer('feature_version').notNull(),
     /** The full validated WS-I.2.5a decision log. */
     payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
-    timestamp: timestamp('timestamp', { withTimezone: true }).notNull(),
+    timestamp: instant('timestamp').notNull(),
     /** §22.4 retention deadline (180–365 days); swept hourly. */
-    retainUntil: timestamp('retain_until', { withTimezone: true }).notNull(),
+    retainUntil: instant('retain_until').notNull(),
   },
   (t) => [
     index('ranking_decision_logs_time_idx').on(t.timestamp),

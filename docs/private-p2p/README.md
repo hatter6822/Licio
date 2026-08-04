@@ -208,11 +208,83 @@ room view's "Manage members & verify devices" toggle, all jsdom + axe tested):
   admin admit side (`admitJoinRequest`: `verifyJoinRequest` → `inviteDevice` (MLS
   Add) → `buildMemberAddOp` carrying `proposed_display_name`, persisting the
   advanced group + new epoch keys), surfacing every rejection
-  (expired/exhausted/invite-id/proof/key-package) honestly.
+  (expired/exhausted/invite-id/proof/key-package) honestly.  The §10.3 SEALED
+  invite also CARRIES the §21 directory capability (`room_stub_ref` + the
+  epoch-0-derived `bootstrap_blind_id`), which is the only way a member admitted
+  at a later epoch can resolve the room's directory record at all — it cannot
+  re-derive a token bound to an epoch key it never held.  It rides the invite
+  and NOT the §12.3 grant: a grant is copy-pasted plaintext apart from its
+  Welcome and archive, and this token does not rotate, so an observer of that
+  channel would keep a handle resolving an `unlisted` record forever.  The
+  joiner retains it from the invite it opened.
+- `DirectoryRecordPanel` (§21.1–§21.4) reads that record with the stored
+  capability and, for the OWNING ACCOUNT (resolved through
+  `GET /v1/private-rooms/mine`, never from a room role or a device-local flag),
+  refreshes its manifest commitment, delists it, removes it — or REGISTERS one
+  where there is none, which is what makes a `detached` room reachable by id and
+  what gives a removed record a way back.  It renders
+  NOTHING for a room with no stub (a `detached` room has nothing to manage), and
+  the removal confirmation reads back the server's own wording, because
+  "removed Licio's record" quietly becoming "deleted the room" is exactly the
+  §21.4 failure mode.  A room has ONE record — the uniqueness key is the room's
+  founder signing key, not `(account, room)` — so registration ADOPTS the
+  caller's own record and REFUSES a room another account already registered
+  (`room_already_registered`).  Two things make that key an identity rather than
+  a string: a REGISTRATION PROOF over `(room key, manifest commitment, account)`,
+  verified and discarded, so the public stub signature cannot simply be replayed
+  under another account; and CANONICAL base64url on every fixed-size field
+  (`isCanonicalBase64Url`, `@licio/shared`), because a 32-byte key has four
+  spellings that decode identically — and uniqueness is enforced on the TEXT
+  while possession is proved against the BYTES, so without it one room is four
+  rows, each provable by the same holder.
+
+  A handle that arrives in someone else's invite is stored UNVERIFIED and does
+  not travel until `verifyDirectoryRecord` succeeds against this room. Neither
+  the handle nor the capability is bound to the invite's room, so an inviter who
+  belongs to room A can put A's handle into an invite for room B; treating "not
+  quarantined" as permission let a newly-joined admin forward that capability in
+  every invite they issued before the (asynchronous, panel-bound) check had run.
+  A handle this device minted is verified by provenance; quarantine revokes the
+  flag rather than only adding its own.  The panel correspondingly treats a `/mine` miss
+  as "this account owns none", never as "the room has none", and offers
+  registration only where absence is KNOWN (no stored handle, or a removal this
+  device performed).  An unreadable record can be forgotten explicitly on this
+  device, which is how the owner of a record another device removed gets back
+  to a registerable state without the read having to guess.  The device's
+  stored capability is dropped ONLY by a removal this device performed (a `404` from that DELETE means the record is
+  already gone, so a retry repairs a failed local clear): a failed read cannot
+  prove absence, and neither can an account-scoped `/mine` lookup — a joined
+  member on their own account owns no record while the creator's stands, and
+  clearing there would destroy the only copy of a token a member admitted after
+  epoch 0 cannot re-derive.
+- `PrivateRoomDirectory` (§4.2, on `/private`) browses the PUBLIC directory of
+  `listed` rooms: display metadata only, keyset-paged, and with no join
+  affordance — a P2P room is invite-only, so the honest offer is "this room
+  exists, ask a member".
 
 These panels are the COPY-PASTE membership path (the §15.5 live-transport delivery
 of the MLS Welcome that finishes a remote joiner's session is the device-session
 slice below).
+
+### Tracked residual — cross-device directory capability (WS-S.1.2b)
+
+`attachDirectoryStub` writes the §21 handle to the LOCAL `StoredRoomSession`
+only. It authors no room operation, so a room whose record is re-registered on
+one device leaves every other member device holding the previous
+`room_server_id` — which 404s — and `createInvite()` on those devices keeps
+emitting the stale reference until each is re-invited or re-registers itself.
+
+Two things bound the damage today. The capability itself is derived from the
+GENESIS epoch, so a re-registration produces the same `bootstrap_blind_id` and
+only the server id moves; and registration is offered only on a device that
+holds that epoch, which is the device that registered originally in the common
+single-founder case.
+
+Closing it properly needs a `directory.set` room operation — a new op body in
+`schemas/ops.ts`, a reducer field, and a §11.3 capability rule for who may
+author it — so that the handle rides the room's own encrypted state like every
+other shared fact. That is a protocol addition rather than a fix, and it is
+deferred to the WS-S.1.2b follow-up rather than approximated with a broadcast.
 
 ## Remaining work
 
@@ -458,7 +530,8 @@ mitigations + residual-risk map.
 |---|---|---|
 | **WS-S.1.1** | The `rooms` axes columns (`storage_mode` NOT NULL DEFAULT `server`, `authority_model`, `directory_mode`, `p2p_stub_id`) + the six §23.2 coherence CHECKs (storage↔authority, p2p⇒directory/private/invite, server⇒no-stub, server⇒no-directory) mirroring the shared `roomAxesSchema`. Migration `0043` (additive, expand pattern). `RoomRecord.storageMode` threaded through the in-memory + Drizzle forum stores | `packages/db/src/schema/room.ts`, `packages/db/drizzle/0043_*.sql`, `apps/api/src/forum/{stores,drizzle-forum-stores}.ts` |
 | **WS-S.1.2** | `private_room_stubs` + `private_rendezvous_records` — the ONLY two server tables a P2P room may touch, with a strict §8.2 column ALLOWLIST (the §8.1 forbiddance list is the denylist). The rendezvous record has NO FK to `rooms` (un-linkable, §15.3.1). Migration `0044`. The structural guard `checkPrivateServerTables()` (allowlist + forbidden-segment scan) | `packages/db/src/schema/private-room.ts`, `packages/db/src/private-room-guard.ts`, `packages/db/drizzle/0044_*.sql` |
-| **WS-S.1.3** | The endpoint rejection guards: `POST /v1/stories` → `409 p2p_room_requires_client_sync` BEFORE any side effect; the contribution path → `404` (defense in depth); `GET /v1/rooms/:id/feed` → `409 p2p_room_local_only`. Server uploads can only attach via the now-guarded submission/contribution flows (no direct upload→room path). The server room-create route hard-codes `storage_mode='server'` | `apps/api/src/ingestion/submission.ts`, `apps/api/src/forum/contributions.ts`, `apps/api/src/routes/{v1,rooms,stories}.ts` |
+| **WS-S.1.2b** | The §21.1–§21.4 **directory-stub API** the `private_room_stubs` table existed for: `POST /v1/private-rooms` (mints the P2P room shell + its stub in one transaction, all four §4.1 axes set together so the coherence CHECKs decide validity, not the call site), `GET /directory` (the §4.2 public browse of `listed` rooms — display metadata only, keyset-paged, `unlisted` filtered in the QUERY so existence is never enumerable), `GET /:id/bootstrap`, `PATCH /:id`, `POST /:id/delist`, `DELETE /:id`. Doctrine carried by the surface rather than by review: the strict wire schemas make a private CID / op head / member list *unrepresentable*; display metadata is `listed`-only and an `unlisted` request carrying it is REFUSED (never silently stripped); `signed_stub` — the one free-form field a column allowlist cannot see into — is scanned for the §8.1 classes at any depth; an `unlisted` bootstrap read needs the invite-derived blind token and a wrong token returns the SAME 404 as an unknown room (§15.3.1 applied to the directory, constant-time compared); the room shell's `name`/`slug` are opaque so a private room's title never reaches the generated `search_vector`; `DELETE` says it removed *Licio's directory record*, not the room. Writes are session-authenticated and budgeted PER ACCOUNT (§19.1 — no client address is ever read); the bootstrap read is open, because an invitee may hold no Licio account. `roomVisibleToUser` now excludes p2p shells from `GET /v1/rooms` — listing them would publish the existence of every `unlisted` room | `apps/api/src/routes/private-rooms.ts`, `apps/api/src/private-rooms/{stores,drizzle-store,service}.ts`, `apps/api/src/forum/rooms.ts`, `apps/api/src/__tests__/private-rooms-stub.test.ts` |
+| **WS-S.1.3** | The endpoint rejection guards: `POST /v1/stories` → `409 p2p_room_requires_client_sync` BEFORE any side effect; the contribution path → `404` (defense in depth); `GET /v1/rooms/:id/feed` → the UNKNOWN-ROOM `404` (the distinctive 409 was itself an existence oracle; the refusal now lives in `roomContentVisibleToUser`, ahead of every visibility rule, so every content surface inherits it). Server uploads can only attach via the now-guarded submission/contribution flows (no direct upload→room path). The server room-create route hard-codes `storage_mode='server'` | `apps/api/src/ingestion/submission.ts`, `apps/api/src/forum/contributions.ts`, `apps/api/src/routes/{v1,rooms,stories}.ts` |
 | **WS-S.1.3b** | The §8.3 **database guard** — the deepest, code-path-independent defense below the service-layer 409/404: a `BEFORE INSERT OR UPDATE` trigger on EVERY room-referencing table EXCEPT the §8.2 stub/rendezvous (`stories` + `threads` — the content roots, transitively covering contributions/uploads/summaries — plus the non-content `room_stewards` / `room_subscriptions` / `lenses`, which a room-keys-only p2p room can never have) rejects any row whose `room_id` resolves to `storage_mode = 'p2p'` (`check_violation`, message names the table + room); a server room is unaffected. Mirrors the `enforce_thread_room_consistency` pattern (0018). Migration `0045` (additive, trigger-only). Gated harness proves it bites on all five tables (and that server rows succeed) + that the 0043 coherence CHECKs reject each incoherent axis tuple by name | `packages/db/drizzle/0045_*.sql`, `packages/db/src/__tests__/migration-harness.test.ts` |
 | **WS-S.1.4** | Every ranking retriever (the global predicate + the room-surface scoper) predicates `roomStorageMode === 'server'`; server search (in-memory + the Drizzle SQL `storage_mode = 'server'` join) excludes p2p docs; the event router refuses to publish any content event referencing a p2p room (`p2pRoomEventsRejected` counter), wired by the forum boot | `apps/api/src/ranking/{retrievers,services}.ts`, `apps/api/src/ingestion/{search,services,drizzle-ingestion-stores}.ts`, `apps/api/src/events/router.ts`, `apps/api/src/forum/services.ts` |
 | **WS-S.1.5** | The seven §23.10 CI gates: `check:no-p2p-server-content` (umbrella), `check:no-private-cid-egress` (public-gateway scan), `check:private-rendezvous-schema` (column denylist), `check:private-bundle-transparency` (no dynamic remote code), `check:p2p-endpoint-rejections`, `check:p2p-ranking-exclusion`, `check:p2p-search-exclusion` — proven to BITE on injected fixtures. `check:no-applause`/`check:no-raw-egress` extended over `packages/private-p2p` | `scripts/private-p2p-gates.ts` + the seven `scripts/check-*.ts`, `.github/workflows/ci.yml` |
@@ -543,7 +616,7 @@ for a future swap to an audited WASM build (tracked residual).
 | `packages/shared` | the §4.1 coherence accept/reject matrix + `roomClassOf`; the disclosure/matrix copy-lint |
 | `packages/db` | the DB↔shared enum mirror; the §8.1 column denylist (allowlist exactness + a forbidden-column fixture that BITES; rendezvous has no room FK); the **gated** Postgres harness: the §8.3 no-p2p-content trigger rejects p2p stories/threads (server rows succeed) + each §4.1 coherence CHECK rejects its incoherent axis tuple by name |
 | `packages/private-p2p` | the canonical + strict-schema suites; the **WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519 + RFC 4231 HMAC KATs, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, and the forward-secrecy/fuzz properties; the **WS-S.4.2/5 reducer suites** — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/conflict matrix, the §14.3.3 25-shuffle determinism property, the structural pre-pass + the §14.2 stage-1 op-codec seal→open→reduce matrix, and the §14.5/§14.6/§13.7 snapshot/overlay/search suites; **and the WS-S.6 sync suites** — blind rendezvous derivation/authorization/mitigations, the X25519 ECDH agreement, the transcript-bound channel-key separation, signaling seal/open + relay-only ICE filtering, the handshake success + reject matrix, head-sync reconciliation-to-closure + fetch-order, and the offline-archive re-validating import, plus the §10.4 device-blind derivation + the buildOpIntakeContext seal→open-against-state composition, and the PrivateRoomEngine lifecycle + the §15.6 sync surface + the §15.9 two-engine archive convergence + the WS-S.7.1 room-lifecycle (createPrivateRoom/inviteDevice/joinRoom/buildMemberAddOp + the MLS KeyPackage codec) with the full two-device invite→join→converge membership flow + content authoring + the §10.9 removal-with-forward-secrecy flow + the §13.6 chunked-media encrypt/decrypt + the §10.3/§12.3 invite+join flow + §14.5 snapshots+compaction (452 tests; crypto + reducer + sync all ≳ 92% coverage) |
-| `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate; **and the WS-S.6.6 rendezvous suite** — the TTL clamp, the §15.3.1 no-existence-oracle (poll never 404s), re-announce-replaces, the signal queue/drain round-trip, aggregate-only metrics, the sweep, route shape-validation/oversized rejection, and the full-app CSRF-exempt mount |
+| `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed 404-identical-to-unknown, the ranking room-surface exclusion, the search filter, the event-pipeline gate; **and the WS-S.6.6 rendezvous suite** — the TTL clamp, the §15.3.1 no-existence-oracle (poll never 404s), re-announce-replaces, the signal queue/drain round-trip, aggregate-only metrics, the sweep, route shape-validation/oversized rejection, and the full-app CSRF-exempt mount |
 | `scripts` | the seven §23.10 CI gates + the `check:p2p-mls-wrapper` deep-import gate + the §12.7 no-server-recovery scan, all proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
 
 ## Protocol-evolution note — the §13.5 op.v1 vocabulary is frozen

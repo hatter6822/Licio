@@ -25,6 +25,7 @@ import {
   MAX_EXPORT_ATTEMPTS,
   mintExportDownloadToken,
   processExportJob,
+  reconcileDeletionRevocations,
   runDeletionPurge,
   startPrivacyScheduler,
   sweepExpiredExports,
@@ -124,6 +125,9 @@ describe('assembleExport', () => {
       settings: { theme: 'dark' },
       reply_notifications: [{ notification_id: 'n1' }],
     });
+    services.exportPrivateRoomStubs = async () => [
+      { room_server_id: 'r1', directory_mode: 'unlisted' },
+    ];
 
     const archive = await assembleExport(services, user.userId);
     expect(archive['schema_version']).toBe(EXPORT_SCHEMA_VERSION);
@@ -147,6 +151,11 @@ describe('assembleExport', () => {
       settings: { theme: 'dark' },
       reply_notifications: [{ notification_id: 'n1' }],
     });
+    // WS-S §21: the same symmetry for the private-room directory stub — the
+    // purge already knew about these rows, so the archive has to as well.
+    expect(archive['private_room_directory']).toEqual([
+      { room_server_id: 'r1', directory_mode: 'unlisted' },
+    ]);
 
     // The raw wallet address hash is NEVER present anywhere in the archive.
     expect(JSON.stringify(archive)).not.toContain('SECRET_WALLET_HASH_NEVER_EXPORTED');
@@ -171,6 +180,7 @@ describe('assembleExport', () => {
     expect(archive['contributions']).toEqual([]);
     expect(archive['moderation_notices']).toEqual([]);
     expect(archive['client_state']).toEqual({});
+    expect(archive['private_room_directory']).toEqual([]);
   });
 
   it('throws for an unknown user', async () => {
@@ -283,7 +293,7 @@ describe('startPrivacyScheduler', () => {
   });
 
   it('reports task errors through onError without dying', async () => {
-    const failures: Array<'sweep' | 'purge' | 'lease'> = [];
+    const failures: Array<'sweep' | 'purge' | 'lease' | 'revoke_reconcile'> = [];
     services.objectStore.expiredKeys = async () => {
       throw new Error('boom');
     };
@@ -291,6 +301,49 @@ describe('startPrivacyScheduler', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     stop();
     expect(failures).toContain('sweep');
+  });
+});
+
+describe('reconcileDeletionRevocations', () => {
+  it('ends sessions a deletion request could not end itself', async () => {
+    // The request commits before the revoke — only one of the two can be retried
+    // — so a Redis fault leaves an account deactivated with sessions present.
+    // The client cannot retry it: the same commit deactivated the account, so
+    // `authMiddleware` refuses every route that is not deletion-pending-aware,
+    // which made the endpoint's "please retry" advice unreachable. The row is
+    // the durable job.
+    const user = await services.store.createUser({
+      handle: 'lingering',
+      displayName: 'Lingering',
+      email: null,
+      accountState: 'deactivated',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: defaultPrivacySettings(),
+      personalizationSettings: defaultPersonalizationSettings(),
+      roles: ['user'],
+    });
+    await createSession(services.sessions, {
+      userId: user.userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'left behind',
+      rememberMe: false,
+    });
+    const now = Date.now();
+    await services.store.setDeletion({
+      userId: user.userId,
+      state: 'grace_period',
+      requestedAt: new Date(now).toISOString(),
+      purgeAt: new Date(now + 30 * 24 * 3_600_000).toISOString(),
+      cancelledAt: null,
+      completedAt: null,
+    });
+    expect(await services.sessions.listForUser(user.userId)).toHaveLength(1);
+
+    expect(await reconcileDeletionRevocations(services)).toBe(1);
+    expect(await services.sessions.listForUser(user.userId)).toHaveLength(0);
+    // Idempotent: a second pass finds nothing left to do.
+    expect(await reconcileDeletionRevocations(services)).toBe(0);
   });
 });
 

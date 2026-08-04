@@ -18,6 +18,7 @@ import {
   type ModerationActionRequest,
   type ModerationActionResponse,
   type ModerationReasonCode,
+  OPEN_CASE_STATUSES,
   type RevertActionResponse,
   reasonCodeAppealable,
   type StewardCapability,
@@ -55,7 +56,7 @@ export type ActionOutcome =
 
 /** Map a console action to the enforcement action type used by the appeal matrix
  *  (escalate/clear are workflow, not enforcement → null). */
-function enforcementType(action: ConsoleAction): EnforcementActionType | null {
+export function enforcementType(action: ConsoleAction): EnforcementActionType | null {
   switch (action) {
     case 'warn':
       return 'warn';
@@ -258,7 +259,7 @@ export async function applyAction(
       // enforcement-delayed coordinated-report case off-page and slip the pivot.
       const openDelayed = await services.cases.count({
         subjectUserId,
-        status: ['new', 'in_progress', 'escalated'],
+        status: OPEN_CASE_STATUSES,
         enforcementDelayed: true,
       });
       if (openDelayed > 0) {

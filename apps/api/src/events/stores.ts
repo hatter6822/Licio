@@ -14,6 +14,7 @@
 //   • retention operations are batched and idempotent (WS-E.1.4).
 import type { ActorBehaviorWindow } from '@licio/invariants';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 /** A stored event row (ISO timestamps; mirrors packages/db `events`). */
 export interface StoredEvent {
@@ -489,6 +490,21 @@ export interface AggregationWindowStore {
     windowStart: string,
     windowSize: AggregationWindowSize,
   ): Promise<AggregationWindowRecord | null>;
+  /**
+   * The items that drew ANY event in one window, busiest first.
+   *
+   * The WS-H.7.4 landscape asks "what got attention this hour", and answering it
+   * by taking the 100 most RECENT stories and then filtering by activity gets
+   * the question backwards: an older story with real activity is excluded before
+   * it is considered, and a hundred quiet new ones make an active hour report an
+   * empty landscape. The window rows already are the answer — this reads them
+   * directly, and the caller hydrates only the ones still public.
+   */
+  listActiveInWindow(
+    windowStart: string,
+    windowSize: AggregationWindowSize,
+    limit: number,
+  ): Promise<Array<{ itemId: string; eventCount: number }>>;
   /** Trailing windows for an item strictly before `beforeIso`, newest first. */
   listForItemBefore(
     itemId: string,
@@ -523,6 +539,21 @@ export class InMemoryAggregationWindowStore implements AggregationWindowStore {
     windowSize: AggregationWindowSize,
   ): Promise<AggregationWindowRecord | null> {
     return this.#rows.get(this.#key(itemId, windowStart, windowSize)) ?? null;
+  }
+
+  async listActiveInWindow(
+    windowStart: string,
+    windowSize: AggregationWindowSize,
+    limit: number,
+  ): Promise<Array<{ itemId: string; eventCount: number }>> {
+    return [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.windowStart === windowStart && row.windowSize === windowSize && row.eventCount > 0,
+      )
+      .sort((a, b) => b.eventCount - a.eventCount || a.itemId.localeCompare(b.itemId))
+      .slice(0, limit)
+      .map((row) => ({ itemId: row.itemId, eventCount: row.eventCount }));
   }
 
   async listForItemBefore(
@@ -660,12 +691,31 @@ export interface InvariantOutputStore {
     limit: number,
     untilIso?: string,
   ): Promise<InvariantOutputRecord[]>;
-  /** How many rows of ONE invariant type exist at/after `sinceIso` — the
-   *  DENOMINATOR a capped read cannot report about itself.  A transparency
-   *  export that silently drops everything past its cap reads as a complete
-   *  account of the period and cannot be reproduced from the logged outputs;
-   *  this is what lets it state its own coverage. */
-  countByTypeSince(invariantType: string, sinceIso: string, untilIso?: string): Promise<number>;
+  /**
+   * A capped page AND the denominator it is a page OF, from ONE read.
+   *
+   * The denominator is what a capped read cannot report about itself: an export
+   * that silently drops everything past its cap reads as a complete account of
+   * the period and cannot be reconciled against the logged outputs.
+   *
+   * It is one call because two would be two SNAPSHOTS.  This was a
+   * `listByTypeSince` followed by a `countByTypeSince` over the same interval,
+   * and under READ COMMITTED each statement sees its own snapshot — so an
+   * output that committed between them was counted but could not have been
+   * listed.  `total_outputs`, `truncated` and the covered range then described
+   * different datasets, and bounding both by the same `periodEnd` does not fix
+   * it: the bound is on `created_at`, and nothing stops a row with an earlier
+   * `created_at` from committing later.  A single statement has one snapshot by
+   * construction, which is also why the pair of methods is gone rather than
+   * merely documented — there is no longer an API that can produce a mismatched
+   * page and total.
+   */
+  pageByTypeSince(
+    invariantType: string,
+    sinceIso: string,
+    limit: number,
+    untilIso?: string,
+  ): Promise<{ rows: InvariantOutputRecord[]; total: number }>;
   listAll(): Promise<InvariantOutputRecord[]>;
   deleteOlderThan(cutoffIso: string): Promise<number>;
   countOlderThan(cutoffIso: string): Promise<number>;
@@ -747,18 +797,23 @@ export class InMemoryInvariantOutputStore implements InvariantOutputStore {
       .slice(0, Math.max(0, limit));
   }
 
-  async countByTypeSince(
+  async pageByTypeSince(
     invariantType: string,
     sinceIso: string,
+    limit: number,
     untilIso?: string,
-  ): Promise<number> {
-    let count = 0;
-    for (const row of this.#rows.values()) {
-      if (row.invariantType !== invariantType || row.createdAt < sinceIso) continue;
-      if (untilIso !== undefined && row.createdAt > untilIso) continue;
-      count += 1;
-    }
-    return count;
+  ): Promise<{ rows: InvariantOutputRecord[]; total: number }> {
+    // One pass over one array — the in-memory equivalent of one snapshot, with
+    // no `await` between the count and the slice for anything to commit into.
+    const matching = [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.invariantType === invariantType &&
+          r.createdAt >= sinceIso &&
+          (untilIso === undefined || r.createdAt <= untilIso),
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return { rows: matching.slice(0, Math.max(0, limit)), total: matching.length };
   }
 
   async latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null> {
@@ -992,8 +1047,14 @@ export interface ItemSafetyStateStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryItemSafetyStateStore implements ItemSafetyStateStore {
+export class InMemoryItemSafetyStateStore implements ItemSafetyStateStore, InMemoryRollback {
   readonly #rows = new Map<string, ItemSafetyRecord>();
+
+  /** The unit of work's undo: lifting a safety freeze is a durable decision that
+   *  commits with the record of the steward who made it. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
 
   async get(itemId: string): Promise<ItemSafetyRecord | null> {
     return this.#rows.get(itemId) ?? null;
@@ -1027,8 +1088,14 @@ export interface PwattConfigStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryPwattConfigStore implements PwattConfigStore {
+export class InMemoryPwattConfigStore implements PwattConfigStore, InMemoryRollback {
   readonly #rows = new Map<string, Record<string, unknown>>();
+
+  /** The unit of work's undo: a runtime-config change and the record of who made
+   *  it commit together, so a failed append must not leave the new value live. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
 
   async get(key: string): Promise<Record<string, unknown> | null> {
     return this.#rows.get(key) ?? null;

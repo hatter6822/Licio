@@ -88,7 +88,19 @@ import {
 } from '../signals/attention-cooldown.js';
 import { useAuthStore } from '../stores/auth.js';
 
-const API_BASE: string =
+/**
+ * The API origin. Empty for the same-origin deployment (and the dev proxy);
+ * set only when the client calls a cross-origin API.
+ *
+ * Exported for the few surfaces the typed RPC client cannot reach: a route
+ * group mounted from a factory that does not CHAIN its handlers publishes no
+ * route types, so `client.v1.…` has nothing to offer it (the private-room
+ * directory stubs are the case in point). Those callers pair this with
+ * {@link apiFetch} so they still get the session cookie, the serialized
+ * single-use CSRF token, and the 401 handling — the whole point of routing
+ * through one interceptor.
+ */
+export const API_BASE: string =
   (import.meta.env['VITE_API_URL'] as string | undefined)?.replace(/\/$/, '') ?? '';
 const IS_DEV = import.meta.env.DEV === true;
 const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -230,7 +242,7 @@ async function sendRequest(
  * State-changing requests are serialized through a promise chain, each acquiring
  * its own fresh single-use CSRF token immediately before sending.
  */
-async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const method = (init?.method ?? 'GET').toUpperCase();
   if (!STATE_CHANGING.has(method)) {
     return sendRequest(input, init, method, null);

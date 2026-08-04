@@ -16,11 +16,10 @@ import {
   pgTable,
   primaryKey,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { bytea } from './_custom.js';
+import { bytea, instant } from './_custom.js';
 import { takedownTargetTypeEnum } from './takedown.js';
 import { users } from './user.js';
 
@@ -81,7 +80,7 @@ export const lcapForkEvidence = pgTable('lcap_fork_evidence', {
   deviceSeq: integer('device_seq').notNull(),
   existingCid: text('existing_cid').notNull(),
   conflictingCid: text('conflicting_cid').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: instant('created_at').notNull().defaultNow(),
 });
 
 /**
@@ -135,7 +134,7 @@ export const lcapBlockProvenance = pgTable(
     targetType: takedownTargetTypeEnum('target_type').notNull(),
     /** The content entity id (story/source) — the same coordinate a takedown targets. */
     targetId: text('target_id').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.blockCid, t.targetType, t.targetId] }),
@@ -175,7 +174,7 @@ export const lcapBlockPublishReview = pgTable(
       onDelete: 'set null',
     }),
     note: text('note'),
-    decidedAt: timestamp('decided_at', { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: instant('decided_at').notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.targetType, t.targetId] }),
@@ -209,7 +208,7 @@ export const lcapPublishAudit = pgTable(
     published: boolean('published').notNull(),
     outcomeReason: text('outcome_reason').notNull(),
     ipfsCid: text('ipfs_cid'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('lcap_publish_audit_block_idx').on(t.blockCid),

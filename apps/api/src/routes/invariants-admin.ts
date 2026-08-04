@@ -14,6 +14,9 @@
 //     observational — there is deliberately NO enforcement action here).
 //   POST /v1/invariants/admin/mfci/cases/:id/resolve — confirm/clear/escalate
 //     (WS-H.3.4b); clearing lifts any safety freeze (WS-H.3.3d); audited.
+//   GET  /v1/invariants/admin/reeb/landscape    — the Civic Map: the Reeb
+//     attention landscape as a drawable merge tree (WS-H.7.4, SPEC §12.4/§34);
+//     observational, with fragile saddles routing into the bridge request below.
 //   GET  /v1/invariants/admin/gwei/dashboard    — cohort comparisons
 //     (k-anonymity enforced at computation; suppressed cells stay withheld).
 //   GET  /v1/invariants/admin/gwei/transparency — the public-safe aggregate
@@ -39,19 +42,22 @@ import { type ForumServices, getForumServices } from '../forum/services.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { getIngestionServices, type IngestionServices } from '../ingestion/services.js';
 import {
+  acceptsContributions,
+  type BridgeEligibilityDeps,
+  bridgeEligibility,
+} from '../invariants/bridge-eligibility.js';
+import { buildCivicMap } from '../invariants/civic-map.js';
+import {
   INVARIANTS_CONFIG_KEYS,
   storeInvariantsConfigValue,
   validateInvariantsConfigValue,
 } from '../invariants/config.js';
 import { runRealtimeTier } from '../invariants/scheduler.js';
-import {
-  bridgeCandidatesFor,
-  latestScoiFor,
-  recomputeScoiFor,
-} from '../invariants/scoi-actions.js';
+import { bridgeCandidatesFor, latestScoiFor } from '../invariants/scoi-actions.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
+import { denyQueue, stewardActorOf } from '../moderation/authz.js';
 import { resolveItemSafetyState } from '../pwatt/scoring.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
@@ -73,6 +79,17 @@ const DASHBOARD_ROW_CAP = 100;
 // that previously kept (and mapped over) every retained row.
 const TRANSPARENCY_LOOKBACK_MS = 90 * 24 * 60 * 60_000;
 const TRANSPARENCY_ROW_CAP = 500;
+// --- Bounds on the per-room SCOI report -------------------------------------
+// The report is a KEYSET page over the room's own threads, so both bounds are
+// about the room rather than the platform: how many findings are returned, and
+// how far into the room's history the scan will walk looking for them (a room
+// with thousands of threads and no SCOI measurements must not turn one console
+// load into a table walk).  A page smaller than the ceiling keeps the per-round
+// hydration bounded; the scan stops early on a short page, which is the room's
+// end.
+const SCOI_REPORT_ENTRIES = 100;
+const SCOI_REPORT_SCAN_CEILING = 500;
+const SCOI_REPORT_PAGE = 50;
 
 const invariantTypeSchema = z.enum(INVARIANT_TYPE_NAMES);
 
@@ -110,6 +127,25 @@ export function createInvariantsAdminRoutes(
     new Hono<AuthEnv>()
       .use('*', authMiddleware(resolveIdentity))
       .use('*', requireSteward())
+      // NOTHING here is cacheable.
+      //
+      // Every response on this surface is steward-gated and several are tailored
+      // to the CALLER's authority — the Civic Map's `thread_id` and
+      // `bridge_thread_id` are resolved against the requesting analyst's room
+      // steward roles, and its basins carry role-gated titles and exact hourly
+      // levels. A cached 200 replayed after an account switch or a role
+      // revocation would serve one steward's view to another without
+      // `authMiddleware` or the queue check running again, and the Workbox
+      // exclusion covers the service worker, not the HTTP cache or a proxy.
+      //
+      // On the GROUP rather than per route: the next endpoint added here would
+      // otherwise have to remember, and every one of them answers a
+      // role-dependent question.
+      .use('*', async (c, next) => {
+        await next();
+        c.header('Cache-Control', 'no-store, private');
+        c.header('Vary', 'Cookie', { append: true });
+      })
 
       .get('/health', async (c) => {
         const invariants = resolveInvariants();
@@ -218,43 +254,60 @@ export function createInvariantsAdminRoutes(
         if (!z.string().uuid().safeParse(caseId).success) {
           return c.json(deny('invalid_case', 'caseId must be a UUID'), 422);
         }
-        const resolved = await invariants.mfciCases.resolve(
-          caseId,
-          action,
-          `steward:${auth.userId}`,
-          new Date(invariants.now()).toISOString(),
-        );
-        if (!resolved) return c.json(deny('not_found', 'No open case with that id'), 404);
-        // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d)
-        // AND releases the held risk state through the analyst-override
-        // evidence path (WS-H.3.4a: downward needs clearing or an override).
-        if (action === 'cleared') {
-          await resolveItemSafetyState(
-            resolveEvents(),
-            identity,
-            resolved.targetId,
-            'clear',
+        // THE RESOLUTION, THE RELEASE AND THE RECORD ARE ONE UNIT.
+        //
+        // `resolve` is a compare-and-set: once it lands the case is no longer
+        // open and every retry answers `not_found`, so an append failure after
+        // it left a resolved case, a lifted safety freeze and a released risk
+        // state with nothing naming the steward who did any of it — and no
+        // second chance to write the row. The clearing path is the one that
+        // matters most: it is what takes a freeze OFF.
+        const resolved = await invariants.transact(async (tx) => {
+          const outcome = await tx.mfciCases.resolve(
+            caseId,
+            action,
             `steward:${auth.userId}`,
+            new Date(invariants.now()).toISOString(),
           );
-          const current =
-            (await invariants.mfciRiskStates.get(resolved.targetId))?.state ?? 'normal';
-          const transition = nextRiskState(current, 0, invariants.config().mfciRiskThresholds, {
-            analystOverride: true,
+          if (!outcome) return null;
+          // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d)
+          // AND releases the held risk state through the analyst-override
+          // evidence path (WS-H.3.4a: downward needs clearing or an override).
+          if (action === 'cleared') {
+            // ON THIS UNIT'S HANDLES. Called with the process-wide services the
+            // clear committed on its own, so a failure in the risk-state write,
+            // the append, or the commit rolled the case back while the target
+            // stayed unfrozen — protection removed by a decision that did not
+            // happen, and a retry that can no longer make the same transition.
+            await resolveItemSafetyState(
+              resolveEvents(),
+              identity,
+              outcome.targetId,
+              'clear',
+              `steward:${auth.userId}`,
+              { safetyStore: tx.safety, audit: tx.audit },
+            );
+            const current = (await tx.mfciRiskStates.get(outcome.targetId))?.state ?? 'normal';
+            const transition = nextRiskState(current, 0, invariants.config().mfciRiskThresholds, {
+              analystOverride: true,
+            });
+            await tx.mfciRiskStates.set({
+              targetId: outcome.targetId,
+              state: transition.to,
+              score: 0,
+              reason: transition.reason,
+              updatedAt: new Date(invariants.now()).toISOString(),
+            });
+          }
+          await tx.audit({
+            actorUserId: auth.userId,
+            eventType: 'mfci_case_action',
+            targetRef: caseId,
+            context: { action, target_id: outcome.targetId, risk_state: outcome.riskState },
           });
-          await invariants.mfciRiskStates.set({
-            targetId: resolved.targetId,
-            state: transition.to,
-            score: 0,
-            reason: transition.reason,
-            updatedAt: new Date(invariants.now()).toISOString(),
-          });
-        }
-        await identity.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'mfci_case_action',
-          targetRef: caseId,
-          context: { action, target_id: resolved.targetId, risk_state: resolved.riskState },
+          return outcome;
         });
+        if (!resolved) return c.json(deny('not_found', 'No open case with that id'), 404);
         return c.json({ case: resolved });
       })
 
@@ -296,18 +349,26 @@ export function createInvariantsAdminRoutes(
         // could not — reporting truncation that had not happened.
         const periodEnd = generatedAt.toISOString();
         const store = resolveEvents().invariantStore;
-        const rows = await store.listByTypeSince(
+        // STATE THE COVERAGE, FROM ONE READ.  GWEI emits one output per eligible
+        // cohort pair per scheduler run, so the cap is reachable in an ordinary
+        // period — and a capped list with no denominator reads as a complete
+        // account of the window and cannot be reconciled against the logged
+        // outputs.  The count is the one fact the truncated read cannot supply
+        // about itself.
+        //
+        // It arrives WITH the page rather than from a second call: two
+        // statements are two READ COMMITTED snapshots, so an output that
+        // committed between them was counted but could not have been listed,
+        // and `total_outputs` / `truncated` / the covered range then described
+        // different datasets.  Sharing `periodEnd` does not fix that — the
+        // bound is on `created_at`, and a row with an earlier `created_at` can
+        // still commit later.
+        const { rows, total } = await store.pageByTypeSince(
           'GWEI',
           periodStart,
           TRANSPARENCY_ROW_CAP,
           periodEnd,
         );
-        // STATE THE COVERAGE.  GWEI emits one output per eligible cohort pair
-        // per scheduler run, so the cap is reachable in an ordinary period —
-        // and a capped list with no denominator reads as a complete account of
-        // the window and cannot be reconciled against the logged outputs.  The
-        // count is the one fact the truncated read cannot supply about itself.
-        const total = await store.countByTypeSince('GWEI', periodStart, periodEnd);
         const threshold = 0.5;
         const statements = rows.map((row) => {
           const suppressed = row.reasonCodes.includes('SUPPRESSED_K_ANONYMITY');
@@ -375,38 +436,192 @@ export function createInvariantsAdminRoutes(
         const invariants = resolveInvariants();
         const lenses = await forum.lenses.listByRoom(roomId);
         const lensNames = new Map(lenses.map((lens) => [lens.lensId, lens.name]));
+        // Page the ROOM's OWN threads, rather than the platform's 200 most
+        // recent stories filtered down to this room afterwards.
+        //
+        // The budget was spent before the room was considered: on a platform
+        // with any volume the recent 200 are dominated by the busiest rooms, so
+        // a quiet room's threads never appeared in them and its stewards read an
+        // empty SCOI report — which is indistinguishable from "no divergent
+        // conversations here" and is in fact "nothing of yours was looked at".
+        // The room is a column on the thread, so the restriction belongs in the
+        // read; what is bounded now is how much of the ROOM is scanned.
         const entries = [];
-        for (const story of await ingestion.stories.listRecent(200)) {
-          const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
-          if (!thread || thread.roomId !== roomId) continue;
-          const scoi = await latestScoiFor(events, story.storyId);
-          if (!scoi) continue;
-          // Per-lens interpretation summaries: tagged contribution counts.
-          const contributions = await forum.contributions.listByThread(thread.threadId, {
-            limit: 500,
-          });
-          const perLens = new Map<string, number>();
-          for (const contribution of contributions) {
-            const lensId = contribution.metadata['lens_id'];
-            if (typeof lensId !== 'string') continue;
-            perLens.set(lensId, (perLens.get(lensId) ?? 0) + 1);
+        let threadCursor: { createdAt: string; threadId: string } | null = null;
+        let scanned = 0;
+        // COMPLETE until a bound stops the walk. An empty report and a
+        // truncated one are the same list, and a steward reading "no divergent
+        // conversations" off a scan that stopped at its ceiling is exactly the
+        // ambiguity this room-scoped paging exists to remove — so the answer
+        // says which it was.
+        let complete = false;
+        // Did a bound stop the walk PART-WAY THROUGH a page? Then threads behind
+        // it in that page are genuinely unexamined and no probe can help. Exiting
+        // at a page boundary is the ambiguous case the probe below resolves.
+        let stoppedMidPage = false;
+        scan: while (scanned < SCOI_REPORT_SCAN_CEILING && entries.length < SCOI_REPORT_ENTRIES) {
+          const threads = await ingestion.stories.listThreadsByRoom(
+            roomId,
+            threadCursor,
+            SCOI_REPORT_PAGE,
+          );
+          if (threads.length === 0) {
+            complete = true;
+            break;
           }
-          entries.push({
-            story_id: story.storyId,
-            thread_id: thread.threadId,
-            title: story.title,
-            context_state: scoi.contextState,
-            scoi: scoi.scoi,
-            lenses: [...perLens.entries()].map(([lensId, count]) => ({
-              lens_id: lensId,
-              name: lensNames.get(lensId) ?? lensId,
-              contribution_count: count,
-            })),
-            // The §10.5 "Bridge attempts" branch (the WS-H.4.2d credit surface).
-            bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
-          });
+          const stories = await ingestion.stories.getByIds(threads.map((t) => t.storyId));
+          const last = threads[threads.length - 1];
+          threadCursor =
+            last === undefined ? null : { createdAt: last.createdAt, threadId: last.threadId };
+          for (const thread of threads) {
+            // THE CAP IS CHECKED BEFORE THE THREAD IS CONSIDERED, which is what
+            // `assembleEngagementLandscape` learned the same way: completeness
+            // must fall out of what the walk DID, not out of which break fired.
+            //
+            // Exiting from the bottom of the body skipped the short-page check
+            // below, so filling the cap on the room's FINAL thread — every
+            // thread examined — was reported as a truncated scan, and a steward
+            // reading `complete: false` over a room they have seen all of goes
+            // looking for findings that do not exist. Checking here means a page
+            // consumed to its end falls through to that check instead, and a
+            // thread this walk never looked at is one `scanned` never counts.
+            if (entries.length >= SCOI_REPORT_ENTRIES) {
+              stoppedMidPage = true;
+              break scan;
+            }
+            scanned += 1;
+            const story = stories.get(thread.storyId);
+            if (!story) continue;
+            const scoi = await latestScoiFor(events, story.storyId);
+            if (!scoi) continue;
+            // Per-lens interpretation summaries: tagged contribution counts.
+            const contributions = await forum.contributions.listByThread(thread.threadId, {
+              limit: 500,
+            });
+            const perLens = new Map<string, number>();
+            for (const contribution of contributions) {
+              const lensId = contribution.metadata['lens_id'];
+              if (typeof lensId !== 'string') continue;
+              perLens.set(lensId, (perLens.get(lensId) ?? 0) + 1);
+            }
+            entries.push({
+              story_id: story.storyId,
+              thread_id: thread.threadId,
+              title: story.title,
+              context_state: scoi.contextState,
+              scoi: scoi.scoi,
+              lenses: [...perLens.entries()].map(([lensId, count]) => ({
+                lens_id: lensId,
+                name: lensNames.get(lensId) ?? lensId,
+                contribution_count: count,
+              })),
+              // The §10.5 "Bridge attempts" branch (the WS-H.4.2d credit surface).
+              bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
+            });
+          }
+          if (threads.length < SCOI_REPORT_PAGE) {
+            // A short page IS the end of the room.
+            complete = true;
+            break;
+          }
         }
-        return c.json({ room_id: roomId, reports: entries });
+        // ONE bounded lookahead, for the boundary the page arithmetic cannot see.
+        //
+        // A room whose thread count is an exact multiple of the page size never
+        // produces a short page: the walk consumes the last full page, a bound
+        // trips at the top of the while, and the loop ends with `complete` false
+        // over a room it examined ENTIRELY. A 100-thread room reporting itself
+        // truncated is the same wrong answer the short-page fix removed, one
+        // page-boundary further along.
+        //
+        // A single-row keyset read past the cursor settles it, and only in this
+        // case: nothing to see means the walk reached the room's end whichever
+        // bound fired, and a mid-page stop skips it because the answer is
+        // already known.
+        if (!complete && !stoppedMidPage && threadCursor !== null) {
+          const lookahead = await ingestion.stories.listThreadsByRoom(roomId, threadCursor, 1);
+          complete = lookahead.length === 0;
+        }
+
+        return c.json({
+          room_id: roomId,
+          reports: entries,
+          // `complete: false` ⇒ the room has threads this scan never looked at,
+          // so an empty or short list is a partial answer rather than a clean
+          // room. `examined` is how many threads were walked, not how many are
+          // reported.
+          scan: { complete, examined: scanned },
+        });
+      })
+
+      .get('/reeb/landscape', async (c) => {
+        // WS-H.7.4 Civic Map (SPEC §12.4, §34): the Reeb attention landscape
+        // as a drawable merge tree, for the console's Integrity tab. Strictly
+        // OBSERVATIONAL — the only action it enables is the §12.4 bridge
+        // prompt, which goes through the existing SCOI bridge-request route
+        // below with its own room-steward authorization.
+        //
+        // INTEGRITY-QUEUE gated, not merely steward-gated. The enclosing
+        // `requireSteward()` is a PLATFORM-role check, so on its own it would
+        // hand per-story titles and exact hourly event-count levels to
+        // evidence-only, appeals-only and community stewards. This surface
+        // answers the same question as the coordinated-report incidents it
+        // renders beside, and that queue is ROLE_INTEGRITY — so the landscape
+        // takes the same doctrine bar, through the same helper, rather than
+        // inventing a second standard for one analyst view.
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+        const queueDenial = denyQueue(stewardActorOf(auth), 'integrity-queue');
+        if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
+        // An empty landscape is a real state (a quiet hour, a fresh install),
+        // so it answers 200 with an explicit `null` rather than 404 — the panel
+        // renders "nothing to map yet", and a steward can tell that apart from
+        // a broken endpoint.
+        // The bridge target is resolved AGAINST THIS CALLER, mirroring the
+        // POST below exactly: a room-hosted server thread whose room this
+        // analyst stewards, or platform admin. Reading the landscape is a
+        // ROLE_INTEGRITY power; ACTING on a room's conversation is not, so a
+        // thread id published here without that check would render a control
+        // that deterministically 404s.
+        // ONE eligibility check, shared with the POST below (`bridgeEligibility`).
+        //
+        // Every bar the endpoint enforces — the THREAD's room, this caller's
+        // authority over it, a conversation that still accepts contributions, no
+        // request already open, a SCOI baseline — is asked here through the same
+        // function, so a target published on this map is one the endpoint
+        // accepts. Re-deriving them here is what shipped three rounds of
+        // controls that deterministically failed.
+        //
+        // `recompute: false` is the difference that belongs to a READ: the map
+        // asks about every node in the landscape, and a recompute persists a
+        // computation plus its run metadata for 365 days. That turned one GET
+        // into a burst of durable degraded rows, repeated on every refresh. A
+        // story with no stored measurement is simply not offered — and the
+        // endpoint, which is about to act on ONE thread, may still compute it.
+        const eligibility: BridgeEligibilityDeps = {
+          forum: resolveForum(),
+          ingestion: resolveIngestion(),
+          events: resolveEvents(),
+          invariants: resolveInvariants(),
+        };
+        const map = await buildCivicMap(
+          resolveEvents(),
+          resolveIngestion(),
+          Date.now(),
+          async (threadId) =>
+            (
+              await bridgeEligibility(
+                eligibility,
+                threadId,
+                { userId: auth.userId, roles: auth.roles },
+                { recompute: false },
+              )
+            ).ok,
+        );
+        // The ENVELOPE, coverage included: an hour whose candidates were all
+        // restricted has no map AND was truncated, and only the second fact
+        // stops a steward reading "nothing to map yet" as "nothing happened".
+        return c.json(map, 200);
       })
 
       .post('/scoi/threads/:threadId/bridge-requests', async (c) => {
@@ -422,61 +637,122 @@ export function createInvariantsAdminRoutes(
         }
         const forum = resolveForum();
         const ingestion = resolveIngestion();
-        const thread = await ingestion.stories.getThreadById(threadId);
-        if (!thread) return c.json(deny('not_found', 'No such thread'), 404);
-        // Bridge requests are ROOM-scoped: a roomless (global) thread has no
-        // steward surface at all, for admin included — without this the admin
-        // arm would open a bridge request the grants check made unreachable.
-        // The room must also still EXIST and be SERVER-hosted (codex: an
-        // orphaned/migration-drift thread whose room row is gone — or points at
-        // a member-hosted p2p stub — has no steward or report surface;
-        // mirroring the reports route's guard).
-        const bridgeRoom = thread.roomId === null ? null : await forum.rooms.getById(thread.roomId);
-        if (bridgeRoom === null || bridgeRoom.storageMode !== 'server') {
-          return c.json(deny('not_found', 'No such thread'), 404);
-        }
-        const roles = await forum.rooms.stewardRolesFor(thread.roomId, auth.userId);
-        // Same admin arm as the room SCOI reports above.
-        if (roles.length === 0 && !auth.roles.includes('admin')) {
-          return c.json(deny('not_found', 'No such thread'), 404);
-        }
-        const events = resolveEvents();
         const invariants = resolveInvariants();
-        const existing = await invariants.bridgeAttempts.openForThread(threadId);
-        if (existing) {
-          return c.json(deny('already_open', 'A bridge request is already open'), 409);
-        }
-        const baseline =
-          (await latestScoiFor(events, thread.storyId)) ??
-          (await recomputeScoiFor(invariants, events, thread.storyId));
-        if (!baseline) {
+        // THE SAME CHECK THE MAP ASKS, and the only place either asks it. Every
+        // bar below used to live here and be re-derived there; each divergence
+        // shipped as a published control that could only fail.
+        //
+        // `recompute: true`: this caller is about to act on ONE thread, so
+        // computing and persisting a missing SCOI baseline is work it is
+        // entitled to spend — unlike the map, which asks about every node.
+        const verdict = await bridgeEligibility(
+          { forum, ingestion, events: resolveEvents(), invariants },
+          threadId,
+          { userId: auth.userId, roles: auth.roles },
+          { recompute: true },
+        );
+        if (!verdict.ok) {
+          // `not_found` covers an unknown thread, a roomless/orphaned/p2p one,
+          // and a caller with no authority over the room — one answer, so no
+          // refusal here becomes an existence oracle.
+          if (verdict.reason === 'not_found') {
+            return c.json(deny('not_found', 'No such thread'), 404);
+          }
+          if (verdict.reason === 'thread_closed') {
+            return c.json(
+              deny(
+                'thread_closed',
+                'This conversation no longer accepts contributions, so a bridge request could not be answered',
+              ),
+              409,
+            );
+          }
+          if (verdict.reason === 'already_open') {
+            return c.json(deny('already_open', 'A bridge request is already open'), 409);
+          }
           return c.json(deny('no_scoi', 'No SCOI measurement available to baseline against'), 422);
         }
+        const { thread, baseline } = verdict;
         const candidates = await bridgeCandidatesFor(forum, ingestion, threadId);
-        const attemptId = crypto.randomUUID();
-        await invariants.bridgeAttempts.insert({
-          attemptId,
-          threadId,
-          storyId: thread.storyId,
-          status: 'requested',
-          requestedBy: `steward:${auth.userId}`,
-          candidateUserIds: candidates,
-          contributionId: null,
-          bridgeUserId: null,
-          scoiBaseline: baseline.scoi,
-          scoiAfter: null,
-          createdAt: new Date(invariants.now()).toISOString(),
-          resolvedAt: null,
+        // ONE UNIT: the attempt and the record of it commit together, and the
+        // "only one open" rule is decided by the WRITE.
+        //
+        // Both halves were sequential steps before. The `openForThread` check
+        // above the insert is a check — two stewards of the same room both see
+        // the Civic Map's fragile join, both pass it, and both insert; the
+        // credit consumer then credits the newest and the older row becomes the
+        // open one again, so a later contribution credits twice for one bridge.
+        // And an audit failure after the insert answered 500 while leaving a
+        // live request behind: the map withheld the target, every retry said
+        // `already_open`, and the durable action had no record at all.
+        const opened = await invariants.transact(async (tx) => {
+          // RE-READ the conversation THROUGH THE UNIT's handle.
+          //
+          // `bridgeEligibility` answered before the candidate lookup, and a
+          // thread can be archived or restricted in between — after which the
+          // insert still lands, `createContribution` refuses every possible
+          // answer to it, and there is no cancelled state, so the open-row
+          // uniqueness then blocks any future request on that thread forever.
+          //
+          // `tx.threads`, not the container's store: a re-read through a
+          // separately-composed store runs OUTSIDE this transaction and leaves
+          // exactly the window it was added to close. The predicate the write
+          // depends on is read where the write happens.
+          // LOCKED, and re-authorized, against the row this unit holds.
+          //
+          // A plain read inside a READ COMMITTED transaction is a snapshot, not
+          // a hold — the archive commits between it and the insert, and the
+          // attempt lands on a conversation that can never answer it. And
+          // authority is as perishable as writability: WS-Q moves a thread
+          // between rooms and a steward grant can be revoked, both of them while
+          // the candidate lookup above was running.
+          const current = await tx.threads.getThreadByIdForUpdate(threadId);
+          if (current === null || !acceptsContributions(current)) return null;
+          const currentRoom =
+            current.roomId === null ? null : await tx.rooms.getById(current.roomId);
+          if (currentRoom === null || currentRoom.storageMode !== 'server') return null;
+          const stillAuthorized = auth.roles.includes('admin')
+            ? true
+            : (await tx.rooms.stewardRolesFor(currentRoom.roomId, auth.userId)).length > 0;
+          if (!stillAuthorized) return null;
+          const attempt = await tx.bridgeAttempts.insertIfNoneOpen({
+            attemptId: crypto.randomUUID(),
+            threadId,
+            storyId: thread.storyId,
+            status: 'requested',
+            requestedBy: `steward:${auth.userId}`,
+            candidateUserIds: candidates,
+            contributionId: null,
+            bridgeUserId: null,
+            scoiBaseline: baseline.scoi,
+            scoiAfter: null,
+            createdAt: new Date(invariants.now()).toISOString(),
+            resolvedAt: null,
+          });
+          // The loser of the race writes NO audit row: it performed no action.
+          if (!attempt.inserted) return attempt;
+          await tx.audit({
+            actorUserId: auth.userId,
+            eventType: 'bridge_request',
+            targetRef: threadId,
+            context: { candidate_count: candidates.length, scoi_baseline: baseline.scoi },
+          });
+          return attempt;
         });
-        const identity = resolveIdentity();
-        await identity.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'bridge_request',
-          targetRef: threadId,
-          context: { candidate_count: candidates.length, scoi_baseline: baseline.scoi },
-        });
+        if (opened === null) {
+          return c.json(
+            deny(
+              'thread_closed',
+              'This conversation no longer accepts contributions, so a bridge request could not be answered',
+            ),
+            409,
+          );
+        }
+        if (!opened.inserted) {
+          return c.json(deny('already_open', 'A bridge request is already open'), 409);
+        }
         return c.json({
-          attempt_id: attemptId,
+          attempt_id: opened.attempt.attemptId,
           scoi_baseline: baseline.scoi,
           candidates,
         });
@@ -497,31 +773,39 @@ export function createInvariantsAdminRoutes(
         const auth = getAuth(c);
         if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
         const invariants = resolveInvariants();
-        const identity = resolveIdentity();
         const body = c.req.valid('json');
-        const problem = await invariants.promotionService.apply(
-          {
-            invariantType: body.invariant_type,
-            fromStatus: body.from_status,
-            toStatus: body.to_status,
-            evidence: {
-              shadowDurationDays: body.evidence.shadow_duration_days,
-              driftReportRef: body.evidence.drift_report_ref,
-              observedCoverage: body.evidence.observed_coverage,
-              observedConfidence: body.evidence.observed_confidence,
+        // A promotion changes what an invariant is ALLOWED to do to ranking, so
+        // it commits with the record of who changed it: the shadow-status row
+        // and the operator's trail entry are one governance decision.
+        // `promotionServiceOver` binds the same service — regression gate and
+        // observed-evidence reads included — to the unit's handle.
+        const problem = await invariants.transact(async (tx) => {
+          const rejected = await invariants.promotionServiceOver(tx.promotions).apply(
+            {
+              invariantType: body.invariant_type,
+              fromStatus: body.from_status,
+              toStatus: body.to_status,
+              evidence: {
+                shadowDurationDays: body.evidence.shadow_duration_days,
+                driftReportRef: body.evidence.drift_report_ref,
+                observedCoverage: body.evidence.observed_coverage,
+                observedConfidence: body.evidence.observed_confidence,
+              },
+              owner: body.owner,
+              createdAt: new Date(invariants.now()).toISOString(),
             },
-            owner: body.owner,
-            createdAt: new Date(invariants.now()).toISOString(),
-          },
-          invariants.config().promotionMinShadowDays,
-        );
-        if (problem !== null) return c.json(deny('promotion_rejected', problem), 422);
-        await identity.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'invariant_promotion_change',
-          targetRef: body.invariant_type,
-          context: { from: body.from_status, to: body.to_status, owner: body.owner },
+            invariants.config().promotionMinShadowDays,
+          );
+          if (rejected !== null) return rejected;
+          await tx.audit({
+            actorUserId: auth.userId,
+            eventType: 'invariant_promotion_change',
+            targetRef: body.invariant_type,
+            context: { from: body.from_status, to: body.to_status, owner: body.owner },
+          });
+          return null;
         });
+        if (problem !== null) return c.json(deny('promotion_rejected', problem), 422);
         return c.json({
           invariant_type: body.invariant_type,
           shadow_status: await invariants.promotionService.statusOf(body.invariant_type),
@@ -538,14 +822,23 @@ export function createInvariantsAdminRoutes(
         const problem = validateInvariantsConfigValue(key, value);
         if (problem !== null) return c.json(deny('invalid_value', problem), 422);
         const invariants = resolveInvariants();
-        await storeInvariantsConfigValue(resolveEvents().configStore, key, value);
-        await invariants.reloadConfig();
-        await resolveIdentity().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'invariant_config_change',
-          targetRef: key,
-          context: { key },
+        const identity = resolveIdentity();
+        // The value and the record of who set it commit together: a live
+        // configuration change nothing accounts for is the same defect as an
+        // unrecorded enforcement, on the surface that decides what the
+        // invariants are allowed to do.
+        await identity.transact(async (tx) => {
+          await storeInvariantsConfigValue(tx.config ?? resolveEvents().configStore, key, value);
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'invariant_config_change',
+            targetRef: key,
+            context: { key },
+          });
         });
+        // The in-process cache reload follows the COMMIT — reloading from an
+        // uncommitted write would serve a value the database does not hold.
+        await invariants.reloadConfig();
         return c.json({ ok: true, key });
       })
 

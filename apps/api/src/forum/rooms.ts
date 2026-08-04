@@ -215,20 +215,28 @@ export function roomMatchesQuery(room: RoomRecord, q: string): boolean {
 
 /**
  * WS-Q.3.1a — TIER ONE (room EXISTENCE): the room's shell — name, description,
- * visibility class, join affordance — is visible to ALL, so private rooms are
- * DISCOVERABLE and JOINABLE (§16.1). This is a deliberate semantic change from
- * the shipped restricted-room behavior: `roomVisibleToUser` now returns true
- * for every room, public or private, for any user including signed-out. It is
- * NOT gated by subscription. Never use this for content-bearing reads — that is
- * `roomContentVisibleToUser` (tier two). ("Unlisted/secret" rooms would be a
- * new SPEC axis, out of WS-Q scope.)
+ * visibility class, join affordance — is visible to ALL, so private SERVER rooms
+ * are DISCOVERABLE and JOINABLE (§16.1). This is a deliberate semantic change
+ * from the shipped restricted-room behavior: `roomVisibleToUser` returns true
+ * for every server room, public or private, for any user including signed-out.
+ * It is NOT gated by subscription. Never use this for content-bearing reads —
+ * that is `roomContentVisibleToUser` (tier two).
+ *
+ * WS-S §8/§21 — a Private P2P room is the ONE exception, and it is not a
+ * visibility rule so much as a surface rule: its server row is a bootstrap SHELL
+ * with an opaque name (the real display metadata lives on the §8.2 directory
+ * stub, `listed`-only), it has no server join/steward/lens/content surface, and
+ * its discovery endpoint is `GET /v1/private-rooms/:id/bootstrap`. Listing the
+ * shell here would publish the EXISTENCE of every `unlisted` room — the mode's
+ * whole purpose — and render a `listed` one through a server room summary whose
+ * affordances do not apply to it.
  */
 export async function roomVisibleToUser(
   _forum: ForumServices,
-  _room: RoomRecord,
+  room: RoomRecord,
   _userId: string | null,
 ): Promise<boolean> {
-  return true;
+  return room.storageMode === 'server';
 }
 
 /** CONTENT visibility (threads, lenses, detail): public rooms are readable by
@@ -242,6 +250,16 @@ export async function roomContentVisibleToUser(
   room: RoomRecord,
   userId: string | null,
 ): Promise<boolean> {
+  // A Private P2P room has no server content to be visible, and answering
+  // anything but "no" here is an existence oracle: its shell row exists only to
+  // give the §8.2 stub a `room_server_id`, so a surface that resolves an
+  // arbitrary id and then asks this question would confirm an `unlisted` room to
+  // anyone who guessed or obtained its id — the identical-404 contract
+  // `GET /v1/private-rooms/:id/bootstrap` enforces, undone through a different
+  // endpoint. FIRST, before the visibility ladder, so the platform ADMIN branch
+  // below cannot reach it either: the 2026-07 decision gives admin every server
+  // room and explicitly not a member-hosted one.
+  if (room.storageMode !== 'server') return false;
   if (room.visibility === 'public') return true;
   if (userId === null) return false;
   const subscription = await forum.rooms.getSubscription(room.roomId, userId);

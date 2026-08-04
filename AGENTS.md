@@ -68,6 +68,9 @@ pnpm lint:lockfile                  # lockfile integrity
 pnpm audit:advisories               # dependency advisories (npm BULK endpoint; classic `pnpm audit` is retired)
 pnpm check:deps                     # dependency budgets      · check:workspace-deps — boundary enforcement
 pnpm check:policy                   # doctrine documents      · check:prod-parity — dev↔prod adapter/env parity
+pnpm check:audited-writes           # a durable change and its audit row commit in ONE unit
+                                    #   (route handlers; NO allowlist — every domain has a transactor,
+                                    #   so a new violation has nowhere to be recorded as acceptable)
 pnpm check:csp-parity               # index.html carries NO hand-written CSP, and (after a web build)
                                     #   dist/index.html carries exactly the injected shared policy — the
                                     #   courier WebView's only policy, and the one delivery point the
@@ -85,6 +88,15 @@ pnpm check:sql-identifiers          # no migration identifier AT Postgres's 63-b
                                     #   ones; the gated migration harness settles it authoritatively by
                                     #   listening for Postgres's own truncation NOTICE, which also
                                     #   covers Drizzle-derived and `EXECUTE format()` names
+pnpm check:timestamp-precision      # every `timestamptz` is declared `(3)` — the resolution a
+                                    #   JavaScript `Date` can hold.  Microseconds are write-only here
+                                    #   and not inert: a keyset cursor read back through a `Date` names
+                                    #   an instant BEFORE its own row, so a descending page silently
+                                    #   drops every row sharing that millisecond and comes back SHORT —
+                                    #   which is how a caller decides it reached the end.  `instant()`
+                                    #   (schema/_custom.ts) is the ONLY way to declare one; the gated
+                                    #   `timestamp-precision` suite asks the SERVER, which is the half a
+                                    #   static gate cannot see
 pnpm check:governance-kyc           # every governance-participation POST enforces the KYC guard
 pnpm check:neutrality               # WS-I ranking neutrality · check:adversarial — WS-O.4.5 ensemble suite
 pnpm check:lcap-scheduler           # WS-R lane anti-starvation
@@ -333,11 +345,11 @@ in `package.json`, so an override placed there is silently ignored.
 
 | Pin | Reason | Drop when |
 |-----|--------|-----------|
-| `brace-expansion ^5.0.8` | GHSA-mh99-v99m-4gvg (unbounded-expansion OOM) lists EVERY prior release vulnerable (`<=5.0.7`) — there is no backported 1.x/2.x fix, so 5.0.8 is the only patched version | the advisory gains a backported fix, or nothing resolves brace-expansion below 5.0.8 |
+| `brace-expansion ^5.0.9` | GHSA-mh99-v99m-4gvg (unbounded-expansion OOM) lists EVERY prior release vulnerable (`<=5.0.7`), and the follow-up GHSA-rgw5-rvv9-x895 extends that to `<5.0.9` — 5.0.8's mitigation is bypassable, so 5.0.9 is the first patched version and there is still no backported 1.x/2.x fix | the advisories gain a backported fix, or nothing resolves brace-expansion below 5.0.9 |
 | `filelist ^2.0.2` | pairs with the pin above: the workbox dev chain (`…off-main-thread`→ejs→jake→filelist) pulled `minimatch@5`, whose CJS `require('brace-expansion')` expects the pre-5.x DEFAULT export and throws `expand is not a function` under 5.0.8.  filelist 2.x moves to `minimatch@^10.2.1`, which uses the patched line | jake ships a release depending on `filelist >= 2` |
 | `ws ^8.21.0` | patched line for viem→isows (old `ws@8.20.1` DoS advisory); no `ws` server runs here | viem/isows guarantees a patched `ws` |
-| `fast-uri ^3.1.4` | dev-only toolchain (ajv→workbox-build→vite-plugin-pwa); patches the 3.1.3 host-confusion advisory | ajv/workbox resolve `fast-uri >= 3.1.4` |
-| `undici ^7.28.0` | test-only (jsdom `fetch`); patches two 7.27.2 advisories | jsdom pins `undici >= 7.28.0` |
+| `fast-uri ^3.1.5` | dev-only toolchain (ajv→workbox-build→vite-plugin-pwa); 3.1.4 patched one host-confusion advisory and GHSA-7p8r-x3mc-p8w7 found another (a backslash authority introducer) | ajv/workbox resolve `fast-uri >= 3.1.5` |
+| `undici ^7.29.0` | test-only (jsdom `fetch`); 7.28.0 patched two 7.27.2 advisories and GHSA-4cwx-7wf7-3272 added a third (cross-user disclosure via degenerate private cache directives) | jsdom pins `undici >= 7.29.0` |
 | `esbuild ^0.28.1` | dev-only toolchain; dedupes onto one audited line | bump with the Vite major |
 | `@noble/curves 2.0.1` + `@noble/ciphers 2.1.1` (EXACT) | `ts-mls@1.6.2` declares them as exact peers (KAT cross-checks guard the pin) | `ts-mls` widens its `@noble/*` peer range |
 
@@ -440,6 +452,27 @@ write for a file the foreground agent may also touch.
   value that IS live (`z.infer<typeof xSchema>`, `typeof table.$inferSelect`,
   `(typeof CONST)[number]`).  Those are uniform by construction — every table
   having a `Row` type is worth more than pruning the few nothing imports yet.
+
+- **A state change commits WITH its record, and a precondition lives in the
+  WRITE.**  Two shapes account for most of what review finds here, and both have
+  a house answer:
+
+  *Read-then-write.*  `if (await store.findOpen(...)) return conflict;
+  await store.insert(...)` is a check, not a constraint — the two concurrent
+  callers this is meant to stop both pass it.  Push the precondition into one
+  statement (`claimIfUnassigned`, `delayEnforcementIfNotDelayed`,
+  `insertIfNoneOpenForTarget`, `resolveIfOpen`, `insertIfNoneOpen`), backed by a
+  partial unique index where the database can hold it.  The in-memory twin
+  checks and writes with NO `await` between, which is the same guarantee on a
+  single-threaded runtime.
+
+  *Change-then-audit.*  A durable change and the audit row accounting for it are
+  one fact and must commit together — `ModerationTransactor` for WS-J,
+  `InvariantPlatformServices.transact` for WS-H, both over the shared
+  `lib/in-memory-unit-of-work.ts`.  Act-then-audit leaves an irreversible change
+  with no record; audit-then-act records a change that failed; a compensating
+  write is itself best-effort.  `check:audited-writes` enforces this for route
+  handlers.
 
 - **Pino is the ONLY server logging path.**  Redaction is worth exactly
   as much as the share of output that passes through it, so a `console.*`
@@ -831,9 +864,9 @@ workspace has a thin local config so `pnpm --filter <ws> test` runs
 standalone.  Coverage gate: 80% minimum (lines, functions, branches,
 statements).
 
-**Test counts.**  `pnpm test` is the canonical query (≈10520 pass without
-the gated integration env; ≈10810 with live Postgres/Redis — the gated env
-also drops the skip count from ≈300 to ≈12, the residual being the
+**Test counts.**  `pnpm test` is the canonical query (≈10680 pass without
+the gated integration env; ≈11000 with live Postgres/Redis — the gated env
+also drops the skip count from ≈340 to ≈12, the residual being the
 `RUN_PERF` benchmarks).  Only monotonic growth is enforced — exact numbers
 drift, so the per-suite breakdown lives in each `docs/*/README.md`, not
 here.  WS-D/E/F/G/H/I/U and WS-R add **gated** Postgres+Redis integration
@@ -849,7 +882,8 @@ forwards the `--` verbatim and vitest drops every flag after it, so the run
 looks normal while computing no coverage at all).  Measure it with the gated
 services up: the WS-D/E/F/G/H/I/U + WS-R integration suites carry a large
 share of the branch coverage, and branches clear the bar by a thin margin
-(≈81%) WITH them.
+(measured 80.5%) WITH them — half a point, so treat a coverage drop in review
+as a real signal rather than noise.
 
 **E2E.**  Playwright over Chromium/Firefox/WebKit with axe-core assertions.
 `playwright.config.ts` is the frontend-only suite against the static

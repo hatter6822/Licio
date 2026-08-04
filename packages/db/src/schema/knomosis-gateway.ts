@@ -26,15 +26,13 @@ import {
   numeric,
   primaryKey,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { knomosisSchema, roomLawPacks } from './governance.js';
 import { users } from './user.js';
 import { walletAccounts } from './wallet/wallet-account.js';
-
-const tz = (name: string) => timestamp(name, { withTimezone: true });
 
 // ---------------------------------------------------------------------------
 // KnomosisDeployment (WS-L.1.1a-1; SPEC §22.2)
@@ -68,7 +66,7 @@ export const knomosisDeployments = knomosisSchema.table(
     contractManifestHash: text('contract_manifest_hash').notNull(),
     pinnedKnomosisCommit: text('pinned_knomosis_commit').notNull(),
     status: knomosisDeploymentStatusEnum('status').notNull().default('provisioning'),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   // (environment, chain_id) is unique among ACTIVE-lifecycle rows only: a
   // RETIRED row (a pin the file rotated away) must not block the replacement pin
@@ -112,8 +110,8 @@ export const onChainEvents = knomosisSchema.table(
     gatewaySeq: bigint('gateway_seq', { mode: 'bigint' }),
     gatewayIndex: integer('gateway_index'),
     reorgState: reorgStateEnum('reorg_state').notNull().default('pending'),
-    reorgDetectedAt: tz('reorg_detected_at'),
-    indexedAt: tz('indexed_at').notNull().defaultNow(),
+    reorgDetectedAt: instant('reorg_detected_at'),
+    indexedAt: instant('indexed_at').notNull().defaultNow(),
   },
   (t) => [
     // Per-source idempotency keys (partial unique indexes, WS-L.3.3c): re-seeing
@@ -210,8 +208,8 @@ export const knomosisActionRecords = knomosisSchema.table(
      *  so the partial unique below can hold — the intent is the exclusive
      *  resource, and one intent may mint exactly one action. */
     paymentIntentId: uuid('payment_intent_id'),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('knomosis_action_idem_idx').on(t.actorUserId, t.idempotencyKey),
@@ -246,7 +244,7 @@ export const knomosisActionNonces = knomosisSchema.table(
       .references(() => knomosisDeployments.deploymentId, { onDelete: 'cascade' }),
     /** uint256 nonce value (minor-unit-scale numeric; gaps permitted). */
     nonce: numeric('nonce', { precision: 78, scale: 0 }).notNull(),
-    usedAt: tz('used_at').notNull().defaultNow(),
+    usedAt: instant('used_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.userId, t.deploymentId, t.nonce] })],
 );
@@ -267,7 +265,7 @@ export const walletActorMappings = knomosisSchema.table(
       .references(() => knomosisDeployments.deploymentId, { onDelete: 'cascade' }),
     /** Opaque Knomosis actor id (decimal string / 0x-hex per gateway contract). */
     actorId: text('actor_id').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.walletAccountId, t.deploymentId] })],
 );
@@ -350,14 +348,14 @@ export const governanceProposals = knomosisSchema.table(
     executionState: proposalExecutionStateEnum('execution_state').notNull().default('not_executed'),
     /** True for K1 simulated-governance proposals (no on-chain effect ever). */
     simulationMode: boolean('simulation_mode').notNull().default(true),
-    executableAfter: tz('executable_after'),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    executedAt: tz('executed_at'),
+    executableAfter: instant('executable_after'),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    executedAt: instant('executed_at'),
     /** When `claimForExecution` CAS'd this row `timelocked`→`executing`.  The
      *  recovery sweep only re-drives a claim OLDER than its stale cutoff, so a
      *  live manual execution is never raced (and its `execution_simulated` audit
      *  row never mis-attributed to the null-actor sweep) — WS-L.4.1c / N2. */
-    executionClaimedAt: tz('execution_claimed_at'),
+    executionClaimedAt: instant('execution_claimed_at'),
     // --- WS-M production lifecycle columns (migration 0082; null on sim rows).
     /** The law-pack version PINNED at publication (WS-M.1.3d) — the rules the
      *  proposal is evaluated under for its whole lifetime. */
@@ -366,9 +364,9 @@ export const governanceProposals = knomosisSchema.table(
     }),
     /** Spend category for treasury proposals (kernel cap category). */
     category: text('category'),
-    deliberationEndsAt: tz('deliberation_ends_at'),
-    votingEndsAt: tz('voting_ends_at'),
-    challengeWindowEndsAt: tz('challenge_window_ends_at'),
+    deliberationEndsAt: instant('deliberation_ends_at'),
+    votingEndsAt: instant('voting_ends_at'),
+    challengeWindowEndsAt: instant('challenge_window_ends_at'),
     /** The quorum DENOMINATOR, frozen at the `deliberation → open` transition
      *  (migration 0100).  NULL on a row opened before it existed, which the
      *  tally reads as "fall back to the live count" — 0 would fail quorum
@@ -379,7 +377,7 @@ export const governanceProposals = knomosisSchema.table(
      *  instant, not the scheduled `deliberation_ends_at`.  The ballot cutoff
      *  reads this so the denominator and the numerator answer to one instant;
      *  scheduler lag between the two made quorum unreachable. */
-    eligibleBasisAt: tz('eligible_basis_at'),
+    eligibleBasisAt: instant('eligible_basis_at'),
     /** The settled tally snapshot (proposalTallyWireSchema) — recorded once at
      *  settle so later weight/eligibility changes cannot rewrite history. */
     tallySnapshot: jsonb('tally_snapshot'),
@@ -405,7 +403,7 @@ export const governanceProposalVotes = knomosisSchema.table(
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
     choice: text('choice').notNull(), // approve | reject | abstain (CHECK in migration)
-    castAt: tz('cast_at').notNull().defaultNow(),
+    castAt: instant('cast_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.proposalId, t.voterUserId] })],
 );
@@ -433,7 +431,7 @@ export const governanceSignatures = knomosisSchema.table(
     signatureRef: text('signature_ref').notNull(),
     weightSnapshot: numeric('weight_snapshot'),
     eligibilityReason: text('eligibility_reason').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
     // --- WS-M.2.3b-1 (migration 0082; defaults cover the WS-L.4 rows).
     purpose: text('purpose').notNull().default('vote'), // vote|approval|multisig|delegation (CHECK)
     choice: text('choice'), // approve|reject|abstain for purpose=vote (CHECK)
@@ -495,7 +493,7 @@ export const governanceDelegatedUnitClaims = knomosisSchema.table(
     signatureId: uuid('signature_id')
       .notNull()
       .references(() => governanceSignatures.signatureId, { onDelete: 'cascade' }),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     primaryKey({
@@ -516,7 +514,7 @@ export const simTreasuries = knomosisSchema.table('sim_treasury', {
   roomId: uuid('room_id').primaryKey(), // soft ref (isolation)
   /** asset (SIM-*) → minor-unit amount string.  Never negative (service + entries). */
   balances: jsonb('balances').notNull(),
-  updatedAt: tz('updated_at').notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 export type SimTreasuryRow = typeof simTreasuries.$inferSelect;
 
@@ -536,7 +534,7 @@ export const simTreasuryEntries = knomosisSchema.table(
     // proposalId for a grant_execution, a client key for a deposit.  Partial-unique
     // (below) so a crash-retry can never double-apply.
     idempotencyKey: text('idempotency_key'),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('sim_treasury_entry_room_idx').on(t.roomId, t.createdAt),
@@ -564,7 +562,7 @@ export const governanceAuditLogs = knomosisSchema.table(
     actorRef: text('actor_ref'),
     actionDetails: jsonb('action_details').notNull(),
     simulationMode: boolean('simulation_mode').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
     /** Optional idempotency key.  NULL for ordinary audits (Postgres treats NULLs as
      *  DISTINCT, so the unique index leaves them unconstrained); a non-null key is
      *  written at most once so a crash-retry REPAIRS a dropped audit — e.g.
@@ -635,7 +633,7 @@ export const reconciliationResults = knomosisSchema.table(
     details: jsonb('details').notNull(),
     /** The common low-watermark X-Knomosis-Seq the comparison was made at. */
     lowWatermarkSeq: bigint('low_watermark_seq', { mode: 'bigint' }),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
     /** Monotonic INSERTION order — the strict tiebreaker for "latest per entity":
      *  a resolving `match` and its mismatch can share a `created_at`, and only an
      *  insertion sequence deterministically keeps the later row (WS-L.3.4b). */
@@ -668,8 +666,8 @@ export const knomosisReceipts = knomosisSchema.table(
     /** Private receipts are owner-scoped; null for public receipts. */
     ownerUserId: uuid('owner_user_id').references(() => users.userId, { onDelete: 'cascade' }),
     finalState: text('final_state').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [uniqueIndex('knomosis_receipt_action_kind_idx').on(t.actionRecordId, t.kind)],
 );
@@ -688,8 +686,8 @@ export const comprehensionResults = knomosisSchema.table(
     quizVersion: text('quiz_version').notNull(),
     passed: boolean('passed').notNull().default(false),
     attempts: integer('attempts').notNull().default(0),
-    passedAt: tz('passed_at'),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    passedAt: instant('passed_at'),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.userId, t.quizVersion] })],
 );

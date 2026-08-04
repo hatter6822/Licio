@@ -9,6 +9,7 @@ import { securityHeadersMiddleware } from './middleware/security-headers.js';
 import { cspReportRoute } from './routes/csp-report.js';
 import { createReadyRoute, healthRoute, type ReadinessProbe } from './routes/health.js';
 import { createPrivateRendezvousRoutes } from './routes/private-rendezvous.js';
+import { createPrivateRoomsRoutes } from './routes/private-rooms.js';
 import { createV1Routes } from './routes/v1.js';
 
 export type AppEnv = {
@@ -45,6 +46,9 @@ export function createApp(options: CreateAppOptions = {}) {
     .route('/api/security/csp-report', cspReportRoute)
     .route('/api/lcap/v2', createLcapRoutes())
     .route('/v1/private-rendezvous', createPrivateRendezvousRoutes())
+    // Mounted BEFORE `/v1` so the directory-stub surface is not shadowed by the
+    // catch-all v1 router (same reason the rendezvous mount precedes it).
+    .route('/v1/private-rooms', createPrivateRoomsRoutes())
     .route('/v1', createV1Routes());
 
   return routes;

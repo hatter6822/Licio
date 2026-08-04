@@ -10,6 +10,7 @@ import type {
   AppealReviewResponse,
   AuditListResponse,
   CaseReviewResponse,
+  CivicMapResponse,
   EvidenceDecisionsResponse,
   EvidenceDecisionView,
   EvidenceQueueResponse,
@@ -50,6 +51,8 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchAppeal: vi.fn(),
   fetchAudit: vi.fn(),
   fetchIncidents: vi.fn(),
+  fetchCivicMap: vi.fn(),
+  openBridgeRequest: vi.fn(),
   fetchEvidenceQueue: vi.fn(),
   fetchEvidenceDecisions: vi.fn(),
   applyEvidenceDecision: vi.fn(),
@@ -146,7 +149,7 @@ const caseReview: CaseReviewResponse = {
   thread_context: [
     {
       contribution_id: '00000000-0000-4000-8000-0000000000d1',
-      thread_id: '00000000-0000-4000-8000-0000000000e1',
+      thread_id: '00000000-0000-4000-8000-0000000000t1',
       type: 'comment',
       body: 'the reported contribution text',
       citations: [],
@@ -193,6 +196,8 @@ const caseReview: CaseReviewResponse = {
     edited_after_report: true,
   },
   available_actions: ['warn', 'hide', 'remove'],
+  directory_delistable: false,
+  enforcement_held: false,
 };
 
 const appealQueue: AppealQueueResponse = {
@@ -254,6 +259,54 @@ const incidentView = {
   reviewed_at: null,
   reviewed_by: null,
 };
+/** A minimal landscape with one fragile join, for the Integrity-tab cases. */
+/** A scan that reached the end of its window — the ordinary case. */
+const FULL_SCAN = { complete: true, examined: 2 } as const;
+
+const civicLandscape: CivicMapResponse = {
+  window: { start: '2026-08-02T10:00:00.000Z', end: '2026-08-02T11:00:00.000Z' },
+  summary: {
+    basin_count: 2,
+    merge_count: 1,
+    split_count: 0,
+    fragile_saddle_count: 1,
+    final_basin_count: 1,
+  },
+  basins: [
+    {
+      basin_id: 'aaaaaaaa-1111-4111-8111-111111111111',
+      title: 'Flooding on the ring road',
+      level: 30,
+      topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
+      final: true,
+    },
+    {
+      basin_id: 'bbbbbbbb-2222-4222-8222-222222222222',
+      title: 'Council budget vote',
+      level: 8,
+      topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
+      final: false,
+    },
+  ],
+  merges: [
+    {
+      basin_a: 'aaaaaaaa-1111-4111-8111-111111111111',
+      basin_b: 'bbbbbbbb-2222-4222-8222-222222222222',
+      level: 6,
+      connecting_edges: 1,
+      fragile: true,
+      survivor: 'aaaaaaaa-1111-4111-8111-111111111111',
+      bridge_thread_id: 'cccccccc-1111-4111-8111-111111111111',
+      basin_a_title: 'Flooding on the ring road',
+      basin_b_title: 'Council budget vote',
+      shared_topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
+    },
+  ],
+  splits: [],
+  coverage: 1,
+  scan: { complete: true, examined: 2 },
+};
+
 const incidents: IncidentQueueResponse = {
   incidents: [incidentView],
   count: 1,
@@ -277,7 +330,7 @@ const auditList: AuditListResponse = {
       linked_action_id: null,
       report_ids: [],
       co_approver_handle: null,
-      notes: null,
+      notes: 'Removed after the second report; the excerpt is in the case file.',
     },
     {
       audit_id: '00000000-0000-4000-8000-0000000000d2',
@@ -305,7 +358,7 @@ const evidenceQueue: EvidenceQueueResponse = {
   items: [
     {
       contribution_id: CONTRIB_ID,
-      thread_id: '00000000-0000-4000-8000-0000000000e1',
+      thread_id: '00000000-0000-4000-8000-0000000000t1',
       story_id: '00000000-0000-4000-8000-0000000000a5',
       story_title: 'Regional water board publishes the dataset',
       type: 'comment',
@@ -435,6 +488,21 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
   });
 
+  it('explains an MFCI-2 enforcement hold instead of just shrinking the palette', async () => {
+    // The server withholds the enforcement verbs while a coordinated-report
+    // incident holds the case. A palette that silently loses `hide`/`remove`
+    // reads as a lost role; the reviewer needs the reason and the way out.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      enforcement_held: true,
+      available_actions: ['escalate', 'clear'],
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText(/Enforcement is held pending integrity review/i)).toBeVisible();
+  });
+
   it('surfaces an error toast when an action is forbidden', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchCase).mockResolvedValue(caseReview);
@@ -458,6 +526,7 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
         evidence_urls: ['https://example.com/evidence-1'],
       })),
       available_actions: ['clear', 'escalate'],
+      directory_delistable: false,
     });
     vi.mocked(api.applyModerationAction).mockResolvedValue({
       action_id: '00000000-0000-4000-8000-0000000000ac',
@@ -478,6 +547,46 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
         expect.objectContaining({ targetType: 'room' }),
       ),
     );
+  });
+
+  it('renders the captured LISTING EVIDENCE a room case is decided on', async () => {
+    // A private room is a P2P shell: the server stores none of its content, so
+    // the name and description a report was filed about survive in exactly one
+    // place — the `private_room_listing_reported` audit note captured at intake,
+    // before the owner could edit them. The console rendered the action, actor,
+    // time and state transition of every history row and dropped `notes`, so the
+    // reviewer decided whether to delist a public listing while looking at
+    // nothing of what was reported.
+    const note =
+      'Reported listing — name: "Abusive name" · description: "Abusive text" (captured at intake).';
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      target_type: 'room',
+      content_kind: null,
+      case_history: [
+        {
+          audit_id: '00000000-0000-4000-8000-0000000000e1',
+          event_time: NOW,
+          actor_handle: null,
+          actor_role: null,
+          action: 'private_room_listing_reported',
+          reason_code: null,
+          target_type: 'room',
+          target_id: '00000000-0000-4000-8000-0000000000cc',
+          prior_state: null,
+          next_state: null,
+          reversible: false,
+          linked_action_id: null,
+          report_ids: [],
+          co_approver_handle: null,
+          notes: note,
+        },
+      ],
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText(note)).toBeInTheDocument();
   });
 
   it('WS-J.2.6b: an evidence link resolves the server verdict before navigating', async () => {
@@ -766,8 +875,14 @@ describe('AppealsPanel', () => {
   });
 });
 
+/** The Integrity tab now renders the Civic Map above the incident queue; the
+ *  landscape defaults to "nothing to map" unless a case opts in. */
+const emptyLandscape = () =>
+  vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: null, scan: FULL_SCAN });
+
 describe('IncidentsPanel', () => {
   it('lists incidents and confirms one (protecting the target)', async () => {
+    emptyLandscape();
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
     vi.mocked(api.resolveIncident).mockResolvedValue({
@@ -785,6 +900,7 @@ describe('IncidentsPanel', () => {
   });
 
   it('shows the empty + error states', async () => {
+    emptyLandscape();
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchIncidents).mockResolvedValue({ incidents: [], count: 0, next_cursor: null });
     const { unmount } = render(<ModerationConsole />, { wrapper: Providers });
@@ -797,6 +913,91 @@ describe('IncidentsPanel', () => {
     tab('Integrity');
     expect(await screen.findByText(/does not have access/i)).toBeInTheDocument();
   });
+
+  // WS-H.7.4 — the Civic Map and the incident queue are INDEPENDENT reads on one
+  // tab, so neither may take the other down. Both directions are asserted
+  // because only one of them was a pre-existing behaviour.
+  it('renders the Civic Map above the queue and routes a bridge request', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: civicLandscape, scan: FULL_SCAN });
+    vi.mocked(api.openBridgeRequest).mockResolvedValue({
+      attempt_id: '99999999-9999-4999-8999-999999999999',
+      scoi_baseline: 0.4,
+      candidates: ['00000000-0000-4000-8000-0000000000c1'],
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    expect(await screen.findByText(/Attention landscape/i)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /bridge request on this join/i }));
+    await waitFor(() =>
+      expect(api.openBridgeRequest).toHaveBeenCalledWith('cccccccc-1111-4111-8111-111111111111'),
+    );
+  });
+
+  it('re-reads the landscape after opening a bridge request', async () => {
+    // The server withholds a target that already has an open request, so the
+    // map AFTER this action no longer offers this one. Without the re-read the
+    // button stayed live on a stale payload and every later click answered
+    // `409 already_open`.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: civicLandscape, scan: FULL_SCAN });
+    vi.mocked(api.openBridgeRequest).mockResolvedValue({
+      attempt_id: '99999999-9999-4999-8999-999999999999',
+      scoi_baseline: 0.4,
+      candidates: [],
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    await screen.findByText(/Attention landscape/i);
+    const before = vi.mocked(api.fetchCivicMap).mock.calls.length;
+    fireEvent.click(await screen.findByRole('button', { name: /bridge request on this join/i }));
+    await waitFor(() =>
+      expect(vi.mocked(api.fetchCivicMap).mock.calls.length).toBeGreaterThan(before),
+    );
+  });
+
+  it('re-reads the landscape when the bridge target is ALREADY OPEN', async () => {
+    // Another steward opened it after this map was fetched, so the server has
+    // already stopped offering that target — and this query has no polling
+    // interval, so without the re-read the button stays enabled on a stale
+    // payload and every click repeats the 409 indefinitely.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
+    vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: civicLandscape, scan: FULL_SCAN });
+    vi.mocked(api.openBridgeRequest).mockRejectedValue(
+      new ApiClientError('already_open', 'A bridge request is already open', 409),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    await screen.findByText(/Attention landscape/i);
+    const before = vi.mocked(api.fetchCivicMap).mock.calls.length;
+    fireEvent.click(await screen.findByRole('button', { name: /bridge request on this join/i }));
+    await waitFor(() =>
+      expect(vi.mocked(api.fetchCivicMap).mock.calls.length).toBeGreaterThan(before),
+    );
+  });
+
+  it('keeps the incident queue usable when the landscape read fails', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockResolvedValue(incidents);
+    vi.mocked(api.fetchCivicMap).mockRejectedValue(new ApiClientError('unavailable', 'no', 503));
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    expect(await screen.findByText(/attention landscape could not be loaded/i)).toBeInTheDocument();
+    // The queue below still rendered.
+    expect(screen.getByText(/Volume spike dominated by new accounts/)).toBeInTheDocument();
+  });
+
+  it('keeps the landscape usable when the incident queue fails', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockRejectedValue(new ApiClientError('unavailable', 'no', 503));
+    vi.mocked(api.fetchCivicMap).mockResolvedValue({ landscape: civicLandscape, scan: FULL_SCAN });
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    expect(await screen.findByText(/Attention landscape/i)).toBeInTheDocument();
+  });
 });
 
 describe('AuditPanel', () => {
@@ -808,6 +1009,12 @@ describe('AuditPanel', () => {
     expect(await screen.findByText('remove')).toBeInTheDocument();
     expect(screen.getByText(/MOD_SPAM_001/)).toBeInTheDocument();
     expect(screen.getByText(/system/)).toBeInTheDocument(); // null actor → system
+    // The note is part of the record, not decoration: several actions put the
+    // whole of their evidence there, and a trail showing only the verb is a
+    // list of things that happened rather than an account of them.
+    expect(
+      screen.getByText('Removed after the second report; the excerpt is in the case file.'),
+    ).toBeInTheDocument();
     unmount();
 
     vi.mocked(api.fetchAudit).mockResolvedValue({ items: [], next_cursor: null });

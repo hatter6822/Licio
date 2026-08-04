@@ -102,18 +102,13 @@ import {
   RedisReplayNonceStore,
   RedisSlidingWindowStore,
 } from './events/redis-event-stores.js';
-import {
-  applyRetentionPreferenceChange,
-  exportUserAttention,
-  purgeUserAttention,
-} from './events/retention.js';
+import { purgeUserAttention } from './events/retention.js';
 import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
 } from './events/services.js';
 import type { ItemSafetyStateStore } from './events/stores.js';
 import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
-import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
 import {
   buildDebateJudgeRunner,
   DEBATE_SCHEDULER_INTERVAL_MS,
@@ -161,6 +156,7 @@ import {
 } from './governance/services.js';
 import { createInMemoryGovernanceStores } from './governance/stores.js';
 import { accountRef } from './identity/crypto.js';
+import { installDataRightsHooks } from './identity/data-rights-hooks.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -207,7 +203,7 @@ import {
   registerIngestionConsumers,
   setIngestionServices,
 } from './ingestion/services.js';
-import type { StoryStore } from './ingestion/stores.js';
+import { InMemoryStoryStore, type StoryStore } from './ingestion/stores.js';
 import {
   DrizzleBridgeAttemptStore,
   DrizzleCalibrationStore,
@@ -269,19 +265,13 @@ import { assertProductionParity } from './lib/parity-guard.js';
 import { isTierUniqueViolation, TIER_COLLISION_RETRIES } from './lib/pg-errors.js';
 import { pgNoticeLogLevel } from './lib/pg-notices.js';
 import {
-  getPreferences,
   getVapidConfig,
-  purgePushStateForUser,
   sendBodylessWakeToUser,
   setPushStateStore,
   subscriptionsForUser,
 } from './lib/push-service.js';
-import {
-  REPLY_NOTIFICATIONS_PER_USER_CAP,
-  replyNotifications,
-  setReplyNotificationStore,
-} from './lib/reply-notifications.js';
-import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
+import { setReplyNotificationStore } from './lib/reply-notifications.js';
+import { setUserSettingsStore } from './lib/user-settings.js';
 import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
 import { notFoundHandler } from './middleware/error-handler.js';
 import { actorQueues } from './moderation/authz.js';
@@ -291,7 +281,6 @@ import {
   createWsJContributionSafety,
 } from './moderation/forum-integration.js';
 import { malwareVerdictForUrl } from './moderation/malware-fetch.js';
-import { noticeToView } from './moderation/notices.js';
 import {
   type ContentEnforcementDeps,
   type ContentPortDeps,
@@ -312,6 +301,13 @@ import {
   startRendezvousScheduler,
 } from './private-rendezvous/scheduler.js';
 import { getRendezvousService } from './private-rendezvous/service.js';
+import { DrizzlePrivateRoomStubStore } from './private-rooms/drizzle-store.js';
+import {
+  getPrivateRoomStubService,
+  inMemoryStubStore,
+  PrivateRoomStubService,
+  setPrivateRoomStubService,
+} from './private-rooms/service.js';
 import { loadPwattRuntimeConfig, loadTriggerThreshold } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
@@ -463,6 +459,43 @@ const makeJobLease = () => (db ? new DrizzleJobLeaseStore(db) : new InMemoryJobL
 if (db) {
   identityServices.store = new DrizzleIdentityStore(db);
   identityServices.audit = new DrizzleAuditStore(db);
+  // …and the UNIT those writes commit through. Swapping the stores without this
+  // leaves the in-memory unit running over the Drizzle adapters: the writes
+  // land, and the atomicity they are inside the unit FOR does not.
+  const identityDb = db;
+  identityServices.transact = (work) =>
+    identityDb.transaction((tx) =>
+      work({
+        store: new DrizzleIdentityStore(tx),
+        audit: new DrizzleAuditStore(tx),
+        // The §19.3 attention purge, ON THIS TRANSACTION.
+        //
+        // The WS-E stores live in the same database, so the erasure and the
+        // `attention_delete` row that accounts for it are one commit. Bound
+        // here rather than reached through `identityServices.purgeAttention`,
+        // which writes through the separately-composed stores: calling that
+        // from inside the unit is lexical nesting and nothing more — the purge
+        // would commit on its own, and a later failure in the unit would leave
+        // the user's attention history irreversibly gone, the record rolled
+        // back, and a 500 telling them it did not happen.
+        // Every workstream's `/config` write, on this transaction — one table,
+        // one binding, so a config change and the record of who made it commit
+        // together everywhere.
+        config: new DrizzlePwattConfigStore(tx),
+        purgeAttention: (userId, mode) =>
+          purgeUserAttention(
+            {
+              ...eventServices,
+              eventStore: new DrizzleEventStore(tx),
+              attentionStore: new DrizzleAttentionAggregateStore(tx),
+              ledgerStore: new DrizzleSignalLedgerStore(tx),
+              behaviorStore: new DrizzleActorBehaviorStore(tx),
+            },
+            userId,
+            mode,
+          ),
+      }),
+    );
   // Web Push state (WS-C.2.4a/c): durable subscriptions + preferences, so a
   // restart/deploy never invalidates delivery and every replica can wake any
   // user's endpoints.
@@ -561,6 +594,20 @@ if (env.REDIS_URL !== undefined && sharedRedis) {
 }
 if (db) {
   ingestionServices.stories = new DrizzleStoryStore(db);
+  // The unit those operator actions commit through, identity trail included.
+  const ingestionDb = db;
+  ingestionServices.transact = (work) =>
+    ingestionDb.transaction((tx) =>
+      work({
+        sources: new DrizzleSourceStore(tx),
+        syndications: new DrizzleSyndicationStore(tx),
+        takedowns: new DrizzleTakedownStore(tx),
+        stories: new DrizzleStoryStore(tx),
+        embeddings: new DrizzleEmbeddingStore(tx),
+        reviewQueue: new DrizzleReviewQueueStore(tx),
+        identityAudit: new DrizzleAuditStore(tx),
+      }),
+    );
   ingestionServices.sources = new DrizzleSourceStore(db);
   ingestionServices.syndications = new DrizzleSyndicationStore(db);
   ingestionServices.claims = new DrizzleClaimStore(db);
@@ -621,6 +668,13 @@ if (env.REDIS_URL !== undefined && sharedRedis) {
 if (db) {
   forumServices.contributions = new DrizzleContributionStore(db);
   forumServices.rooms = new DrizzleRoomStore(db);
+  // …and the unit those room-lifecycle writes commit through, with the identity
+  // trail on the same handle.
+  const forumDb = db;
+  forumServices.transact = (work) =>
+    forumDb.transaction((tx) =>
+      work({ rooms: new DrizzleRoomStore(tx), identityAudit: new DrizzleAuditStore(tx) }),
+    );
   forumServices.lenses = new DrizzleLensStore(db);
   forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
   // WS-T — the debate arena store over migration 0056.
@@ -665,6 +719,45 @@ if (db) {
   invariantServices.mfciMargins = new DrizzleMfciMarginsStore(db);
   invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
   invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
+  // …and the directory-stub service on THIS client.
+  //
+  // Its lazy builder creates its own `createDbClient` when `DATABASE_URL` is
+  // set, which is a SECOND postgres.js pool against the same database — another
+  // ten connections per replica, for one table. The composition root already
+  // holds the client every other store shares, so it installs the service
+  // rather than letting the fallback mint a pool (the same correction
+  // `lcap/service.ts` carries).
+  setPrivateRoomStubService(new PrivateRoomStubService(new DrizzlePrivateRoomStubStore(db)));
+  // …AND the unit those writes commit through. Swapping the store without this
+  // would leave the in-memory unit running over the Drizzle store: the writes
+  // would land, and the ATOMICITY they are inside the unit for would not — an
+  // audit failure would leave the attempt behind, which is the defect the unit
+  // exists to close. One `db.transaction`, both stores bound to that handle.
+  const invariantDb = db;
+  invariantServices.transact = (work) =>
+    invariantDb.transaction((tx) =>
+      work({
+        bridgeAttempts: new DrizzleBridgeAttemptStore(tx),
+        audit: (input) => new DrizzleAuditStore(tx).append(input),
+        // …and the thread read, on the SAME handle: the writability predicate
+        // the insert depends on has to be read inside the transaction, or the
+        // window it closes is still open.
+        threads: new DrizzleStoryStore(tx),
+        // The room and its stewards on the same handle: authority is as
+        // perishable as writability (WS-Q moves threads, grants are revoked),
+        // and both are re-asked inside the unit.
+        rooms: new DrizzleRoomStore(tx),
+        promotions: new DrizzlePromotionStore(tx),
+        // The MFCI resolution surface on the same handle: `resolve` is a
+        // compare-and-set, so its trail row has to commit with it or there is
+        // no second chance to write one.
+        mfciCases: new DrizzleMfciCaseStore(tx),
+        mfciRiskStates: new DrizzleMfciRiskStateStore(tx),
+        // Clearing an MFCI case LIFTS a safety freeze, so the freeze moves on
+        // the same handle as the resolution that decided it.
+        safety: new DrizzleItemSafetyStateStore(tx),
+      }),
+    );
 }
 // The PHI session-topic sequences are SESSION-SCOPED ephemera (WS-H.6.1a) —
 // Redis, never Postgres, is their durable-enough production home: attention
@@ -723,26 +816,6 @@ setRankingServices(rankingServices);
     return story;
   };
 }
-// Close the WS-D residual hooks with their real WS-E implementations: DSAR
-// export and deletion now cover attention data, and a retention-preference
-// change tightens existing purge deadlines (never extends them). The purge
-// mode distinguishes the attention RESET (attention tiers only) from the
-// account hard purge (attention deleted + remaining owned rows de-linked).
-identityServices.purgeAttention = (userId, mode) => purgeUserAttention(eventServices, userId, mode);
-identityServices.exportAttention = (userId) => exportUserAttention(eventServices, userId);
-// The CONTENT half of the data-rights hooks (WS-F stories + WS-G forum/
-// rooms/uploads, WS-Q.3.5 tier tagging) is composed in the testable
-// forum/data-rights module. Export is COMPLETE (§19.3 / GDPR Art. 15) and
-// covers BOTH visibility tiers; anonymize tombstones the author across tiers
-// and removes (private-room) memberships + steward rows.
-identityServices.exportContributions = (userId) =>
-  exportUserContent(ingestionServices, forumServices, userId);
-identityServices.anonymizeContributions = (userId) => anonymizeUserContent(forumServices, userId);
-identityServices.onPrivacyChange = (change) => {
-  void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>
-    logger.error({ err }, 'retention preference propagation failed'),
-  );
-};
 // DSAR export-archive storage (WS-D.2.2c): S3-compatible when the all-or-none
 // S3_* env group is set (a partial group fails validation at boot).  Archives
 // are SecretBox-sealed client-side either way; without S3 they are in-memory,
@@ -787,26 +860,19 @@ identityServices.alertTransports = createAlertTransports({
     : {}),
   onError: (channel, err) => logger.warn({ channel, err }, 'security-alert delivery failed'),
 });
-// WS-C/WS-T client-state purge on hard deletion (WS-D.2.4): push
-// subscriptions + notification preferences + settings-sync rows + the
-// reply-notification inbox die with the account, and rows the account left
-// as the ACTOR in other users' inboxes are anonymized (production tombstones
-// the users row, so no FK action ever does this implicitly).
-identityServices.purgeClientState = async (userId) => {
-  await purgePushStateForUser(userId);
-  await getUserSettingsStore().purge(userId);
-  await replyNotifications.purgeForUser(userId);
-};
-// …and the SAME durable per-user state reaches the DSAR archive (Art. 15):
-// what deletion knows how to remove, export must know how to disclose.
-identityServices.exportClientState = async (userId) => ({
-  settings: await getUserSettingsStore().get(userId),
-  notification_preferences: await getPreferences(userId),
-  reply_notifications: await replyNotifications.listForUser(
-    userId,
-    REPLY_NOTIFICATIONS_PER_USER_CAP,
-  ),
-});
+// WS-H.7.4 — which rooms the landscape may hydrate a story from.
+//
+// A `public` story can sit in a PRIVATE room, where the ordinary read bar
+// requires membership, so the item's own visibility is not the whole answer.
+// The Drizzle store joins `rooms` for this; the in-memory twin has no rooms of
+// its own, so the binding arrives here — the only place that knows both.
+if (ingestionServices.stories instanceof InMemoryStoryStore) {
+  ingestionServices.stories.publicRoom = async (roomId) => {
+    const room = await forumServices.rooms.getById(roomId);
+    return room !== null && room.visibility === 'public' && room.storageMode === 'server';
+  };
+}
+
 setIdentityServices(identityServices);
 
 // --- WS-J trust, safety, and abuse operations -------------------------------
@@ -1197,6 +1263,14 @@ if (db) {
     db,
     () => moderationServices.auditChain,
     enforcementOver,
+    // The §21.4 demotion, bound to the unit's own handle — so a staff delist and
+    // its audit row commit together or not at all. Moderation declares that it
+    // needs this; the composition root is the only place that knows both
+    // domains, exactly as with the enforcement writes above.
+    (exec) => async (roomServerId) =>
+      (await new DrizzlePrivateRoomStubStore(exec).delist(roomServerId, {
+        requireListed: true,
+      })) !== null,
   );
   moderationServices.cases = stores.cases;
   moderationServices.reports = stores.reports;
@@ -1229,22 +1303,26 @@ if (db) {
   moderationServices.evidenceDecisions = stores.evidenceDecisions;
   moderationServices.configStore = new DrizzlePwattConfigStore(db);
 }
-// WS-J ↔ WS-D DSAR: the user's moderation notices (statement-of-reasons +
-// appeal outcomes) are durable user data, so they belong in the data export
-// (GDPR Art. 15).  Reporter identity never appears (noticeToView carries the
-// reason code only).  Paged so the export is COMPLETE.
-identityServices.exportModerationNotices = async (userId) => {
-  const out: unknown[] = [];
-  let after: string | null = null;
-  for (;;) {
-    const page = await moderationServices.notices.listByUser(userId, after, 200);
-    for (const n of page) out.push(noticeToView(n));
-    if (page.length < 200) break;
-    after = page[page.length - 1]?.createdAt ?? null;
-    if (after === null) break;
-  }
-  return out;
-};
+// EVERY §19.3 data-rights hook, in one call (GDPR Art. 15 / Art. 17): attention,
+// content, client state, the private-room directory record, the moderation
+// notices, and the retention-preference propagation.
+//
+// Installed HERE rather than beside each service because the moderation stores
+// are swapped to their Drizzle adapters just above, and the notice export must
+// read the store this boot ends with. The installer captures the service
+// OBJECTS, so it does.
+//
+// It is one function for both composition roots: an absent hook is a silent
+// no-op — the archive simply omits a store, the erasure simply leaves it — so a
+// root that assigned them inline could drift from the other without anything
+// failing. `check:prod-parity` requires every root to make this call.
+installDataRightsHooks(identityServices, {
+  events: eventServices,
+  ingestion: ingestionServices,
+  forum: forumServices,
+  moderation: moderationServices,
+  log: logger,
+});
 // WS-J #18: auto-assignment only chooses reviewers who can open the queue —
 // resolve each reviewer's queues from their WS-D steward roles.
 moderationServices.reviewerQueues = async (id) => {
@@ -1252,6 +1330,21 @@ moderationServices.reviewerQueues = async (id) => {
   return u ? actorQueues(u.roles, u.stewardRoles) : [];
 };
 await moderationServices.reloadConfig();
+// The in-memory moderation unit's §21.4 binding (dev/test). Production replaces
+// the transactor with one bound to a real transaction; this keeps the SHAPE
+// identical on both sides, so the delist route has one code path rather than a
+// production-only one.
+moderationServices.delistListedRoom = async (roomServerId: string) =>
+  (await getPrivateRoomStubService().delistListed(roomServerId)) !== null;
+// …and the read that decides whether the console offers it at all.
+moderationServices.isPubliclyListedRoom = async (roomServerId: string) =>
+  await getPrivateRoomStubService().isPubliclyListed(roomServerId);
+// §21.4's staff demotion runs inside the moderation unit, so the unit must be
+// able to put the stub store back when its audit throws. Registered rather than
+// constructed-with, because the store is built after these services — under
+// Postgres there is nothing to register and the transaction does the job.
+const stubRollback = inMemoryStubStore();
+if (stubRollback !== null) moderationServices.registerRollback(stubRollback);
 setModerationServices(moderationServices);
 // WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing
 // filters read this (ranking reads it via `services.forum`).  One wiring point.

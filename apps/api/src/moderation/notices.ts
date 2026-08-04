@@ -12,6 +12,7 @@ import type {
   ModerationNoticeView,
   ModerationReasonCode,
 } from '@licio/shared';
+import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/keyset-cursor.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationNoticeRecord, ModerationNoticeStore } from './stores.js';
 
@@ -155,16 +156,37 @@ export function noticeToView(record: ModerationNoticeRecord): ModerationNoticeVi
   };
 }
 
-/** Build the inbox response (newest first, keyset by createdAt). */
+/**
+ * Build the inbox response (newest first, keyset by `(createdAt, noticeId)`).
+ *
+ * The wire cursor carries BOTH halves — `<iso>|<uuid>` — because a timestamp
+ * alone skips every row tied with the last one on the page, and several notices
+ * written in one transaction share a `now()`. A cursor that cannot be read is
+ * treated as no cursor: this is an authenticated inbox read, and the page it
+ * would otherwise 500 on is the first one anyway.
+ */
 export async function listNotices(
   services: ModerationServices,
   userId: string,
-  afterCreatedAt: string | null,
+  cursor: string | null,
   limit: number,
 ): Promise<ModerationNoticeListResponse> {
-  const records = await services.notices.listByUser(userId, afterCreatedAt, limit + 1);
+  // THE SHARED DECODER, not a sixth hand-rolled one.  This split on `|` and
+  // accepted anything with a non-empty left part — so `?cursor=a|b` reached the
+  // store's `::timestamptz` / `::uuid` casts, raised 22P02, and came back as a
+  // 500 on a read endpoint.  That is the exact defect `keyset-cursor.ts` was
+  // written for after it appeared in five other queues; this one just never got
+  // it.  The route now validates the grammar too, so an unreadable cursor is a
+  // 400 naming the field rather than a silent restart from page one.
+  const decoded = decodeKeysetCursor(cursor ?? undefined);
+  const after = decoded === null ? null : { createdAt: decoded.time, noticeId: decoded.id };
+  const records = await services.notices.listByUser(userId, after, limit + 1);
   const page = records.slice(0, limit);
-  const nextCursor = records.length > limit ? (page.at(-1)?.createdAt ?? null) : null;
+  const last = page.at(-1);
+  const nextCursor =
+    records.length > limit && last !== undefined
+      ? encodeKeysetCursor(last.createdAt, last.noticeId)
+      : null;
   return {
     notices: page.map(noticeToView),
     next_cursor: nextCursor,

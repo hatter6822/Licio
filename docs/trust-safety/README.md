@@ -104,7 +104,12 @@ apps/api/src/moderation/
   actions.ts       the action palette + reversal-integrity revert (performRevert)
                             + the MFCI-2 enforcement-delay gate
   incidents.ts     the integrity queue: clear/confirm a coordinated-report
-                            incident (reconciles the case's enforcement delay)
+                            incident (reconciles the case's enforcement delay).
+                            The console's Integrity tab renders this BELOW the
+                            WS-H.7.4 Civic Map (the Reeb attention landscape,
+                            `apps/web/src/components/moderation/CivicMap/`) —
+                            the two are independent reads of one question, and
+                            a failure in either leaves the other usable.
   audit.ts         append-only writer + transparency export (small-cell suppressed)
   notices.ts       statement-of-reasons + appeal-outcome inbox
   review.ts        queue + full-context review + appeal review projections
@@ -232,7 +237,13 @@ platform `admin` role implicitly holds all five doctrine roles.
   permanent until manually reverted).
 - **Integrity incidents (WS-J.2.6e / MFCI-2).** A coordinated-report incident
   HOLDS the case's volume-driven enforcement (`applyAction` returns
-  `enforcement_delayed` for non-ROLE_INTEGRITY actors).  The ROLE_INTEGRITY
+  `enforcement_delayed` for non-ROLE_INTEGRITY actors).  The case review
+  PUBLISHES that hold — `enforcement_held` is resolved from the same two reads
+  the endpoint makes (the target's open case, and any open delayed case about
+  the subject, so an account pivot cannot slip it), the palette carries the
+  workflow verbs only while it stands, and the console states the reason.  A
+  reviewer learns about the hold from the panel rather than from a refusal.
+  The ROLE_INTEGRITY
   integrity queue (`GET /v1/moderation/incidents`) lists open incidents
   (aggregate, base-rate-conditioned summary — never per-reporter identity) and
   resolves them: `cleared` lifts the delay (enforcement may proceed), `confirmed`

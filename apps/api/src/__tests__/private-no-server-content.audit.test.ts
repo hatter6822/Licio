@@ -14,7 +14,8 @@
 //   • §23.3   — `POST /v1/stories` to a p2p room 409s (`p2p_room_requires_client_sync`)
 //     before any side effect, and no story/thread row is created.
 //   • §23.4   — a contribution to a p2p-room thread 404s (no oracle), no row created.
-//   • §23.5   — `GET /v1/rooms/:id/feed` 409s (`p2p_room_local_only`).
+//   • §23.5   — `GET /v1/rooms/:id/feed` answers the unknown-room 404 (the
+//     distinctive `p2p_room_local_only` 409 was itself an existence oracle).
 //
 // GATED leg (`DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev`):
 // against REAL Postgres, the production `DrizzleStoryStore.createWithThread`
@@ -114,7 +115,9 @@ describe('WS-S.11 — assertNoP2PServerContent umbrella (in-memory)', () => {
     const roomId = await makeP2pRoom();
     const { submissionStatus, feedStatus } = await assertNoP2PServerContent(roomId);
     expect(submissionStatus).toBe(409);
-    expect(feedStatus).toBe(409);
+    // The feed is the unknown-room 404 — see the §23.5 note in this file's
+    // header: a distinctive code here confirmed an `unlisted` room's existence.
+    expect(feedStatus).toBe(404);
     // The submission counter records the rejection (no story was written).
     expect(fixture.ingestion.metrics.snapshot()['submission.p2p_room_rejected']).toBe(1);
   });
@@ -128,9 +131,12 @@ describe('WS-S.11 — assertNoP2PServerContent umbrella (in-memory)', () => {
     const subBody = (await submission.json()) as { error: { code: string } };
     expect(subBody.error.code).toBe('p2p_room_requires_client_sync');
 
+    // The feed answers the UNKNOWN-ROOM 404 — byte-identical to a room that
+    // does not exist, so it confirms nothing about an `unlisted` id.
     const feed = await app().request(`/v1/rooms/${roomId}/feed`);
-    const feedBody = (await feed.json()) as { error: { code: string } };
-    expect(feedBody.error.code).toBe('p2p_room_local_only');
+    const unknownFeed = await app().request('/v1/rooms/00000000-0000-4000-8000-999999999999/feed');
+    expect(feed.status).toBe(404);
+    expect(await feed.json()).toEqual(await unknownFeed.json());
   });
 
   it('the contribution path (§23.4) refuses a p2p-room thread with no oracle (404) + no row', async () => {

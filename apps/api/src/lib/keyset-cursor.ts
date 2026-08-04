@@ -13,6 +13,8 @@
 //
 // A malformed cursor restarts from the beginning rather than erroring: it is a position,
 // not a request, and a stale or truncated one is a client bug the reader should survive.
+import { z } from 'zod';
+
 const CURSOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** A decoded keyset position: the sort key and the tie-breaking id. */
@@ -38,3 +40,25 @@ export function decodeKeysetCursor(cursor: string | undefined): KeysetCursor | n
 /** Whether a decoded id is a well-formed uuid — for the cursor forms that carry an id
  *  WITHOUT a timestamp beside it (the audit trail's legacy form). */
 export const isCursorUuid = (id: string): boolean => CURSOR_UUID_RE.test(id);
+
+/**
+ * A cursor a route will actually be able to READ — validated at the boundary.
+ *
+ * `decodeKeysetCursor` fails SOFT (null ⇒ no cursor), which is right for the
+ * decoder: a route must not 500 on a mangled link. It is wrong as the whole
+ * answer, because the caller cannot tell "here is the next page" from "I could
+ * not read your cursor, so here is the FIRST page again" — and a client that
+ * appends pages then loops on the same first page forever, adding duplicate
+ * rows on every scroll. That is not hypothetical: it is what a `?cursor=garbage`
+ * did to the §4.2 directory list.
+ *
+ * So the grammar is checked where the request enters, and a cursor that cannot
+ * be read is a `400` naming the field. The decoder stays defensive underneath.
+ */
+export const keysetCursorSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((cursor) => decodeKeysetCursor(cursor) !== null, {
+    message: 'malformed cursor — pass the `next_cursor` from the previous page, or omit it',
+  });

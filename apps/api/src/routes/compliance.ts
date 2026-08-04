@@ -474,34 +474,43 @@ export function createComplianceRoutes() {
               409,
             );
           }
-          const record = await services.declarations.upsert(
-            {
-              userId: auth.userId,
-              declaredRegion: body.declared_region,
-              status: 'pending',
-              verificationLevel: 'unverified',
-              evidenceRef: body.evidence_ref ?? null,
-              verifiedAt: null,
-              verifiedBy: null,
-              createdAt: existing?.createdAt ?? nowIso,
-              updatedAt: nowIso,
-            },
-            // CAS only when a prior row exists — a concurrent verify is the write
-            // to preserve; a first declaration has no premises to lose.
-            existing === null
-              ? undefined
-              : {
-                  declaredRegion: existing.declaredRegion,
-                  status: existing.status,
-                  updatedAt: existing.updatedAt,
-                },
-          );
+          // The declaration and the user's own trail row commit together: a
+          // §19.1 subject reading their security page must not find a region
+          // change that left no trace, and the compliance write must not be
+          // undone by a failure to record it.
+          const record = await services.transactor.run(async (tx) => {
+            const written = await tx.declarations.upsert(
+              {
+                userId: auth.userId,
+                declaredRegion: body.declared_region,
+                status: 'pending',
+                verificationLevel: 'unverified',
+                evidenceRef: body.evidence_ref ?? null,
+                verifiedAt: null,
+                verifiedBy: null,
+                createdAt: existing?.createdAt ?? nowIso,
+                updatedAt: nowIso,
+              },
+              // CAS only when a prior row exists — a concurrent verify is the write
+              // to preserve; a first declaration has no premises to lose.
+              existing === null
+                ? undefined
+                : {
+                    declaredRegion: existing.declaredRegion,
+                    status: existing.status,
+                    updatedAt: existing.updatedAt,
+                  },
+            );
+            if (written !== null) {
+              await tx.identityAudit.append({
+                actorUserId: auth.userId,
+                eventType: 'region_declaration_change',
+                context: { setting: 'declare', new_value: body.declared_region },
+              });
+            }
+            return written;
+          });
           if (record !== null) {
-            await getIdentityServices().audit.append({
-              actorUserId: auth.userId,
-              eventType: 'region_declaration_change',
-              context: { setting: 'declare', new_value: body.declared_region },
-            });
             services.metrics.increment('compliance.declaration.created');
             return c.json({ declaration: declarationToWire(record) }, 201);
           }
@@ -544,27 +553,32 @@ export function createComplianceRoutes() {
             409,
           );
         }
-        const record = await services.declarations.upsert(
-          {
-            ...existing,
-            status: 'revoked',
-            verificationLevel: 'unverified',
-            verifiedAt: null,
-            verifiedBy: null,
-            updatedAt: nowIso,
-          },
-          {
-            declaredRegion: existing.declaredRegion,
-            status: existing.status,
-            updatedAt: existing.updatedAt,
-          },
-        );
+        const record = await services.transactor.run(async (tx) => {
+          const written = await tx.declarations.upsert(
+            {
+              ...existing,
+              status: 'revoked',
+              verificationLevel: 'unverified',
+              verifiedAt: null,
+              verifiedBy: null,
+              updatedAt: nowIso,
+            },
+            {
+              declaredRegion: existing.declaredRegion,
+              status: existing.status,
+              updatedAt: existing.updatedAt,
+            },
+          );
+          if (written !== null) {
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'region_declaration_change',
+              context: { setting: 'revoke' },
+            });
+          }
+          return written;
+        });
         if (record !== null) {
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'region_declaration_change',
-            context: { setting: 'revoke' },
-          });
           return c.json({ revoked: true });
         }
         // CAS miss: the row changed under us — re-read and re-check.
@@ -804,6 +818,24 @@ export function createComplianceRoutes() {
                 reason,
                 approvalRef: approval_ref ?? null,
               });
+              // …and the OPERATOR's trail, in the same unit.
+              //
+              // Two trails answer two questions: the hash chain above is the
+              // authoritative record of what the policy became, and this is
+              // the security trail of what this ACCOUNT did — the one an
+              // operator reviews per actor rather than per region. It used to
+              // be a best-effort append after the commit, which meant a policy
+              // change could be live and hash-audited while absent from the
+              // account's history entirely; now neither exists without the
+              // other.
+              await stores.identityAudit.append({
+                actorUserId: auth.userId,
+                eventType: 'compliance_policy_change',
+                context: {
+                  setting: policyInput.country_or_region,
+                  new_value: previous === null ? 'create' : 'update',
+                },
+              });
             },
             'jurisdiction policy write',
           );
@@ -838,11 +870,11 @@ export function createComplianceRoutes() {
             503,
           );
         }
-        // Hot reload FIRST: the policy is live and hash-audited from here on,
-        // so serving a stale cached verdict until the TTL would be the real
-        // harm.  (The identity audit below is a secondary index over the
-        // authoritative chain entry just written — it must not be able to
-        // strand an applied change behind an un-invalidated cache.)
+        // Hot reload: past this point the policy is live and both trails are
+        // committed, so serving a stale cached verdict until the TTL is the
+        // only remaining harm — and it is the one thing here that cannot be
+        // rolled back, which is why nothing after the unit is allowed to fail
+        // the request.
         services.policyCache.invalidate(policyInput.country_or_region);
         try {
           await services.broadcaster.publish(policyInput.country_or_region);
@@ -861,24 +893,6 @@ export function createComplianceRoutes() {
           });
         }
         services.metrics.increment('compliance.policy.written');
-        // Best-effort: a transient identity-audit outage cannot un-apply a
-        // committed, chained policy, and returning 500 would send the operator
-        // into a retry that collides with the existing row for nothing.
-        try {
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'compliance_policy_change',
-            context: {
-              setting: policyInput.country_or_region,
-              new_value: previous === null ? 'create' : 'update',
-            },
-          });
-        } catch (error) {
-          services.alert('compliance.policy.identity_audit_failed', {
-            region: policyInput.country_or_region,
-            message: error instanceof Error ? error.message : 'unknown',
-          });
-        }
         return c.json({ policy: validated.policy }, 201);
       },
     )
@@ -936,26 +950,47 @@ export function createComplianceRoutes() {
           );
         }
         const nowIso = new Date(services.now()).toISOString();
-        const record = await services.declarations.upsert(
-          {
-            ...existing,
-            status: isVerify ? 'verified' : isRevoke ? 'revoked' : 'pending',
-            verificationLevel: isVerify ? 'reviewer_verified' : 'unverified',
-            verifiedAt: isVerify ? nowIso : null,
-            verifiedBy: isVerify ? auth.userId : null,
-            updatedAt: nowIso,
-          },
-          // CAS on the PREMISES this decision was made about.  A member who
-          // revoked or re-declared since it was read keeps their change: a
-          // verified declaration is the real-funds region basis, so
-          // resurrecting a revoked one — or verifying evidence against a region
-          // the member has left — is exactly what must not happen.
-          {
-            declaredRegion: existing.declaredRegion,
-            status: existing.status,
-            updatedAt: existing.updatedAt,
-          },
-        );
+        // The decision and the reviewer's trail row commit together: this
+        // verification is the region ladder's only anti-circumvention control
+        // (§19.1 leaves no detected baseline to cross-check), so a decision
+        // recorded nowhere is the one outcome it must not have.
+        const record = await services.transactor.run(async (tx) => {
+          const written = await tx.declarations.upsert(
+            {
+              ...existing,
+              status: isVerify ? 'verified' : isRevoke ? 'revoked' : 'pending',
+              verificationLevel: isVerify ? 'reviewer_verified' : 'unverified',
+              verifiedAt: isVerify ? nowIso : null,
+              verifiedBy: isVerify ? auth.userId : null,
+              updatedAt: nowIso,
+            },
+            // CAS on the PREMISES this decision was made about.  A member who
+            // revoked or re-declared since it was read keeps their change: a
+            // verified declaration is the real-funds region basis, so
+            // resurrecting a revoked one — or verifying evidence against a region
+            // the member has left — is exactly what must not happen.
+            {
+              declaredRegion: existing.declaredRegion,
+              status: existing.status,
+              updatedAt: existing.updatedAt,
+            },
+          );
+          if (written === null) return null;
+          await tx.identityAudit.append({
+            actorUserId: auth.userId,
+            eventType: 'region_declaration_change',
+            // The subject rides `targetRef`, NOT the context: `redactContext`
+            // keeps a closed allowlist (device/auth_method/setting/
+            // previous_value/new_value/reason) and drops anything else, so a
+            // `target` key here would vanish and the entry would record that a
+            // reviewer verified *something*.  This verification is the only
+            // anti-circumvention control the region ladder has (§19.1 leaves no
+            // detected baseline to cross-check), so its subject must persist.
+            targetRef: services.opaqueRef(userId),
+            context: { setting: body.decision, reason: body.note },
+          });
+          return written;
+        });
         if (record === null) {
           return c.json(
             deny(
@@ -965,19 +1000,6 @@ export function createComplianceRoutes() {
             409,
           );
         }
-        await getIdentityServices().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'region_declaration_change',
-          // The subject rides `targetRef`, NOT the context: `redactContext`
-          // keeps a closed allowlist (device/auth_method/setting/
-          // previous_value/new_value/reason) and drops anything else, so a
-          // `target` key here would vanish and the entry would record that a
-          // reviewer verified *something*.  This verification is the only
-          // anti-circumvention control the region ladder has (§19.1 leaves no
-          // detected baseline to cross-check), so its subject must persist.
-          targetRef: services.opaqueRef(userId),
-          context: { setting: body.decision, reason: body.note },
-        });
         return c.json({ declaration: declarationToWire(record) });
       },
     )
@@ -1031,22 +1053,34 @@ export function createComplianceRoutes() {
             : body.decision === 'revoke'
               ? ('revoked' as const)
               : ('pending' as const);
-        const record = await services.kyc.upsert(
-          {
-            userId,
-            status,
-            evidenceRef: body.evidence_ref ?? existing?.evidenceRef ?? null,
-            verifiedAt: status === 'verified' ? nowIso : null,
-            verifiedBy: status === 'verified' ? auth.userId : null,
-            createdAt: existing?.createdAt ?? nowIso,
-            updatedAt: nowIso,
-          },
-          // CAS on the premises the decision was made about (declaration
-          // discipline): a standing that changed under review is not clobbered.
-          existing === null
-            ? undefined
-            : { status: existing.status, updatedAt: existing.updatedAt },
-        );
+        // Same discipline as the declaration decision above, and for the same
+        // reason: this standing is the governance-participation gate.
+        const record = await services.transactor.run(async (tx) => {
+          const written = await tx.kyc.upsert(
+            {
+              userId,
+              status,
+              evidenceRef: body.evidence_ref ?? existing?.evidenceRef ?? null,
+              verifiedAt: status === 'verified' ? nowIso : null,
+              verifiedBy: status === 'verified' ? auth.userId : null,
+              createdAt: existing?.createdAt ?? nowIso,
+              updatedAt: nowIso,
+            },
+            // CAS on the premises the decision was made about (declaration
+            // discipline): a standing that changed under review is not clobbered.
+            existing === null
+              ? undefined
+              : { status: existing.status, updatedAt: existing.updatedAt },
+          );
+          if (written === null) return null;
+          await tx.identityAudit.append({
+            actorUserId: auth.userId,
+            eventType: 'kyc_verification_change',
+            targetRef: services.opaqueRef(userId),
+            context: { setting: body.decision, reason: body.note },
+          });
+          return written;
+        });
         if (record === null) {
           return c.json(
             deny(
@@ -1056,12 +1090,6 @@ export function createComplianceRoutes() {
             409,
           );
         }
-        await getIdentityServices().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'kyc_verification_change',
-          targetRef: services.opaqueRef(userId),
-          context: { setting: body.decision, reason: body.note },
-        });
         return c.json({ kyc: record });
       },
     )
@@ -1662,10 +1690,22 @@ export function createComplianceRoutes() {
         if (problem !== null) return c.json(deny('invalid_config_value', problem), 400);
         // WHO changed it rides the SAME write as the change (see
         // `storeComplianceConfigValue`, which owns the `compliance.` key prefix
-        // jointly with the loader that reads it).
-        await storeComplianceConfigValue(services.configStore, key, value, {
-          changed_by_ref: services.opaqueRef(auth.userId),
-          changed_at: new Date(services.now()).toISOString(),
+        // jointly with the loader that reads it) — AND the identity mirror now
+        // commits with both. It used to be appended afterwards and swallowed on
+        // failure, on the reasoning that the change was already attributed
+        // in-row; true, but it left the operator's own trail permanently
+        // missing a change they made, recoverable by nothing. In one unit a
+        // failure costs a retry instead.
+        await services.transactor.run(async (stores) => {
+          await storeComplianceConfigValue(stores.config, key, value, {
+            changed_by_ref: services.opaqueRef(auth.userId),
+            changed_at: new Date(services.now()).toISOString(),
+          });
+          await stores.identityAudit.append({
+            actorUserId: auth.userId,
+            eventType: 'compliance_config_change',
+            context: { setting: key },
+          });
         });
         await services.reloadConfig();
         // WS-E.1.4: retention-override changes propagate to the events job
@@ -1675,21 +1715,6 @@ export function createComplianceRoutes() {
             services.config,
           );
         }
-        // Best-effort MIRROR into the identity audit (a different bounded
-        // context, so it cannot join the write above): failing it must not 500
-        // a change that is already live and attributed.
-        await getIdentityServices()
-          .audit.append({
-            actorUserId: auth.userId,
-            eventType: 'compliance_config_change',
-            context: { setting: key },
-          })
-          .catch((error: unknown) => {
-            services.log('compliance.config.audit_mirror_failed', {
-              key,
-              message: error instanceof Error ? error.message : 'unknown',
-            });
-          });
         return c.json({ key, applied: true });
       },
     )
@@ -1891,22 +1916,39 @@ export function createComplianceRoutes() {
         const body = c.req.valid('json');
         let record: Awaited<ReturnType<typeof services.disclosures.publish>>;
         try {
-          record = await services.disclosures.publish({
-            id: services.uuid(),
-            disclosureId: body.disclosure_id,
-            region: body.region,
-            version: body.version,
-            locale: body.locale,
-            title: body.title,
-            contentMd: body.content_md,
-            requiresAcknowledgment: body.requires_acknowledgment,
-            // The attribution rides the row the publish creates, so the act and
-            // the record of WHO performed it are ONE write.  Recorded after,
-            // it could be lost to a failure and never recovered: a publish is
-            // immutable, so the retry only meets `already_published` and the
-            // live legal disclosure would keep no publisher record at all.
-            publishedByRef: services.opaqueRef(auth.userId),
-            publishedAt: new Date(services.now()).toISOString(),
+          // The publish and the identity mirror are ONE unit. The attribution
+          // already rides the row (`publishedByRef`), which is why the mirror
+          // used to be best-effort — but a swallowed failure left counsel's own
+          // trail permanently missing a publication they made, and a publish is
+          // IMMUTABLE, so nothing could ever add it afterwards. Rolling back
+          // costs a retry; the previous shape cost the record forever.
+          record = await services.transactor.run(async (stores) => {
+            const published = await stores.disclosures.publish({
+              id: services.uuid(),
+              disclosureId: body.disclosure_id,
+              region: body.region,
+              version: body.version,
+              locale: body.locale,
+              title: body.title,
+              contentMd: body.content_md,
+              requiresAcknowledgment: body.requires_acknowledgment,
+              // The attribution rides the row the publish creates, so the act and
+              // the record of WHO performed it are ONE write.  Recorded after,
+              // it could be lost to a failure and never recovered: a publish is
+              // immutable, so the retry only meets `already_published` and the
+              // live legal disclosure would keep no publisher record at all.
+              publishedByRef: services.opaqueRef(auth.userId),
+              publishedAt: new Date(services.now()).toISOString(),
+            });
+            await stores.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'disclosure_change',
+              context: {
+                setting: body.disclosure_id,
+                new_value: `v${body.version}:${body.region}`,
+              },
+            });
+            return published;
           });
         } catch (error) {
           // ONLY the unique conflict is `already_published`.  Calling a store
@@ -1932,23 +1974,6 @@ export function createComplianceRoutes() {
             503,
           );
         }
-        // Best-effort NOTIFICATION, not the record of truth: the attribution
-        // is already committed on the row above (the identity audit is a
-        // different bounded context, so it cannot join that write), and a
-        // 500 here would leave an immutable published disclosure the client
-        // believes failed.
-        await getIdentityServices()
-          .audit.append({
-            actorUserId: auth.userId,
-            eventType: 'disclosure_change',
-            context: { setting: body.disclosure_id, new_value: `v${body.version}:${body.region}` },
-          })
-          .catch((error: unknown) => {
-            services.log('compliance.disclosure.audit_mirror_failed', {
-              disclosureId: body.disclosure_id,
-              message: error instanceof Error ? error.message : 'unknown',
-            });
-          });
         return c.json({ published_at: record.publishedAt }, 201);
       },
     );

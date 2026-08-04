@@ -13,17 +13,8 @@
 //     migration (Drizzle emits no on-update clause for pg timestamps).
 import type { PersonalizationSettings, PrivacySettings } from '@licio/shared';
 import { sql } from 'drizzle-orm';
-import {
-  check,
-  index,
-  jsonb,
-  pgEnum,
-  pgTable,
-  text,
-  timestamp,
-  uniqueIndex,
-  uuid,
-} from 'drizzle-orm/pg-core';
+import { check, index, jsonb, pgEnum, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 
 export const accountStateEnum = pgEnum('account_state', [
   'active',
@@ -58,8 +49,8 @@ export const users = pgTable(
     personalizationSettings: jsonb('personalization_settings')
       .$type<PersonalizationSettings>()
       .notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     // Case-insensitive uniqueness prevents impersonation via case variation.

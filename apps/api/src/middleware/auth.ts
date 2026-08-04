@@ -103,6 +103,23 @@ export function authMiddleware(
 
       const inv = await authMethodInventory(services, user.userId);
       const auth = await services.store.getAuth(user.userId);
+      // MFA STANDING, FROM THE DURABLE GRANT WHEN THE SESSION DOES NOT CARRY IT.
+      //
+      // The flag on the session record is a Redis write; a recovery code is
+      // spent in Postgres. Keeping those two in step by ordering is what four
+      // rounds of review kept finding holes in, because every order loses one
+      // side: grant-then-record loses the record, record-then-grant loses the
+      // grant. So the spend IS the grant — `consumeRecoveryCode` writes the
+      // session it verifies in the same statement — and this reads it back.
+      //
+      // The extra lookup is narrow by construction: only for a session whose
+      // own record does not already say verified, and only for an account with
+      // MFA enabled. That is the case where the Redis write did not land, and
+      // nothing else. `getAuth` above already makes this request read Postgres.
+      const mfaActive = auth?.mfaEnabled ?? false;
+      const mfaVerified =
+        validated.record.mfa_verified ||
+        (mfaActive && (await services.store.sessionHasRecoveryGrant(validated.tokenHash)));
       c.set('auth', {
         userId: user.userId,
         accountState: user.accountState,
@@ -113,8 +130,8 @@ export function authMiddleware(
         emailVerified: auth?.emailVerified ?? false,
         accountVerified: hasVerifiedCredential(inv),
         ageBand: user.ageBand,
-        mfaActive: auth?.mfaEnabled ?? false,
-        mfaVerified: validated.record.mfa_verified,
+        mfaActive,
+        mfaVerified,
         tokenHash: validated.tokenHash,
       });
     } catch {

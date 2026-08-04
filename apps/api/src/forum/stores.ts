@@ -25,6 +25,7 @@ import type {
   RoomVisibility,
 } from '@licio/shared';
 import { COMMONS_ROOM_ID, COMMONS_SLUG } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 // ---------------------------------------------------------------------------
 // Records (storage shape; ISO timestamps on this side of the boundary).
@@ -421,9 +422,22 @@ export interface RoomStore {
    *  room_type returns the conflict outcome (the API maps it to 409). */
   insert(record: RoomInsertInput): Promise<RoomCreateOutcome>;
   getById(roomId: string): Promise<RoomRecord | null>;
+  /**
+   * One page of rooms.
+   *
+   * `storageMode` is not a convenience filter. A P2P shell is invisible on every
+   * room surface (`roomVisibleToUser` returns false for one), and a predicate
+   * applied AFTER the page is fetched still lets those shells consume it: the
+   * `/v1/rooms` handler bounds its scan at 25 pages, so a run of accumulated
+   * shells can fill every one of them, leave `visible` empty, and report
+   * `nextCursor: null` — making the server rooms beyond that run unreachable
+   * rather than merely slow. Excluding them in the QUERY is what makes the bound
+   * a bound on rooms the caller can actually see.
+   */
   list(opts: {
     roomType?: RoomType;
     visibilities?: readonly RoomVisibility[];
+    storageMode?: RoomRecord['storageMode'];
     /** Sub-string match on name/description (case-insensitive). */
     query?: string;
     after?: CreatedAtCursor | null;
@@ -1163,10 +1177,24 @@ export class InMemoryContributionStore implements ContributionStore {
   }
 }
 
-export class InMemoryRoomStore implements RoomStore {
+export class InMemoryRoomStore implements RoomStore, InMemoryRollback {
   readonly #rooms = new Map<string, RoomRecord>();
   readonly #stewards: RoomStewardRecord[] = [];
   readonly #subscriptions = new Map<string, RoomSubscriptionRecord>();
+
+  /** The unit of work's undo — a room-lifecycle change commits with the
+   *  identity record of it, so a failed record must leave no room behind. */
+  beginRollback(): () => void {
+    const rooms = mapRollback(this.#rooms);
+    const subscriptions = mapRollback(this.#subscriptions);
+    const stewards = [...this.#stewards];
+    return () => {
+      rooms();
+      subscriptions();
+      this.#stewards.length = 0;
+      this.#stewards.push(...stewards);
+    };
+  }
   readonly #now: Clock;
 
   constructor(now: Clock = Date.now) {
@@ -1239,6 +1267,7 @@ export class InMemoryRoomStore implements RoomStore {
   async list(opts: {
     roomType?: RoomType;
     visibilities?: readonly RoomVisibility[];
+    storageMode?: RoomRecord['storageMode'];
     query?: string;
     after?: CreatedAtCursor | null;
     limit: number;
@@ -1250,6 +1279,7 @@ export class InMemoryRoomStore implements RoomStore {
         (room) =>
           (opts.roomType === undefined || room.roomType === opts.roomType) &&
           (visibilities === null || visibilities.has(room.visibility)) &&
+          (opts.storageMode === undefined || room.storageMode === opts.storageMode) &&
           (query === undefined ||
             room.name.toLowerCase().includes(query) ||
             (room.description ?? '').toLowerCase().includes(query)) &&

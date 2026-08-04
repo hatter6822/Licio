@@ -13,7 +13,21 @@ export const invitedRoleSchema = z.enum(['member', 'moderator', 'admin']);
 export const inviteSecretSchema = z
   .object({
     schema: z.literal('licio.private.invite_secret.v1'),
+    /** The §21 `room_server_id` of the room's directory record, when it has one. */
     room_stub_ref: privateIdSchema.optional(),
+    /**
+     * The §21.2 bootstrap capability for that record.
+     *
+     * It rides the SEALED invite because the recipient needs it BEFORE they are
+     * admitted: an `unlisted` record answers `not_found` to every reader without
+     * the token, so an invitee who received it only in the post-admission grant
+     * could not check what Licio publishes about the room they were about to
+     * join.  Carrying it here is safe for the same reason it is stable — it
+     * resolves a record of commitments and bootstrap policy, never content, and
+     * the invite itself is HPKE-sealed to one recipient and lives only in a URL
+     * fragment.  Absent ⇒ a `detached` room, or one that registered no stub.
+     */
+    bootstrap_blind_id: base64UrlSchema.optional(),
     room_public_key: base64UrlSchema,
     invite_id: privateIdSchema,
     invite_secret: base64UrlSchema,
@@ -22,7 +36,19 @@ export const inviteSecretSchema = z
     granted_role: invitedRoleSchema,
     requires_admin_approval: z.boolean(),
   })
-  .strict();
+  .strict()
+  // BOTH directory fields or NEITHER. A ref without a capability cannot open the
+  // record, and a capability without a ref has nothing to open — either way the
+  // join path silently treats the room as detached, so the member is admitted
+  // and then cannot resolve an unlisted record or pass a working reference on.
+  // Half a handle is not a weaker handle.
+  .refine(
+    (invite) => (invite.room_stub_ref === undefined) === (invite.bootstrap_blind_id === undefined),
+    {
+      message: 'room_stub_ref and bootstrap_blind_id must be supplied together',
+      path: ['bootstrap_blind_id'],
+    },
+  );
 export type InviteSecret = z.infer<typeof inviteSecretSchema>;
 
 /** §12.3 — `JoinRequestV1`: the recipient proves invite knowledge + offers an

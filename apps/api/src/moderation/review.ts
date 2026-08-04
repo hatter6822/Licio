@@ -17,16 +17,18 @@ import {
   type ConsoleAction,
   type ModerationCaseRow,
   type ModerationReasonCode,
+  OPEN_CASE_STATUSES,
   type ReportQueueResponse,
   type SlaState,
   type UserHistory,
   type UserHistoryAction,
 } from '@licio/shared';
 import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/keyset-cursor.js';
-import { actionValidForTarget } from './actions.js';
+import { actionValidForTarget, enforcementType } from './actions.js';
 import { auditToView } from './audit.js';
 import {
   availableConsoleActions,
+  isIntegrityActor,
   maySeeCoordinationDetail,
   mayseeReporterIdentity,
   type StewardActor,
@@ -141,7 +143,7 @@ export async function buildReportQueue(
   actor: StewardActor,
   filter: QueueFilterInput,
 ): Promise<ReportQueueResponse> {
-  const baseStatus = filter.status ?? (['new', 'in_progress', 'escalated'] as const);
+  const baseStatus = filter.status ?? OPEN_CASE_STATUSES;
   // The `reporter` + `category` filters each resolve to a SET of case ids (via
   // the reports); an empty set matches nothing (so an unknown reporter/category
   // yields an empty queue, not every case).  When BOTH are present the queue is
@@ -392,6 +394,26 @@ export async function buildCaseReview(
       : Promise.resolve({ items: [], reportedContributionId: null }),
   ]);
 
+  // MFCI-2 (WS-J.2.6e) — the SAME hold `applyAction` enforces, resolved here so
+  // the console can render it instead of the reviewer discovering it by clicking.
+  //
+  // Both of the endpoint's reads, for the same reason each exists there: the
+  // TARGET's open case is the authoritative flag, and a subject with ANY open
+  // delayed case is held too, so pivoting a content case to an account action
+  // cannot slip the brigade protection. An integrity analyst IS the review and
+  // is never held, so the question is not even asked for them.
+  const enforcementHeld = isIntegrityActor(actor)
+    ? false
+    : (targetId !== null &&
+        (await services.cases.findOpenByTarget(theCase.targetType, targetId))
+          ?.enforcementDelayed === true) ||
+      (subjectUserId !== null &&
+        (await services.cases.count({
+          subjectUserId,
+          status: OPEN_CASE_STATUSES,
+          enforcementDelayed: true,
+        })) > 0);
+
   // Handles for the trail's actors — resolved after the fetch, since the ids come from it.
   const caseTrailHandles = await resolveHandles(
     services,
@@ -434,8 +456,26 @@ export async function buildCaseReview(
     available_actions: availableConsoleActions(actor).filter(
       (a): a is ConsoleAction =>
         (CONSOLE_ACTIONS as readonly string[]).includes(a) &&
-        actionValidForTarget(a as ConsoleAction, theCase.targetType),
+        actionValidForTarget(a as ConsoleAction, theCase.targetType) &&
+        // …and not an ENFORCEMENT verb while MFCI-2 holds this case for this
+        // reviewer. `applyAction` refuses those with `enforcement_delayed`, and
+        // the palette offered them anyway — the same shape as a map publishing
+        // a bridge target the endpoint beside it rejects. Workflow verbs
+        // (escalate/clear) are never held, so the case stays movable.
+        !(enforcementHeld && enforcementType(a as ConsoleAction) !== null),
     ),
+    enforcement_held: enforcementHeld,
+    // §11.4's single power over a P2P room, offered only where it applies AND to
+    // a reviewer who holds it: the same bar the endpoint enforces (platform
+    // admin with per-session MFA), so the console never renders a control that
+    // deterministically fails.
+    directory_delistable:
+      theCase.targetType === 'room' &&
+      theCase.targetId !== null &&
+      actor.platformRoles.includes('admin') &&
+      actor.mfaActive &&
+      actor.mfaVerified &&
+      (await services.isPubliclyListedRoom?.(theCase.targetId)) === true,
   };
 }
 

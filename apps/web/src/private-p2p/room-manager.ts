@@ -24,6 +24,8 @@ import type {
   RoomReducerState,
   SafetyNumber,
 } from '@licio/private-p2p';
+import { canonicalRegistrationProofBytes } from '@licio/shared';
+import type { StoredDirectoryStub } from './session-store.js';
 
 /**
  * The §12.3 join GRANT an admin returns from `admitJoinRequest` and the joiner feeds to
@@ -46,6 +48,22 @@ export interface JoinGrant {
   }[];
   readonly archive: Uint8Array;
 }
+
+/*
+ * The §21 directory capability is DELIBERATELY not a grant field.
+ *
+ * It rode here for one round and that was wrong. A grant is copy-pasted over an
+ * out-of-band channel and only the Welcome and the archive are cryptographically
+ * protected — everything else in the blob is plaintext to anyone who sees the
+ * message. `bootstrap_blind_id` does not rotate, so an observer would keep a
+ * capability that resolves an `unlisted` record forever, including after it is
+ * delisted, which is the state delisting exists to produce.
+ *
+ * The joiner does not need it there. It rides the HPKE-SEALED invite (§10.3),
+ * which the joiner has already opened by the time a grant exists, so
+ * `prepareJoinRequest` retains it from that invite and hands it to `finishJoin`
+ * directly. One sealed delivery, no plaintext copy.
+ */
 
 /** The result of `admitJoinRequest`: the verify verdict, plus (on success) the GRANT the
  *  admin delivers to the joiner so it can `completeJoin`. */
@@ -301,7 +319,7 @@ function coarseBucket(date = new Date()): string {
 /** The §10.3 HPKE invite public key (base64url) from the opaque stored manifest;
  *  an invitee seals the room secret to it.  `undefined` if the manifest is the
  *  display-only fallback (a join cannot be minted without it). */
-function manifestRoomPublicKey(manifest: unknown): string | undefined {
+export function manifestRoomPublicKey(manifest: unknown): string | undefined {
   if (manifest && typeof manifest === 'object' && 'crypto' in manifest) {
     const crypto = (manifest as { crypto?: unknown }).crypto;
     if (crypto && typeof crypto === 'object' && 'room_public_key' in crypto) {
@@ -381,6 +399,30 @@ export class PrivateRoomSession {
   }
   get deviceId(): string {
     return this.session.deviceId;
+  }
+  /**
+   * This device's Ed25519 signing public key — what the §8.2 stub publishes as
+   * `room_public_key`, and therefore how a client identifies its OWN directory
+   * record among the ones its account owns.
+   *
+   * Exposed separately from `directoryStubPayload()` because reading it cannot
+   * fail: the recovery path needs it precisely when deriving the full payload
+   * did fail.
+   */
+  get signingPublicKey(): string {
+    return this.session.signingPublicKey;
+  }
+  /**
+   * The room's §13.1 manifest commitment, base64url.
+   *
+   * Separate from `directoryStubPayload()` on purpose: refreshing
+   * `latest_manifest_commitment` is §21.3-patchable WITHOUT re-signing anything,
+   * and the payload builder needs the GENESIS epoch to derive the capability —
+   * so routing the refresh through it made a plain column update impossible on
+   * every device that joined later.
+   */
+  get manifestCommitmentB64(): string {
+    return this.p2p.toBase64Url(this.session.manifestCommitment);
   }
   /** The room's display name (from the persisted manifest). */
   get name(): string {
@@ -698,6 +740,306 @@ export class PrivateRoomSession {
       profile?: { transport_mode?: unknown };
     };
     return manifest?.profile?.transport_mode === 'direct_allowed' ? 'direct_allowed' : 'relay_only';
+  }
+
+  /**
+   * Record the §21 directory stub this room registered.
+   *
+   * The server mints `room_server_id` at create time and it is the ONLY handle
+   * for every later bootstrap, patch, delist and delete — there is no endpoint
+   * that lists an account's stubs. Discarding it would leave the record
+   * unreachable and unmanageable, so the caller persists it here the moment
+   * registration succeeds.
+   */
+  async attachDirectoryStub(stub: {
+    readonly roomServerId: string;
+    /** Derived from the room's EPOCH-0 rendezvous key — see the field's note on
+     *  `StoredRoomSession`. Stored because later members cannot re-derive it. */
+    readonly bootstrapBlindId: string;
+  }): Promise<void> {
+    // VERIFIED by provenance: this device just registered the record and holds
+    // the room key that signed it, so there is nothing to check it against that
+    // it did not produce. A handle that arrives from someone else takes the
+    // other path (`finishJoin`) and starts unverified.
+    this.session = { ...this.session, directoryStub: { capability: stub, verified: true } };
+    await putRoomSession(this.session);
+  }
+
+  /**
+   * Release an invite-carried handle after it has been CHECKED against this room.
+   *
+   * The counterpart to `quarantineDirectoryStub`: verification has two outcomes
+   * and both have to be recorded, or "not yet checked" and "checked and fine"
+   * stay indistinguishable — which is exactly what let an unverified handle
+   * travel in invites.
+   */
+  async markDirectoryStubVerified(): Promise<void> {
+    const stored = this.session.directoryStub;
+    if (stored === undefined || stored.verified === true) return;
+    const { quarantined: _cleared, ...rest } = stored;
+    this.session = { ...this.session, directoryStub: { ...rest, verified: true } };
+    await putRoomSession(this.session);
+  }
+
+  /**
+   * Forget the §21 directory record — after a successful DELETE.
+   *
+   * Without this the handle outlives the record: reloading the room reads a
+   * deleted stub, keeps offering actions against it, and — worse — the next
+   * admit copies the dead capability into a joiner's grant, so a new member
+   * inherits a handle whose first use is a 404 they cannot explain. The record
+   * is gone; the pointer to it must go with it.
+   */
+  async clearDirectoryStub(): Promise<void> {
+    if (this.session.directoryStub === undefined) return;
+    const { directoryStub: _dropped, ...rest } = this.session;
+    this.session = rest;
+    await putRoomSession(this.session);
+  }
+  /**
+   * Mark the stored handle as pointing at ANOTHER room.
+   *
+   * Called when the post-join verification fails: the record the handle opens is
+   * not signed by this room, so it was never this room's. Kept rather than
+   * deleted — the member is told, and can forget it deliberately — but it stops
+   * travelling in invites the moment it is set.
+   */
+  async quarantineDirectoryStub(): Promise<void> {
+    const stored = this.session.directoryStub;
+    if (stored === undefined || stored.quarantined === true) return;
+    // …and REVOKE the release with it. Verification is now a positive fact that
+    // invites require, so a handle that fails a later check has to lose it —
+    // otherwise a record that verified once and was re-checked after the room
+    // moved would keep travelling on the strength of the old answer.
+    this.session = {
+      ...this.session,
+      directoryStub: { ...stored, quarantined: true, verified: false },
+    };
+    await putRoomSession(this.session);
+  }
+
+  /**
+   * Can this device derive the room's §21.2 capability?
+   *
+   * Only a device holding the GENESIS epoch can: the blind id is bound to
+   * epoch-0's rendezvous key, and forward secrecy means a joined device never
+   * receives it. Registration surfaces ask before offering the action, so a
+   * member is not walked into a signature that cannot produce a valid record.
+   */
+  get canRegisterDirectory(): boolean {
+    return this.session.epochs.some((entry) => entry.epoch === 0);
+  }
+
+  /**
+   * Verify a §21 directory record against the room's OWN key before believing it.
+   *
+   * "Signed by the room" was a property nothing checked. The server stores
+   * `signed_stub` verbatim and cannot verify it (it holds no room key), so the
+   * signature is worth exactly as much as the client's willingness to read it —
+   * and until now no client did, which made the identity guarantee, and the
+   * refusal that preserves it, decoration.
+   *
+   * Two things are checked, and both are necessary. The signature must verify
+   * over the CANONICAL encoding of the body, and `room_public_key` must be the
+   * founder device's signing key as this session knows it — otherwise a
+   * substituted record signed by an attacker's key verifies against itself
+   * perfectly.
+   *
+   * Fail closed: anything unparseable, unknown or mismatched is `false`.
+   */
+  async verifyDirectoryRecord(
+    signedStub: Record<string, unknown>,
+    stubSignature: string,
+  ): Promise<boolean> {
+    // Re-shape to the CLOSED §8.2 body before canonicalizing. The wire type is
+    // `Record<string, unknown>`, and canonical encoding of an arbitrary object
+    // is not defined — nor should a body with an unexpected key verify, since
+    // the signature was produced over the closed set.
+    const schema = signedStub['schema'];
+    const claimed = signedStub['room_public_key'];
+    const manifest = signedStub['manifest_key_commitment'];
+    if (typeof claimed !== 'string' || typeof manifest !== 'string') return false;
+    // BOTH shapes verify.
+    //
+    // A record written before the capability moved to its own column carries the
+    // v1 body, and migration `0120` preserves those bytes exactly — the server
+    // holds no room key and cannot re-sign, so rewriting them would have made
+    // every existing record unverifiable. The v1 body is served only to a caller
+    // holding the capability (it contains one), which is why a member can still
+    // check it and a stranger never sees it.
+    //
+    // Reconstructed field by field rather than canonicalizing the received
+    // object: a body with an unexpected key must not verify, because the
+    // signature was produced over a closed set.
+    const legacyToken = signedStub['bootstrap_blind_id'];
+    const canonicalBody =
+      schema === 'licio.private.directory_stub.v2'
+        ? Object.keys(signedStub).length === 3
+          ? ({ schema, room_public_key: claimed, manifest_key_commitment: manifest } as const)
+          : null
+        : schema === 'licio.private.directory_stub.v1' &&
+            Object.keys(signedStub).length === 4 &&
+            typeof legacyToken === 'string'
+          ? ({
+              schema,
+              room_public_key: claimed,
+              manifest_key_commitment: manifest,
+              bootstrap_blind_id: legacyToken,
+            } as const)
+          : null;
+    if (canonicalBody === null) return false;
+    // The founder's signing key, from the roster this session was bootstrapped
+    // with — the same set `PrivateRoomEngine.load` verifies the genesis self-add
+    // against, so it is the room's own answer rather than the record's.
+    const founderDeviceId = await verifiedFounderDeviceId(
+      this.p2p,
+      this.session.manifest,
+      this.session.manifestCommitment,
+    );
+    if (founderDeviceId === undefined) return false;
+    // The room's OWN converged device roster, which retains removed devices —
+    // not the grant's bootstrap set, which excludes them. A founder device that
+    // has since been removed still signed the record, and rejecting it would
+    // make a valid record read as forged to every member who joined afterwards.
+    const founder =
+      this.engine.state().devices.get(founderDeviceId) ??
+      this.session.bootstrapDevices.find((device) => device.deviceId === founderDeviceId);
+    if (founder === undefined || founder.signingPublicKey !== claimed) return false;
+    try {
+      const key = await this.p2p.importPublicKeyRaw(this.p2p.fromBase64Url(claimed));
+      return await this.p2p.verifyEd25519(
+        key,
+        this.p2p.canonical(canonicalBody),
+        this.p2p.fromBase64Url(stubSignature),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** The §21 directory record for this room, if it registered one. */
+  get directoryStub(): StoredRoomSession['directoryStub'] {
+    return this.session.directoryStub;
+  }
+
+  /**
+   * Build the SIGNED body of this room's §8.2 directory stub (PRIVATE_SPEC
+   * §21.1), for a creator who wants the room reachable by id rather than only
+   * by out-of-band invite.
+   *
+   * Everything it publishes is a COMMITMENT the room already stands behind —
+   * the founder device's signing public key, the manifest commitment, and (for
+   * an `unlisted` room) a bootstrap blind id.  No key material, no content, no
+   * member, no operation head.  The body is canonically encoded and Ed25519-
+   * signed by this device, so any member can verify the directory record was
+   * authored by the room rather than by the server that stores it — which is
+   * the whole reason the server keeps `signed_stub` verbatim instead of
+   * interpreting it.
+   *
+   * The bootstrap blind id is NOT part of the signed body.  Signing it bought
+   * nothing — the signature is verified against `room_public_key`, which the
+   * body itself carries, so it only means something to a reader who already
+   * knows the room's key independently — while placing it there put a SECRET
+   * inside the one structure the server hands to anonymous readers.  What the
+   * capability needs is secrecy, which no signature provides.
+   *
+   * It is derived from the room's epoch-0 rendezvous key
+   * through a labeled HKDF, so unlike the §15.3 rendezvous blind ids it does
+   * NOT rotate: an invite handed out today must still resolve the record
+   * tomorrow, and after the next membership change.  The cost is that a removed
+   * member keeps a token that resolves a record of commitments and policy — no
+   * content, no keys, and nothing they did not already know, since they were in
+   * the room.  Rotating it would break every outstanding invite to protect
+   * information the ex-member already has.
+   */
+  async directoryStubPayload(accountId?: string): Promise<{
+    readonly roomPublicKey: string;
+    readonly manifestKeyCommitment: string;
+    readonly signedStub: Record<string, unknown>;
+    readonly stubSignature: string;
+    readonly bootstrapBlindId: string;
+    /** Present when an `accountId` was given — registration needs it, and the
+     *  invite path (which only reads the capability) does not. */
+    readonly registrationProof?: string;
+  }> {
+    // The GENESIS epoch specifically, found by number rather than by position.
+    //
+    // `epochs[0]` is the first epoch this DEVICE holds, which for a founder is
+    // epoch 0 and for a joiner is whatever epoch it was admitted at — §11
+    // forward secrecy means a joiner never receives the earlier keys. Reading
+    // position zero and calling it genesis therefore derived a bootstrap blind
+    // id from the wrong key on every joined device: a capability no other member
+    // can reproduce, for a record members are meant to share.
+    //
+    // Fail closed rather than deriving something. A device that cannot produce
+    // the room's canonical capability must not publish a record claiming to be
+    // the room's — the caller offers the action only where it can succeed.
+    const genesis = this.session.epochs.find((entry) => entry.epoch === 0);
+    if (!genesis) {
+      throw new Error(
+        'private-p2p: this device does not hold the room genesis epoch, so it cannot derive the §21.2 bootstrap capability',
+      );
+    }
+    const keys = await this.p2p.deriveRoomEpochKeys(
+      genesis.roomEpochSecret,
+      this.session.roomIdCommitment,
+    );
+    const bootstrapBlindId = this.p2p.toBase64Url(
+      await this.p2p.hmacSha256(
+        keys.rendezvousKey,
+        this.p2p.canonical(['licio.private.bootstrap.v1', this.session.roomIdCommitment]),
+      ),
+    );
+    const roomPublicKey = this.session.signingPublicKey;
+    const manifestKeyCommitment = this.p2p.toBase64Url(this.session.manifestCommitment);
+    // Declared as canonical-encodable rather than `Record<string, unknown>` so
+    // the SIGNED bytes and the transmitted object cannot drift: a field the
+    // encoder would reject is a compile error here, not a signature every
+    // member fails to verify.
+    // EXACTLY the server's closed §8.2 field set — no more, no less. The wire
+    // schema is `.strict()`, so an extra key here is a 400 rather than a
+    // silently-persisted one; that is the point, since "signed by the room" is
+    // not a safety property the server can check (it holds no room key).
+    // PUBLIC commitments only. The bootstrap capability is returned ALONGSIDE
+    // this body and sent as its own field: the server keeps it in a column it
+    // never projects, because a jsonb body is disclosed wholesale wherever it is
+    // disclosed at all — and a `listed` room's bootstrap read is open to anyone.
+    const signedStub = {
+      schema: 'licio.private.directory_stub.v2',
+      room_public_key: roomPublicKey,
+      manifest_key_commitment: manifestKeyCommitment,
+    } as const satisfies Record<string, string>;
+    const stubSignature = this.p2p.toBase64Url(
+      await this.p2p.signEd25519(this.session.signingPrivateKey, this.p2p.canonical(signedStub)),
+    );
+    // …and a proof of CURRENT possession, bound to the account registering.
+    //
+    // The signature above covers a body that is SERVED — publicly for a listed
+    // record, to every invitee for an unlisted one — so replaying it says only
+    // that the replayer has seen a record. This one covers the account too, is
+    // never stored and never served, and is what stops an observer claiming the
+    // room's key after the owner removes their record.
+    const registrationProof =
+      accountId === undefined
+        ? undefined
+        : this.p2p.toBase64Url(
+            await this.p2p.signEd25519(
+              this.session.signingPrivateKey,
+              canonicalRegistrationProofBytes({
+                room_public_key: roomPublicKey,
+                manifest_key_commitment: manifestKeyCommitment,
+                account_id: accountId,
+              }),
+            ),
+          );
+    return {
+      roomPublicKey,
+      manifestKeyCommitment,
+      signedStub,
+      stubSignature,
+      bootstrapBlindId,
+      ...(registrationProof === undefined ? {} : { registrationProof }),
+    };
   }
 
   /**
@@ -1186,11 +1528,37 @@ export class PrivateRoomSession {
       throw new Error('createInvite: the room manifest carries no invite public key');
     }
     const expiresAt = params.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    // The §21 directory capability rides the SEALED invite, not just the
+    // post-admission grant. An invitee needs it BEFORE joining: an `unlisted`
+    // record answers `not_found` without the token, so without this the
+    // recipient of an invite cannot check what Licio publishes about the room
+    // they are about to enter — and the room-signed `room_public_key` in that
+    // record is the one cross-check on the invite that does not come from the
+    // person who sent it.
+    // …unless it is QUARANTINED. A handle that failed verification against THIS
+    // room points at another one, and copying it into an invite is how a
+    // poisoned reference spreads through honest members — the next admin hands
+    // it to everyone they invite. It travels only after it has verified.
+    // …and only once it HAS verified. `quarantined !== true` was the test, which
+    // reads "nobody has proved this wrong yet" as permission — and a handle from
+    // someone else's invite is unproved at the moment it is stored, while the
+    // check that would prove it runs asynchronously in a panel this admin need
+    // never open. Travel requires the positive fact.
+    const stored = this.session.directoryStub;
+    const stub = stored?.verified === true ? stored.capability : undefined;
     const invite = this.p2p.createRoomInvite({
       roomPublicKey,
       grantedRole: params.grantedRole ?? 'member',
       expiresAt,
       ...(params.maxUses === undefined ? {} : { maxUses: params.maxUses }),
+      ...(stub
+        ? {
+            directory: {
+              roomStubRef: stub.roomServerId,
+              bootstrapBlindId: stub.bootstrapBlindId,
+            },
+          }
+        : {}),
     });
     const sealed = await this.p2p.sealInvite(
       this.p2p.fromBase64Url(params.inviteePublicKey),
@@ -1242,10 +1610,61 @@ export class PrivateRoomSession {
     const keyPackage = await p2p.generateMemberKeyPackage(p2p.utf8(deviceId));
     const inviteePublicKey = p2p.toBase64Url(hpke.publicKey);
     const requestedAtBucket = params.requestedAtBucket ?? coarseBucket();
+    /**
+     * Capabilities retained from opened invites, keyed by the room they are FOR.
+     *
+     * A map rather than a variable: one preparation can open invites for two
+     * rooms, and a single slot meant the most recent one won — so a delayed
+     * grant for the first room would persist the SECOND room's token, after
+     * which settings address the wrong record and future invites hand that
+     * unrelated capability out. The key is the invite's `room_public_key`, which
+     * the grant's own manifest carries, so the match is exact rather than
+     * positional.
+     */
+    const directoryByRoomKey = new Map<
+      string,
+      { capability: StoredDirectoryStub['capability']; ambiguous: boolean }
+    >();
     return {
       inviteePublicKey,
       async complete(sealedInvite: string) {
         const invite = await p2p.openInvite(hpke.privateKey, hpke.publicKey, sealedInvite);
+        // RETAIN the §21 capability from the sealed invite. It is the only
+        // delivery of it this device gets, and the only one that is encrypted to
+        // this device — the grant that follows is plaintext on an out-of-band
+        // channel.
+        if (invite.room_stub_ref !== undefined && invite.bootstrap_blind_id !== undefined) {
+          const capability = {
+            roomServerId: invite.room_stub_ref,
+            bootstrapBlindId: invite.bootstrap_blind_id,
+          };
+          // TWO invites for the SAME room are indistinguishable to the grant.
+          //
+          // A grant carries the room's manifest, not the invite it answers, and
+          // one preparation uses one KeyPackage for all of them — so when two
+          // invites for one room disagree about the record (a stale invite from
+          // before the record was removed and registered again), nothing here
+          // can tell which grant belongs to which. Last-write-wins silently
+          // attached the other invite's handle, and that handle then travels
+          // into every invite this device makes.
+          //
+          // Agreement is the common case and is not a conflict. Disagreement
+          // fails CLOSED: the session takes no handle, and the panel can attach
+          // the right one deliberately — a room addressed by the wrong record is
+          // worse than one addressed by none.
+          const seen = directoryByRoomKey.get(invite.room_public_key);
+          const conflicts =
+            seen !== undefined &&
+            (seen.capability.roomServerId !== capability.roomServerId ||
+              seen.capability.bootstrapBlindId !== capability.bootstrapBlindId);
+          directoryByRoomKey.set(invite.room_public_key, {
+            // FIRST wins where they agree (the value is identical anyway); once
+            // ambiguous, always ambiguous — a third agreeing invite does not
+            // resolve which of the first two a grant answers.
+            capability: seen?.capability ?? capability,
+            ambiguous: seen?.ambiguous === true || conflicts,
+          });
+        }
         const request = await p2p.buildJoinRequest({
           invite,
           keyPackage: keyPackage.publicPackage,
@@ -1256,6 +1675,14 @@ export class PrivateRoomSession {
         return { invite, request };
       },
       completeJoin(grant: JoinGrant) {
+        // Match the grant to the invite it answers, by the room key the grant's
+        // MANIFEST carries. An unmatched grant simply gets no capability — a
+        // wrong one would point this room's settings at another room's record.
+        const roomKey = manifestRoomPublicKey(grant.manifest);
+        const retained = roomKey === undefined ? undefined : directoryByRoomKey.get(roomKey);
+        // Ambiguous ⇒ NONE. See the retention above: a wrong record is worse
+        // than no record, because it propagates.
+        const directory = retained?.ambiguous === false ? retained.capability : undefined;
         return PrivateRoomSession.finishJoin(grant, {
           bundle: keyPackage,
           signingPrivateKey: signing.privateKey,
@@ -1263,6 +1690,7 @@ export class PrivateRoomSession {
           hpkePrivateKey: hpke.privateKey,
           hpkePublicKey: hpke.publicKey,
           ...(params.createStorage ? { createStorage: params.createStorage } : {}),
+          ...(directory ? { directory } : {}),
         });
       },
     };
@@ -1289,144 +1717,203 @@ export class PrivateRoomSession {
     request: JoinRequest,
     options?: { readonly usesSoFar?: number; readonly now?: Date },
   ): Promise<AdmitResult> {
-    // Enforce the invite's §10.3 `max_uses` budget from the PERSISTED per-invite
-    // counter (this admin device) — the caller's explicit `usesSoFar` still wins
-    // when provided (tests / alternate drivers).  Without this a single-use invite
-    // verified fresh forever (nothing was ever charged against it).
+    // CLAIM the §10.3 budget before anything else, in ONE conditional write.
+    //
+    // Reading the counter here and charging it at the end is a check, not a
+    // budget. `runExclusive` is a per-INSTANCE mutex, so the same room open in
+    // two tabs gives two managers that never see each other: both read
+    // `usesSoFar = 0` on a single-use invite, both pass this gate, both add a
+    // member through their own MLS commit, and the room acquires two members on
+    // one use plus a pair of divergent branches. The claim is a compare-and-set
+    // inside an IndexedDB readwrite transaction, which is shared across tabs.
+    //
+    // `options.usesSoFar` still wins when a caller supplies it (tests /
+    // alternate drivers): that caller owns the accounting, so nothing is
+    // claimed and the charge stays where it was.
     const inviteStore = new IndexedDbPrivateRoomStorage(this.session.roomId);
-    const usesSoFar = options?.usesSoFar ?? (await inviteStore.getInviteUses(invite.invite_id));
+    const driverOwnsBudget = options?.usesSoFar !== undefined;
+    let claimed: number | null = null;
+    if (!driverOwnsBudget) {
+      claimed = await inviteStore.claimInviteUse(invite.invite_id, invite.max_uses);
+      if (claimed === null) return { verdict: { ok: false, reason: 'exhausted' } };
+    }
+    // The claim already took this use, so verification sees the budget as it
+    // stood BEFORE it — every other rejection (expiry, proof, key package) is
+    // unchanged, and a rejection releases the claim below.
+    const usesSoFar = options?.usesSoFar ?? (claimed as number) - 1;
     const verdict = await this.p2p.verifyJoinRequest(invite, request, {
       now: options?.now ?? new Date(),
       usesSoFar,
     });
-    if (!verdict.ok) return { verdict };
-
-    const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
-    const invited = await this.p2p.inviteDevice(group, verdict.keyPackage);
-    const newEpochState = await this.p2p.deriveEpochState(
-      invited.group,
-      this.session.roomIdCommitment,
-      this.session.manifestCommitment,
-    );
-    const epoch = Number(newEpochState.epoch);
-    this.engine.addEpochKeys(epoch, this.p2p.heldKeysOf(newEpochState));
-
-    const newMemberId = globalThis.crypto.randomUUID();
-    // SECURITY: the reducer device id is DERIVED from the proof-bound signing key, NOT
-    // taken from the joiner-chosen KeyPackage credential identity (which the joiner fully
-    // controls + MLS dedups only by signature key, so a joiner could otherwise collide an
-    // existing device_id, desyncing the reducer from MLS and mis-targeting removal).  The
-    // joiner set its KeyPackage identity to this SAME derived value (prepareJoinRequest),
-    // so `utf8(deviceId)` still resolves the leaf for §10.9 removal.  Fail-closed: reject
-    // a KeyPackage whose credential identity does not match the derived id, or a collision
-    // with an existing device.
-    const newDeviceId = await deviceIdFromSigningKey(this.p2p, verdict.deviceSigningPublicKey);
-    const cred = verdict.keyPackage.leafNode.credential;
-    const credIdentity = cred.credentialType === 'basic' ? this.p2p.fromUtf8(cred.identity) : '';
-    if (credIdentity !== newDeviceId || this.engine.state().devices.has(newDeviceId)) {
-      return { verdict: { ok: false, reason: 'malformed_key_package' } };
+    if (!verdict.ok) {
+      if (claimed !== null) await inviteStore.releaseInviteUse(invite.invite_id);
+      return { verdict };
     }
-    const { op, sealParams } = await this.p2p.buildMemberAddOp(
-      {
-        roomId: this.session.roomId,
-        roomIdCommitment: this.session.roomIdCommitment,
-        epochState: newEpochState,
+
+    // A CLAIM WHOSE ADMISSION DOES NOT COMPLETE IS HANDED BACK — but only while
+    // there is nothing to hand it back FROM.
+    //
+    // `applyLocalOp` seals the `member.add` and ingests it, which puts it in the
+    // room's persisted op log; from that instant the new member is part of the
+    // room's state and will be served to any peer that syncs. A later failure
+    // (the session write, the snapshot, `exportArchive`) leaves that member in
+    // place, and the commit may already have been broadcast — so releasing the
+    // claim there does not undo an admission, it hands out a SECOND use of an
+    // invite that has already admitted someone. A single-use invite would then
+    // admit two devices while the first, grantless member stays in the roster.
+    //
+    // Before that line, nothing durable exists and a release is exactly right:
+    // the MLS operations and the verdict checks can throw or reject, and the
+    // invitee must have something to retry against.
+    let durablyAdmitted = false;
+    try {
+      const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
+      const invited = await this.p2p.inviteDevice(group, verdict.keyPackage);
+      const newEpochState = await this.p2p.deriveEpochState(
+        invited.group,
+        this.session.roomIdCommitment,
+        this.session.manifestCommitment,
+      );
+      const epoch = Number(newEpochState.epoch);
+      this.engine.addEpochKeys(epoch, this.p2p.heldKeysOf(newEpochState));
+
+      const newMemberId = globalThis.crypto.randomUUID();
+      // SECURITY: the reducer device id is DERIVED from the proof-bound signing key, NOT
+      // taken from the joiner-chosen KeyPackage credential identity (which the joiner fully
+      // controls + MLS dedups only by signature key, so a joiner could otherwise collide an
+      // existing device_id, desyncing the reducer from MLS and mis-targeting removal).  The
+      // joiner set its KeyPackage identity to this SAME derived value (prepareJoinRequest),
+      // so `utf8(deviceId)` still resolves the leaf for §10.9 removal.  Fail-closed: reject
+      // a KeyPackage whose credential identity does not match the derived id, or a collision
+      // with an existing device.
+      const newDeviceId = await deviceIdFromSigningKey(this.p2p, verdict.deviceSigningPublicKey);
+      const cred = verdict.keyPackage.leafNode.credential;
+      const credIdentity = cred.credentialType === 'basic' ? this.p2p.fromUtf8(cred.identity) : '';
+      if (credIdentity !== newDeviceId || this.engine.state().devices.has(newDeviceId)) {
+        // A REJECTION RELEASES THE CLAIM, like every other one. This arm returns
+        // rather than throwing, so it slipped past the catch below and burned a
+        // single-use invite for a request that created no member and no grant —
+        // the opposite of the "NO state changes on rejection" this method
+        // promises. The verdict is a rejection wherever it is decided.
+        //
+        // Defensive rather than reachable from outside: a duplicate device is
+        // refused by MLS first (which throws, and the catch releases), and a
+        // mismatched credential identity requires a forged KeyPackage. It is
+        // released here for the same reason the check exists at all.
+        if (claimed !== null) await inviteStore.releaseInviteUse(invite.invite_id);
+        return { verdict: { ok: false, reason: 'malformed_key_package' } };
+      }
+      const { op, sealParams } = await this.p2p.buildMemberAddOp(
+        {
+          roomId: this.session.roomId,
+          roomIdCommitment: this.session.roomIdCommitment,
+          epochState: newEpochState,
+          author: {
+            memberId: this.session.memberId,
+            deviceId: this.session.deviceId,
+            signingKey: this.session.signingPrivateKey,
+            seq: this.engine.nextAuthorSeq(this.session.deviceId),
+          },
+          parents: this.engine.heads(),
+          lamport: this.engine.nextLamport(),
+        },
+        {
+          memberId: newMemberId,
+          deviceId: newDeviceId,
+          // The signed `member.add` records the joining device's LONG-TERM keys: its
+          // dedicated Ed25519 op-signing key (proof-bound in the §12.3 request, so a relay
+          // cannot substitute it — and SEPARATE from the MLS leaf key, no cross-protocol
+          // reuse) and its HPKE init key (authenticated by the verified KeyPackage).
+          signingPublicKey: verdict.deviceSigningPublicKey,
+          hpkePublicKey: this.p2p.toBase64Url(verdict.keyPackage.initKey),
+          mlsKeyPackage: request.recipient_device_key_package,
+          role: verdict.grantedRole,
+          displayName: request.proposed_display_name,
+        },
+      );
+      await this.engine.applyLocalOp(op, sealParams);
+      // THE ADMISSION IS DURABLE FROM HERE: the `member.add` is in the persisted
+      // op log and syncs to peers. The use is spent whether or not the rest of
+      // this method completes.
+      durablyAdmitted = true;
+
+      const epochs = [
+        ...this.session.epochs.filter((e) => e.epoch !== epoch),
+        {
+          epoch,
+          roomEpochSecret: newEpochState.roomEpochSecret,
+          contentWrapKey: newEpochState.keys.contentWrapKey,
+        },
+      ];
+      this.session = {
+        ...this.session,
+        mlsGroupState: this.p2p.serializeGroupState(invited.group),
+        epochs,
+      };
+      await putRoomSession(this.session);
+      // §10.9: deliver the epoch-rotating commit to every currently-connected member so
+      // they advance to the new epoch and can open the new-epoch content (otherwise their
+      // engines would quarantine it no_epoch_key).
+      this.broadcastCommit(this.p2p.encodeCommit(invited.commit), epoch);
+
+      // Build the joiner's bootstrap GRANT: a §14.5 snapshot sealed under the NEW epoch
+      // (the only epoch the joiner holds) carries the FULL reduced state — members,
+      // devices, content — so a fresh joiner sees the current room WITHOUT the historical
+      // epoch keys it never held (forward secrecy preserved).  commitSnapshot covers the
+      // just-applied member.add, so the snapshot already includes the joiner.
+      const snapshotBase = await this.engine.commitSnapshot({
+        epoch,
+        roomEpochSecret: newEpochState.roomEpochSecret,
+        contentWrapKey: newEpochState.keys.contentWrapKey,
         author: {
           memberId: this.session.memberId,
           deviceId: this.session.deviceId,
           signingKey: this.session.signingPrivateKey,
-          seq: this.engine.nextAuthorSeq(this.session.deviceId),
         },
-        parents: this.engine.heads(),
-        lamport: this.engine.nextLamport(),
-      },
-      {
-        memberId: newMemberId,
-        deviceId: newDeviceId,
-        // The signed `member.add` records the joining device's LONG-TERM keys: its
-        // dedicated Ed25519 op-signing key (proof-bound in the §12.3 request, so a relay
-        // cannot substitute it — and SEPARATE from the MLS leaf key, no cross-protocol
-        // reuse) and its HPKE init key (authenticated by the verified KeyPackage).
-        signingPublicKey: verdict.deviceSigningPublicKey,
-        hpkePublicKey: this.p2p.toBase64Url(verdict.keyPackage.initKey),
-        mlsKeyPackage: request.recipient_device_key_package,
-        role: verdict.grantedRole,
-        displayName: request.proposed_display_name,
-      },
-    );
-    await this.engine.applyLocalOp(op, sealParams);
-
-    const epochs = [
-      ...this.session.epochs.filter((e) => e.epoch !== epoch),
-      {
-        epoch,
-        roomEpochSecret: newEpochState.roomEpochSecret,
-        contentWrapKey: newEpochState.keys.contentWrapKey,
-      },
-    ];
-    this.session = {
-      ...this.session,
-      mlsGroupState: this.p2p.serializeGroupState(invited.group),
-      epochs,
-    };
-    await putRoomSession(this.session);
-    // §10.9: deliver the epoch-rotating commit to every currently-connected member so
-    // they advance to the new epoch and can open the new-epoch content (otherwise their
-    // engines would quarantine it no_epoch_key).
-    this.broadcastCommit(this.p2p.encodeCommit(invited.commit), epoch);
-
-    // Build the joiner's bootstrap GRANT: a §14.5 snapshot sealed under the NEW epoch
-    // (the only epoch the joiner holds) carries the FULL reduced state — members,
-    // devices, content — so a fresh joiner sees the current room WITHOUT the historical
-    // epoch keys it never held (forward secrecy preserved).  commitSnapshot covers the
-    // just-applied member.add, so the snapshot already includes the joiner.
-    const snapshotBase = await this.engine.commitSnapshot({
-      epoch,
-      roomEpochSecret: newEpochState.roomEpochSecret,
-      contentWrapKey: newEpochState.keys.contentWrapKey,
-      author: {
-        memberId: this.session.memberId,
-        deviceId: this.session.deviceId,
-        signingKey: this.session.signingPrivateKey,
-      },
-      snapshotId: globalThis.crypto.randomUUID(),
-    });
-    if (snapshotBase) {
-      this.session = { ...this.session, snapshotBase };
-      await putRoomSession(this.session);
+        snapshotId: globalThis.crypto.randomUUID(),
+      });
+      if (snapshotBase) {
+        this.session = { ...this.session, snapshotBase };
+        await putRoomSession(this.session);
+      }
+      // …NOW re-announce (AFTER the commit + the grant snapshot).  This must follow `commitSnapshot`,
+      // not precede it: `commitSnapshot` compacts A's log — dropping the just-authored `member.add` — so
+      // announcing BEFORE it would advertise a head the peer can no longer pull (A would serve 0), and
+      // the peer would strand on the missing prefix.  Announcing AFTER advertises the SNAPSHOT head +
+      // `latest_snapshot_id`, so a connected member that already advanced the epoch (via the commit
+      // above) bootstraps the new member/device/content over the §14.5 snapshot archive
+      // (PRIV-WEB-SESSION-NUDGE).
+      this.nudgeActiveSessions();
+      const archive = await this.engine.exportArchive({
+        kind: 'encrypted_member_backup',
+        createdAtBucket: coarseBucket(),
+      });
+      const grant: JoinGrant = {
+        welcome: this.p2p.encodeWelcomeMessage(invited.welcome),
+        roomId: this.session.roomId,
+        roomIdCommitment: this.session.roomIdCommitment,
+        manifest: this.session.manifest,
+        manifestCommitment: this.session.manifestCommitment,
+        assignedMemberId: newMemberId,
+        assignedDeviceId: newDeviceId,
+        // The current device roster (public keys) — the joiner's bootstrap trust set,
+        // authenticated by the admin it is joining through (the §10.3 channel).
+        bootstrapDevices: [...this.engine.state().devices.values()]
+          .filter((d) => !d.removed)
+          .map((d) => ({ deviceId: d.deviceId, signingPublicKey: d.signingPublicKey })),
+        archive,
+      };
+      // Already charged by the claim above; only a driver that owns the
+      // accounting still charges here.
+      if (driverOwnsBudget) await inviteStore.incrementInviteUses(invite.invite_id);
+      return { verdict, grant };
+    } catch (error) {
+      // Only an admission that never became durable gives its use back.
+      if (claimed !== null && !durablyAdmitted) {
+        await inviteStore.releaseInviteUse(invite.invite_id);
+      }
+      throw error;
     }
-    // …NOW re-announce (AFTER the commit + the grant snapshot).  This must follow `commitSnapshot`,
-    // not precede it: `commitSnapshot` compacts A's log — dropping the just-authored `member.add` — so
-    // announcing BEFORE it would advertise a head the peer can no longer pull (A would serve 0), and
-    // the peer would strand on the missing prefix.  Announcing AFTER advertises the SNAPSHOT head +
-    // `latest_snapshot_id`, so a connected member that already advanced the epoch (via the commit
-    // above) bootstraps the new member/device/content over the §14.5 snapshot archive
-    // (PRIV-WEB-SESSION-NUDGE).
-    this.nudgeActiveSessions();
-    const archive = await this.engine.exportArchive({
-      kind: 'encrypted_member_backup',
-      createdAtBucket: coarseBucket(),
-    });
-    const grant: JoinGrant = {
-      welcome: this.p2p.encodeWelcomeMessage(invited.welcome),
-      roomId: this.session.roomId,
-      roomIdCommitment: this.session.roomIdCommitment,
-      manifest: this.session.manifest,
-      manifestCommitment: this.session.manifestCommitment,
-      assignedMemberId: newMemberId,
-      assignedDeviceId: newDeviceId,
-      // The current device roster (public keys) — the joiner's bootstrap trust set,
-      // authenticated by the admin it is joining through (the §10.3 channel).
-      bootstrapDevices: [...this.engine.state().devices.values()]
-        .filter((d) => !d.removed)
-        .map((d) => ({ deviceId: d.deviceId, signingPublicKey: d.signingPublicKey })),
-      archive,
-    };
-    // The admit fully succeeded — charge this join against the invite so a
-    // single-use invite cannot be replayed for a second member (persisted AFTER
-    // the session write, so a mid-admit failure never burns a use).
-    await inviteStore.incrementInviteUses(invite.invite_id);
-    return { verdict, grant };
   }
 
   /**
@@ -1446,6 +1933,9 @@ export class PrivateRoomSession {
       readonly hpkePrivateKey: CryptoKey;
       readonly hpkePublicKey: Uint8Array;
       readonly createStorage?: (roomId: string) => PrivateRoomStorage;
+      /** The §21 capability, from the HPKE-SEALED invite this joiner opened —
+       *  never from the plaintext grant. */
+      readonly directory?: StoredDirectoryStub['capability'];
     },
   ): Promise<PrivateRoomSession> {
     await ensurePrivateBundleTrusted();
@@ -1508,6 +1998,7 @@ export class PrivateRoomSession {
       bootstrapDevices: grant.bootstrapDevices,
       ...(base ? { snapshotBase: base } : {}),
       createdAtBucket: coarseBucket(),
+      ...(joiner.directory ? { directoryStub: { capability: joiner.directory } } : {}),
     };
     await putRoomSession(session);
     return new PrivateRoomSession(p2p, engine, session, DEFAULT_COMPACT_EVERY_OPS);

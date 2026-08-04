@@ -9,7 +9,7 @@
 
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PrivateRoomSession } from '../room-manager.js';
+import { PrivateRoomSession, parseJoinGrant, serializeJoinGrant } from '../room-manager.js';
 import * as sessionStore from '../session-store.js';
 import type { PeerChannel } from '../sync-session.js';
 
@@ -120,6 +120,141 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
     expect(second.verdict.ok).toBe(false);
     if (second.verdict.ok) throw new Error('unreachable: expected an exhausted verdict');
     expect(second.verdict.reason).toBe('exhausted');
+  });
+
+  it('admits ONCE when two managers race the same single-use invite (two tabs)', async () => {
+    // `runExclusive` is a per-INSTANCE mutex, so the same room open in two tabs
+    // gives two managers that never see each other. Reading the counter, doing
+    // the whole admit, and charging the use at the end let both read
+    // `usesSoFar = 0`, both pass the §10.3 budget check, and both add a member
+    // through their own MLS commit — two members on one use, and a pair of
+    // divergent branches. The budget is claimed in one conditional IndexedDB
+    // write now, which IS shared across tabs.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'One-shot Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const { request } = await prep.complete(
+      inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+
+    // A SECOND manager over the same persisted room — the second tab. Its
+    // op-lock is its own, so nothing but the shared store can order these.
+    const secondTab = await PrivateRoomSession.load(founder.roomId);
+    if (secondTab === null) throw new Error('expected the room to reopen');
+
+    const [a, b] = await Promise.all([
+      founder.admitJoinRequest(invite, request),
+      secondTab.admitJoinRequest(invite, request),
+    ]);
+    const accepted = [a, b].filter((r) => r.verdict.ok);
+    expect(accepted).toHaveLength(1);
+    const refused = [a, b].find((r) => !r.verdict.ok);
+    if (refused === undefined || refused.verdict.ok) throw new Error('expected one refusal');
+    expect(refused.verdict.reason).toBe('exhausted');
+  });
+
+  it('hands the claim back when the request is REJECTED', async () => {
+    // Claiming first is what makes the budget a budget — but a claim whose
+    // admission does not complete would silently spend a single-use invite and
+    // leave the invitee nothing to retry against, which is the guarantee the
+    // charge-at-the-end ordering used to provide. A rejected request is the
+    // ordinary way that happens.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'One-shot Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const target = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    // A request built from a DIFFERENT invite: it cannot prove it holds this
+    // one, so the verdict refuses it after the budget has been claimed.
+    const other = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const { request: wrong } = await prep.complete(
+      other.inviteUrl.slice(other.inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const refused = await founder.admitJoinRequest(target.invite, wrong);
+    expect(refused.verdict.ok).toBe(false);
+
+    // The use went back, so the invite still admits the RIGHT request.
+    const { request } = await prep.complete(
+      target.inviteUrl.slice(target.inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const accepted = await founder.admitJoinRequest(target.invite, request);
+    expect(accepted.verdict.ok).toBe(true);
+  });
+
+  it('KEEPS the claim once the admission is durable, even if the rest fails', async () => {
+    // The other half of the rule above, and the one that matters for single-use.
+    // `applyLocalOp` puts the `member.add` in the persisted op log — from there
+    // the joiner IS a member and syncs to peers. A failure after that point
+    // (the session write, the snapshot, the archive) does not undo it, so
+    // handing the use back would let a single-use invite admit a SECOND device
+    // while the first one sits in the roster.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'One-shot Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const { request } = await prep.complete(
+      inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+
+    // Fail the FIRST write after the op is durable.
+    const spy = vi
+      .spyOn(sessionStore, 'putRoomSession')
+      .mockRejectedValueOnce(new Error('quota exceeded'));
+    await expect(founder.admitJoinRequest(invite, request)).rejects.toThrow('quota exceeded');
+    spy.mockRestore();
+
+    // The member really is in the room — this is not a no-op that could be retried.
+    const members = [...founder.state().members.values()];
+    expect(members.some((m) => m.displayName === 'Bob')).toBe(true);
+
+    // …so the single use is spent. A second attempt finds the invite exhausted
+    // rather than admitting another device against the same one.
+    const { request: second } = await prep.complete(
+      inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const again = await founder.admitJoinRequest(invite, second);
+    expect(again.verdict.ok).toBe(false);
+    if (again.verdict.ok) throw new Error('unreachable');
+    expect(again.verdict.reason).toBe('exhausted');
   });
 
   it('removeMember rotates the epoch — the evicted device cannot read post-removal content (§10.9)', async () => {
@@ -250,5 +385,230 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
     const persisted = putSpy.mock.calls.at(-1)?.[0];
     expect(persisted?.snapshotBase).toBeDefined();
     putSpy.mockRestore();
+  });
+});
+
+describe('§21 directory capability carried through the SEALED invite (WS-S.1.2b)', () => {
+  it('stops handing out a QUARANTINED handle in new invites', async () => {
+    // A handle rides a sealed invite and is not bound to the room that invite is
+    // for, so a member can be given another room's. Post-join verification is
+    // where that shows up — and a member who later becomes an admin would copy
+    // the poisoned reference into every invite they issue, spreading it through
+    // people who did nothing wrong.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Listed Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const payload = await founder.directoryStubPayload();
+    await founder.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const before = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    expect(before.invite.room_stub_ref).toBe('11111111-1111-4111-8111-111111111111');
+
+    await founder.quarantineDirectoryStub();
+    const after = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    expect(after.invite.room_stub_ref).toBeUndefined();
+    expect(after.invite.bootstrap_blind_id).toBeUndefined();
+  });
+
+  it('takes NO handle when two invites for one room disagree about the record', async () => {
+    // A grant carries the room's manifest, not the invite it answers, and one
+    // preparation uses one KeyPackage for all of them — so two invites for the
+    // SAME room are indistinguishable to `completeJoin`. Last-write-wins
+    // attached the other invite's handle silently, and that handle then travels
+    // into every invite this device makes afterwards.
+    //
+    // A wrong record is worse than none, so disagreement fails closed.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Listed Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const payload = await founder.directoryStubPayload();
+    await founder.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const first = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    // The record is removed and registered again — a second invite for the same
+    // room now names a DIFFERENT record.
+    await founder.attachDirectoryStub({
+      roomServerId: '22222222-2222-4222-8222-222222222222',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+    const second = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    for (const url of [first.inviteUrl, second.inviteUrl]) {
+      await prep.complete(url.slice(url.indexOf('#invite=') + '#invite='.length));
+    }
+
+    const { request } = await prep.complete(
+      first.inviteUrl.slice(first.inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const { grant } = await founder.admitJoinRequest(first.invite, request);
+    if (!grant) throw new Error('expected a grant');
+    const joiner = await prep.completeJoin(parseJoinGrant(serializeJoinGrant(grant)) as never);
+    expect(joiner.directoryStub).toBeUndefined();
+  });
+
+  it('hands the joiner a working directory handle it could never derive itself', async () => {
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Listed Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    // `bootstrapBlindId` comes from the room's EPOCH-0 rendezvous key, and the
+    // joiner is admitted at epoch 1 — it never holds epoch 0 and cannot derive
+    // this on the other side at all.
+    const payload = await founder.directoryStubPayload();
+    await founder.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    const { request } = await prep.complete(fragment);
+    const { grant } = await founder.admitJoinRequest(invite, request);
+    if (!grant) throw new Error('expected a grant');
+
+    // The GRANT carries no capability at all — it is copy-pasted plaintext, and
+    // the token does not rotate, so an observer of that channel would keep a
+    // handle that resolves an unlisted record forever.
+    expect(JSON.stringify(grant)).not.toContain(payload.bootstrapBlindId);
+    expect(serializeJoinGrant(grant)).not.toContain(payload.bootstrapBlindId);
+
+    // The joiner has it anyway: it came from the HPKE-sealed invite it opened.
+    const joiner = await prep.completeJoin(parseJoinGrant(serializeJoinGrant(grant)) as never);
+    expect(joiner.directoryStub?.capability).toEqual({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+    // …and it arrives UNVERIFIED. Nobody has checked it against this room yet:
+    // the handle rode someone else's invite and neither it nor the capability is
+    // bound to the room the invite was for.
+    expect(joiner.directoryStub?.verified).not.toBe(true);
+  });
+
+  it('will not put an UNVERIFIED handle into an invite of its own', async () => {
+    // The invite gate used to read "not quarantined" as permission, which is
+    // "nobody has proved this wrong yet" — and an invite-carried handle is
+    // unproved the moment it is stored, while the check that would prove it runs
+    // asynchronously in a panel the admin need never open. So a joiner promoted
+    // to admin could hand another room's stable bootstrap capability to
+    // everyone they invited, through entirely honest invitations.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Listed Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const payload = await founder.directoryStubPayload();
+    await founder.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const { request } = await prep.complete(
+      inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const { grant } = await founder.admitJoinRequest(invite, request);
+    if (!grant) throw new Error('expected a grant');
+    const joiner = await prep.completeJoin(parseJoinGrant(serializeJoinGrant(grant)) as never);
+
+    // The joiner holds the handle and invites someone else — it does NOT travel.
+    const next = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Cass',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const onward = await joiner.createInvite({
+      inviteePublicKey: next.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    expect(onward.invite.room_stub_ref).toBeUndefined();
+    expect(onward.invite.bootstrap_blind_id).toBeUndefined();
+
+    // …until the record verifies against THIS room, which is what releases it.
+    await joiner.markDirectoryStubVerified();
+    const afterCheck = await joiner.createInvite({
+      inviteePublicKey: next.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    expect(afterCheck.invite.room_stub_ref).toBe('11111111-1111-4111-8111-111111111111');
+  });
+
+  it('omits the handle for a room that registered no stub', async () => {
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Detached Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    const { request } = await prep.complete(fragment);
+    expect(invite.room_stub_ref).toBeUndefined();
+    expect(invite.bootstrap_blind_id).toBeUndefined();
+    const { grant } = await founder.admitJoinRequest(invite, request);
+    if (!grant) throw new Error('expected a grant');
+    const joiner = await prep.completeJoin(grant);
+    expect(joiner.directoryStub).toBeUndefined();
   });
 });

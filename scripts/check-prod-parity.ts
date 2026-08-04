@@ -22,6 +22,17 @@
 //      holds un-allowlisted in-memory state.  This is how upload blob BYTES
 //      lived in a restart-volatile Map inside the Drizzle store, and how the
 //      rendezvous signal mailbox stayed process-local under Postgres.
+//   4. COMPOSITION PARITY — a composition root does not install the §19.3
+//      data-rights hooks, or installs one BESIDE the shared installer.  Every
+//      `IdentityServices` export/purge hook is OPTIONAL, and an absent one is a
+//      silent no-op: the DSAR archive simply omits that store and the erasure
+//      simply leaves it behind, with no error, no log line and no failing test.
+//      Assigned inline, each new hook had to be remembered in every root — and
+//      was not: the E2E harness ran with the attention, content, client-state,
+//      moderation-notice and private-room-directory hooks all absent, so the
+//      runtime that drives the authenticated flows could not fail on any
+//      disclosure or deletion gap.  `identity/data-rights-hooks.ts` owns them
+//      now; this leg is what keeps a root from drifting away from it again.
 //
 // Every allowlist entry requires a written reason; an entry that no longer
 // matches anything is itself an error (allowlists must not rot).
@@ -55,6 +66,15 @@ const ROOT = resolve(import.meta.dirname, '..');
 const API_SRC = resolve(ROOT, 'apps/api/src');
 const ENV_SCHEMA_SOURCE = resolve(ROOT, 'packages/shared/src/env/server.ts');
 const BOOT_ENTRY = 'index.ts';
+
+/** Leg 4: the module that OWNS the data-rights hooks, and the roots that must
+ *  install them.  The E2E harness is a composition root for this purpose even
+ *  though it is excluded from the production legs above: it is the runtime the
+ *  authenticated E2E flows run against, so a hook missing there is a guarantee
+ *  no test can fail on. */
+const DATA_RIGHTS_MODULE = resolve(API_SRC, 'identity/data-rights-hooks.ts');
+const DATA_RIGHTS_INSTALLER = 'installDataRightsHooks';
+const COMPOSITION_ROOTS = ['index.ts', 'e2e-server.ts'] as const;
 
 const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
 /** Dev-only trees/files that never serve production (structurally excluded). */
@@ -789,13 +809,95 @@ export function parseServerEnvSchemaKeys(source: string): Set<string> {
   return keys;
 }
 
+// ---------------------------------------------------------------------------
+// Leg 4: composition parity — every root installs every data-rights hook.
+// ---------------------------------------------------------------------------
+
+/** The hook names the installer owns, read from its OWN assignments. */
+export function dataRightsHookNames(installerSource: string): Set<string> {
+  const names = withParsed(new Map([['data-rights-hooks.ts', installerSource]]), (parsed) => {
+    const found = new Set<string>();
+    for (const source of parsed) {
+      for (const node of walk(source.root)) {
+        if (node.kind !== SyntaxKind.BinaryExpression) continue;
+        if (node.operatorToken?.kind !== SyntaxKind.EqualsToken) continue;
+        const left = node.left;
+        if (left?.kind !== SyntaxKind.PropertyAccessExpression) continue;
+        // `identity.<hook> = …`, where `identity` is the installer's own
+        // parameter — the name is read off the assignment rather than listed
+        // here, so a hook added to the installer is covered the moment it is.
+        if (nameOf(left.expression) !== 'identity') continue;
+        const hook = nameOf(left.name);
+        if (hook !== undefined) found.add(hook);
+      }
+    }
+    return found;
+  });
+  if (names.size < 5) {
+    throw new Error(
+      `check-prod-parity: read only ${names.size} data-rights hooks from ` +
+        'identity/data-rights-hooks.ts — the installer changed shape; update dataRightsHookNames.',
+    );
+  }
+  return names;
+}
+
+export function checkCompositionParity(
+  roots: ReadonlyMap<string, string>,
+  hooks: ReadonlySet<string>,
+): string[] {
+  return withParsed(
+    [...roots].reduce((m, [k, v]) => m.set(k, v), new Map<string, string>()),
+    (parsed) => {
+      const issues: string[] = [];
+      for (const source of parsed) {
+        const newlines = newlineIndex(source.content);
+        let installs = false;
+        for (const node of walk(source.root)) {
+          if (
+            node.kind === SyntaxKind.CallExpression &&
+            nameOf(node.expression) === DATA_RIGHTS_INSTALLER
+          ) {
+            installs = true;
+          }
+          // …and NOT beside it: an inline assignment of a hook the installer owns
+          // is one root's private copy, which is exactly how the two drifted.
+          if (node.kind !== SyntaxKind.BinaryExpression) continue;
+          if (node.operatorToken?.kind !== SyntaxKind.EqualsToken) continue;
+          const left = node.left;
+          if (left?.kind !== SyntaxKind.PropertyAccessExpression) continue;
+          const hook = nameOf(left.name);
+          if (hook === undefined || !hooks.has(hook)) continue;
+          issues.push(
+            `${source.path}:${lineAt(newlines, node.getStart())} assigns the data-rights hook ` +
+              `'${hook}' inline; it is owned by identity/data-rights-hooks.ts — add it THERE so ` +
+              'every composition root gets it.',
+          );
+        }
+        if (!installs) {
+          issues.push(
+            `${source.path} does not call ${DATA_RIGHTS_INSTALLER}(): its runtime would export and ` +
+              'delete an account without the stores those hooks reach, silently.',
+          );
+        }
+      }
+      return issues;
+    },
+  );
+}
+
 export function runProdParityGate(files: Map<string, string>): string[] {
   const closure = buildBootClosure(files, BOOT_ENTRY);
   const schemaKeys = parseServerEnvSchemaKeys(readFileSync(ENV_SCHEMA_SOURCE, 'utf-8'));
+  const hooks = dataRightsHookNames(readFileSync(DATA_RIGHTS_MODULE, 'utf-8'));
+  const roots = new Map(
+    COMPOSITION_ROOTS.map((root) => [root, readFileSync(resolve(API_SRC, root), 'utf-8')]),
+  );
   return [
     ...checkAdapterCoverage(files, closure),
     ...checkEnvKeys(files, schemaKeys),
     ...checkAdapterPurity(files),
+    ...checkCompositionParity(roots, hooks),
   ];
 }
 
@@ -808,8 +910,9 @@ function main(): void {
   }
   console.log(
     'Production-parity gate passed: every in-memory adapter has a boot-wired production ' +
-      'counterpart, every env key is schema-validated or a documented dev flag, and no ' +
-      'production adapter holds un-allowlisted in-memory state.',
+      'counterpart, every env key is schema-validated or a documented dev flag, no ' +
+      'production adapter holds un-allowlisted in-memory state, and every composition root ' +
+      'installs the data-rights hooks from the one module that owns them.',
   );
 }
 

@@ -231,6 +231,51 @@ describe('POST /v1/privacy/attention/delete', () => {
       ),
     ).toBe(true);
   });
+
+  it('purges through the UNIT’s handle when the root binds one', async () => {
+    // Nesting the loose hook inside `transact` was lexical only: it writes
+    // through separately-composed WS-E stores, so a purge that succeeded before
+    // a later failure destroyed the user's attention history irreversibly while
+    // the `attention_delete` row rolled back and the endpoint answered 500 — an
+    // erasure that happened, is denied, and has no record. The production root
+    // binds the WS-E stores to the identity transaction; this asserts the route
+    // actually PREFERS that binding, since a route that kept calling the loose
+    // hook would leave the binding unused and the guarantee unclaimed.
+    let looseCalls = 0;
+    let boundCalls = 0;
+    services.purgeAttention = async () => {
+      looseCalls += 1;
+      return 7;
+    };
+    const plain = services.transact.bind(services);
+    services.transact = (work) =>
+      plain((tx) =>
+        work({
+          ...tx,
+          purgeAttention: async () => {
+            boundCalls += 1;
+            return 99;
+          },
+        }),
+      );
+    const user = await seedUser('adult', 'bound@example.com', 'bounduser');
+    const app = createApp();
+    const sid = await login(app, 'bound@example.com');
+    const res = await app.request('/v1/privacy/attention/delete', {
+      method: 'POST',
+      headers: jsonHeaders(sid),
+      body: JSON.stringify({ mode: 'delete' }),
+    });
+    expect(res.status).toBe(200);
+    expect((await readJson<{ aggregates_removed: number }>(res)).aggregates_removed).toBe(99);
+    expect(boundCalls).toBe(1);
+    expect(looseCalls).toBe(0);
+    expect(
+      (await services.audit.securityActivityForUser(user.userId)).some(
+        (e) => e.event_type === 'attention_delete',
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('DSAR export', () => {

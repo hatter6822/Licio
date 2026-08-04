@@ -362,8 +362,16 @@ type PrivateRoomStub = {
     value: string;
   }>;
 
-  signed_stub: unknown;
+  // The room-signed body.  A CLOSED set of PUBLIC commitments — see §21.1.
+  signed_stub: {
+    schema: 'licio.private.directory_stub.v2';
+    room_public_key: string;
+    manifest_key_commitment: string;
+  };
   stub_signature: string;
+
+  // The §21.2 capability, in its OWN column and NEVER projected.
+  bootstrap_blind_id: string;
 
   created_by_account_id?: string;
   created_at: string;
@@ -426,6 +434,25 @@ private_room.<room_id>.cid_requests
 ---
 
 ## 9. IPFS, Helia, and libp2p design
+
+> **Superseded implementation, preserved requirement (maintainer decision).**
+> The shipped plane does **not** run Helia or libp2p. It takes the
+> *lighter-transport path*: a dependency-free CIDv1-over-ciphertext profile
+> (`packages/private-p2p/src/crypto/cid.ts`, pinned byte-for-byte against
+> `multiformats`), plain `RTCPeerConnection` data channels driven by
+> `apps/web/src/private-p2p/connect-peer.ts`, and the §15.9 encrypted archive
+> (`sync/archive.ts`) as the CAR-equivalent. The §6.12.12 dependency budget and
+> the private-chunk bundle budget are what made a full IPFS stack in the initial
+> payload untenable.
+>
+> **§9.1 is unchanged and still binding**: the CID identifies ciphertext, and a
+> plaintext CID for private-room content must never exist. So are the §9.3
+> forbidden-behaviour rules — with no public DHT, gateway, delegated router,
+> IPNI, or reprovide loop in the tree, there is simply nothing left to disable,
+> which is why the §29 checklist marks that item not-applicable rather than
+> done. §9.2's package list and the libp2p configuration below describe the
+> *considered* stack; read them as design rationale for what the requirements
+> are, not as a description of what is imported.
 
 ### 9.1 Design stance
 
@@ -627,7 +654,8 @@ Invite material:
 ```ts
 type InviteSecretV1 = {
   schema: 'licio.private.invite_secret.v1';
-  room_stub_ref?: string;
+  room_stub_ref?: string;        // the §21 room_server_id, if the room has a record
+  bootstrap_blind_id?: string;   // the §21.2 capability for that record
   room_public_key: Uint8Array;
   invite_id: string;
   invite_secret: Uint8Array;
@@ -637,6 +665,35 @@ type InviteSecretV1 = {
   requires_admin_approval: boolean;
 };
 ```
+
+The two directory fields travel together and only for a room that registered a
+stub. They ride the SEALED invite rather than the §12.3 grant for two reasons.
+
+The recipient needs them BEFORE being admitted: an `unlisted` record answers
+`not_found` to any reader without the token, so an invitee who received the
+capability only after admission could not check what Licio publishes about the
+room they were being asked to enter, and a `listed` room's public name would
+reach them last rather than first.
+
+And a grant is the wrong CARRIER. It is copy-pasted over an out-of-band channel
+and only its Welcome and archive are cryptographically protected — every other
+field is plaintext to whoever sees the message. `bootstrap_blind_id` does not
+rotate, so an observer of that channel would hold a capability resolving an
+`unlisted` record forever, including after a delist. The invite is HPKE-sealed
+to one recipient and lives only in a URL fragment, so it is the one delivery
+that keeps the capability to the member it was issued to. A joiner therefore
+retains the fields from the invite it has already opened, and the grant carries
+none.
+
+What resolving the record establishes, and what it does not, is worth stating
+because a client's copy must not overclaim. It establishes that the record
+exists and that this invite carries the token that opens it — a token derived
+from the room's epoch-0 rendezvous key, so its holder had something only the
+room holds. It does NOT bind the record to the invite by cryptographic
+identity: the stub's `room_public_key` is the founder device's signing key while
+the invite's is the manifest's HPKE invite key, so a client that "verified" one
+against the other would warn on every honest invite. A capability that is
+present and resolves nothing is the case worth flagging.
 
 Invite URL format:
 
@@ -1951,12 +2008,17 @@ type PrivateRoomCreateStubRequest = {
   display_name?: string;
   display_description?: string;
   display_avatar_public_cid?: string;
-  room_public_key: string;
-  manifest_key_commitment: string;
   rendezvous_policy: 'licio_blind' | 'member_rendezvous' | 'manual_only';
   bootstrap_hints?: unknown[];
-  signed_stub: unknown;
+  // A CLOSED set of PUBLIC commitments — see the validation notes below.
+  signed_stub: {
+    schema: 'licio.private.directory_stub.v2';
+    room_public_key: string;
+    manifest_key_commitment: string;
+  };
   stub_signature: string;
+  // The §21.2 capability, sent BESIDE the signed body, stored in its own column.
+  bootstrap_blind_id: string;
 };
 ```
 
@@ -1980,13 +2042,184 @@ Validation:
 - Display fields allowed only for `listed` rooms.
 - Rate limit by non-reversible account reference, not IP in app logic.
 
+The first four are enforced by SHAPE, not by a handler check: the request
+schema is `.strict()`, so a forbidden key is rejected because no such field
+exists. The fifth is an explicit REFUSAL rather than a silent strip — an
+`unlisted` request carrying a display name is rejected, because dropping it
+quietly would leave the client believing the directory serves a name it can
+see locally. `signed_stub` gets its own treatment, in three layers. It is
+one jsonb column, so the §8.2 column allowlist cannot see inside it — and a
+free-form body behind a strict envelope is a hole in the strictness, not an
+extension point. So the body is itself a CLOSED, `.strict()` set: a schema tag
+and two PUBLIC commitments (`room_public_key`, `manifest_key_commitment`).
+There is no legal place to put a member list, and no nesting to hide one in.
+Behind that, the §8.1 key-class scan still runs on every write — an independent
+guard that would catch a future widening of the shape before it reached the
+column. It scans at every depth and REFUSES a body that nests past the depth
+bound, since a scan that stops looking cannot report clean.
+
+The third layer is what is NOT in the body. `bootstrap_blind_id` used to live
+inside it, and a jsonb blob is projected wholesale or not at all — so the §21.2
+capability rode every projection of that blob, including the OPEN read a
+`listed` room serves. With §21.2's directory enumerating listed room ids, that
+is a harvest: one anonymous GET per room yields a token that keeps resolving the
+record after its creator delists it, which is the precise state delisting
+exists to prevent. It is therefore its OWN column (migration `0120`), named in
+the §8.2 allowlist, absent from every response type, and compared in constant
+time against the the `X-Licio-Bootstrap-Token` header a reader presents. Signing it bought nothing —
+the signature is verified against `room_public_key`, which the signed body
+itself carries, so it means something only to a reader who already knows the
+room's key independently, i.e. a member, who holds the token. What the
+capability needs is secrecy, which a signature does not provide. Gating the
+projection would have closed the leak that was found; moving the secret out of
+the projected structure closes the ones in endpoints not yet written.
+
+`room_public_key` and `manifest_key_commitment` are absent from the REQUEST for
+the same reason in a different key: they exist as columns the server serves AND
+inside the signed body, and nothing bound the two, so a client could publish one
+pair and sign another. The bootstrap response then presented unsigned
+commitments beside a signature verifying over different ones. The columns are
+now DERIVED from the signed body on write — one value, so there is no second
+copy to disagree, at this write site or at the next one.
+
+The room SHELL's `name`/`slug` are opaque AND unguessable — fresh randomness,
+not derived from `room_server_id`. Deriving them made the id probeable in the
+other direction: those columns are uniquely indexed across public rooms too, so
+anyone could create an ordinary room named `p2p <id>` and read the answer off
+the response — `duplicate_room` if that private room exists, success if it does
+not. A second existence oracle for `unlisted` rooms, reached without the blind
+token through an endpoint that has nothing to do with the directory.
+
+`detached` is absent from the create enum on purpose — a detached room stores
+no stub at all, which the `private_room_stubs_not_detached` CHECK also pins.
+
+The endpoint mints the P2P room SHELL and its stub in one transaction, with
+all four §4.1 axes (`storage_mode='p2p'`, `authority_model='room_keys'`,
+`visibility='private'`, `join_model='invite'`) written together so the §23.2
+coherence CHECKs decide validity rather than the call site. The shell's
+`name`/`slug` are OPAQUE in both directory modes: they are NOT NULL columns
+feeding a generated `search_vector`, so a real title there would put a private
+room's name into the server's full-text index. A `listed` room's display
+metadata lives only on the stub.
+
 ### 21.2 Fetch bootstrap stub
 
 ```http
 GET /v1/private-rooms/:roomServerId/bootstrap
 ```
 
-For listed rooms, returns public stub fields. For unlisted rooms, requires invite-derived blind token.
+For listed rooms, returns public stub fields. For unlisted rooms, requires an
+invite-derived blind token.
+
+The token is a **capability the room derives and the server merely stores**, so
+the server can check it while holding no room key: at create time the client
+sends `bootstrap_blind_id` — derived from the room's rendezvous key, exactly as
+the §15.3 blind ids are — as its own top-level field, the server keeps it in its
+own column, and the reader presents the same value in the
+`X-Licio-Bootstrap-Token` HEADER. The server
+compares the two in constant time. It learns nothing from either: the value is
+an HMAC output over material it does not hold.
+
+The bootstrap response carries `Cache-Control: no-store, private` and
+`Vary: X-Licio-Bootstrap-Token`. A shared or browser cache would otherwise store
+a capability-gated 200 against a URL that no longer carries the token — the
+capability moved to a header precisely so it stays out of the URL — and serve it
+to a later request that presented nothing.
+
+A header rather than a query parameter, because a URL is the one part of a
+request that is written down everywhere — proxy logs, browser history, the
+client's own dev console — and this capability does not rotate: one logged line
+keeps opening an `unlisted` record long after the invite exchange, and after a
+delist.
+
+A record written BEFORE that column existed keeps its body exactly as signed —
+the server holds no room key and cannot re-sign, so rewriting it would leave
+every existing record unverifiable, and deleting those rows would strand every
+member holding a handle and every outstanding invite. Such a body still contains
+the capability, so it is served only to a reader who presented one, and omitted
+from the open `listed` read that was the harvest. A v2 body carries no secret
+and is served to everyone.
+
+It is deliberately NOT inside `signed_stub`. That body is projected wholesale to
+anonymous readers of a `listed` room, so a secret placed in it is published to
+everyone — see §21.1. Signing the token would add nothing anyway: the signature
+verifies against `room_public_key`, which the signed body itself carries, so it
+means something only to a reader who already knows the room's key — a member,
+who holds the token.
+
+The token is derived from the room's **epoch-0** rendezvous key and therefore
+**does NOT rotate**, unlike the §15.3 rendezvous blind ids it is built the same
+way as. That is deliberate and load-bearing: an invite handed out today must
+still resolve the record tomorrow, and after the next membership change. A
+rotating capability would strand every outstanding invite at each epoch, which
+for a bootstrap pointer is a correctness bug rather than a hardening measure.
+
+The honest cost: a **removed member keeps a working token**. What it resolves is
+a record of commitments and bootstrap policy — no content, no keys, no member
+list, and for an `unlisted` room not even a name. Nothing there is anything an
+ex-member did not already know, having been in the room; rotating it would
+break every honest invite to withhold information the adversary already holds.
+Every stub therefore carries a token, whatever directory mode it was created
+in, because a `listed` record can always be delisted later and must stay
+resolvable for its members when it is (§21.4).
+
+**A wrong token, a missing token, an unknown room id, and a MALFORMED room id
+all return the identical 404.** This is §15.3.1's no-existence-oracle property
+applied to the directory: distinguishing them would turn the endpoint into a
+probe for which private rooms exist, which is precisely what `unlisted` mode is
+for. A `detached` room has no stub, so it 404s too — correctly, since it never
+asked to be reachable this way.
+
+P2P rooms are also absent from `GET /v1/rooms`. Listing the shell would publish
+the existence of every `unlisted` room, and would render a `listed` one through
+a server room summary whose join/steward/lens affordances do not apply to it.
+The private-room endpoints below are the only directory reads.
+
+**Browse the listed directory.**
+
+```http
+GET /v1/private-rooms/directory?limit=<1..50>&cursor=<opaque>
+```
+
+```ts
+type PrivateRoomDirectoryResponse = {
+  entries: Array<{
+    room_server_id: string;
+    display_name: string | null;
+    display_description: string | null;
+    display_avatar_public_cid: string | null;
+    created_at: string;
+  }>;
+  next_cursor: string | null;
+};
+```
+
+§4.2 defines `listed` as the mode where *“room directory/search can show the
+room shell”*, so this is the endpoint that makes the mode real; without it
+`listed` and `unlisted` differed only in what the server was permitted to store.
+Four properties hold:
+
+- **`listed` only.** The mode is filtered in the QUERY, not by the caller.
+  `unlisted` existence is exactly what must never be enumerable (§15.3.1), and
+  `detached` rooms have no stub at all.
+- **Display metadata only.** The commitments, the bootstrap hints and the signed
+  body stay behind `GET /bootstrap`. The CAPABILITY is not in any of them — it is
+  its own never-projected column (§21.1) — but a browse row is a browse row: it
+  publishes what a room chose to publish, and a reader who wants the record's
+  commitments can ask for the record.
+- **Unauthenticated,** like the listed bootstrap read: the contents are public by
+  the creator's explicit choice, and requiring an account would only add an
+  identity to a read that needs none.
+- **Keyset paging** on `(created_at, stub_id)` descending. An offset would skip
+  or repeat rows as stubs are created and delisted underneath the reader.
+
+Delisting removes a room from this surface immediately (§21.4) — that is what
+delisting IS, and the bootstrap record survives it.
+
+Being in the directory is not a way in: a P2P room is `join_model='invite'` and
+the server holds no key that could admit anyone, so the client must not present a
+join affordance here. What the directory buys a reader is knowing the room exists
+and whom to ask.
 
 ### 21.3 Update stub
 
@@ -2008,7 +2241,61 @@ Forbidden updates:
 - op heads;
 - content metadata;
 - activity timestamps;
-- unread counts.
+- unread counts;
+- the record's IDENTITY.
+
+The last one is not a data class but a property, and it is enforced: a
+`signed_stub` replacement whose `room_public_key` differs from the stored one is
+refused. `room_public_key` is how a member decides the record was authored by
+their room rather than by the server storing it, and ANY member device can build
+a signed body — signing it with its own key. So an ordinary commitment refresh
+from a device that is not the founder's would silently re-identify the record,
+and every member who verifies would conclude their room's entry was forged.
+`latest_manifest_commitment` is a plain column outside the signed body, which is
+why refreshing it needs no re-signing at all.
+
+**Bootstrap hints are POINTERS, in a closed format per kind, at the primitive's
+exact size.** `value` was a
+free 1 KiB string, which is the `signed_stub` defect one field along: a strict
+outer object around an unrestricted value channel, persisted and re-served
+verbatim through a column §8.2 permits precisely because a pointer is not
+content. Each kind now names what it can be — `licio_blind` and `manual` are
+32-byte base64url (a blind id, an out-of-band exchange code; NOT prose, and not
+a bounded string either: an HMAC output has one size, so anything else is a
+payload), and `member_relay` is a GRAMMAR rather than "a URL without a
+query": `https://` or `wss://`, a DNS-shaped host, an optional numeric port, and
+a path that is either empty or a single 32-byte blind id. Refusing only the
+query and fragment leaves the parts nobody looks at — a payload rides
+`https://relay.example/<hundreds of base64 characters>` just as well — and the
+value is persisted and re-served verbatim. A hostname remains a narrow channel
+by necessity, since a relay has to be namable, but it must RESOLVE to be worth
+anything, which arbitrary base64 in a path does not.
+
+The same rule governs the commitment fields. `room_public_key`,
+`manifest_key_commitment`, `bootstrap_blind_id` and `latest_manifest_commitment`
+are 32-byte base64url; `stub_signature` is 64. Unpadded base64url of n bytes is
+exactly `ceil(n·4/3)` characters, so each is a total constraint rather than a
+bound — a field whose name says "commitment" and whose schema says "up to 512
+characters" is a content channel, and the strict object and the §8.1 key scan
+see only legal field NAMES.
+
+**A staff delist and its audit record are ONE UNIT.** Ordering could not carry
+that guarantee: audit-then-act leaves a permanent record of a transition a store
+failure prevented, act-then-audit leaves an irreversible demotion with no
+record, and a compensating write is itself best-effort. So the demotion runs
+inside the WS-J.2.3 moderation transaction — the audit append throwing takes it
+down, and a store failure takes the record down, so neither lands alone. The
+demotion is CONDITIONAL on the record still being listed, which makes the write
+itself the proof that there was a public listing to remove: an owner delisting
+in the same instant matches nothing, and no record is written for a demotion
+staff did not perform.
+
+There is deliberately NO second, unaudited delist path for staff. The service's
+ordinary `delist` is owner-only; §11.4's single platform power is reachable only
+through the audited unit, so it cannot be exercised by a future caller passing a
+flag. The staff response is a CONFIRMATION rather than the bootstrap projection:
+after the demotion the record is `unlisted`, and staff hold no capability for
+it — returning the body would hand them exactly what the blind token gates.
 
 ### 21.4 Delete/delist stub
 
@@ -2017,7 +2304,33 @@ DELETE /v1/private-rooms/:roomServerId
 POST /v1/private-rooms/:roomServerId/delist
 ```
 
-Deleting a stub does not delete member-held content. UI must say “remove Licio directory/bootstrap record,” not “delete private room for everyone.”
+A report about a publicly LISTED room is accepted through the ordinary `room`
+report target, because staff delisting is the remedy §11.4 specifies and it
+needs an intake — and the moderation console offers that delist on such a case,
+so the intake reaches the enforcement. It sits BESIDE the action palette rather
+than inside it: the palette holds doctrine steward capabilities transcribed from
+`STEWARD_ROLES.md`, and §11.4 grants this power to platform staff as such, so
+adding it there would put a capability in the doctrine vocabulary that the
+doctrine document does not grant. A listed record publishes its name to anyone browsing, so
+accepting the report reveals nothing already private. An `unlisted` room is
+refused identically to an unknown id: its existence is what the blind token
+protects, and it publishes no name to be abusive with.
+
+**Delist** demotes `listed → unlisted` and drops the display metadata in one
+statement (the `private_room_stubs_listed_display_only` CHECK requires those
+columns NULL once the mode is no longer `listed`, so a two-step would violate
+it midway). The bootstrap record survives, so existing members still resolve
+the room; it simply stops advertising itself. Together with delete, this is the
+ONLY power platform staff hold over a P2P room — §11.4 holds verbatim.
+
+**Delete** removes the stub AND the room shell. Deleting a stub does not delete
+member-held content: the UI must say “remove Licio directory/bootstrap record,”
+not “delete private room for everyone,” and the response says so in those
+words. The shell goes too rather than surviving as `detached`, because a
+lingering shell row still asserts *“this account created a private room at time
+T”* — a §8.1 activity trace outliving the very action taken to erase the
+server's record. Nothing else ever referenced the id (§8.3 guarantees it), so
+the stub is the only dependent row.
 
 ### 21.5 Blind rendezvous endpoints
 
@@ -2054,7 +2367,7 @@ Existing endpoints MUST reject P2P rooms:
 ```text
 POST /v1/stories with p2p room_id -> 409 p2p_room_requires_client_sync
 POST /v1/contributions with p2p thread_id -> 409 p2p_room_requires_client_sync
-GET /v1/rooms/:id/feed for p2p room -> 404 or p2p_room_local_only response
+GET /v1/rooms/:id/feed for p2p room -> the unknown-room 404 (identical body)
 GET /v1/search -> never returns p2p content
 admin APIs -> cannot expose p2p content
 ```
@@ -2076,73 +2389,82 @@ Response example:
 
 ### 22.1 New shared package
 
+`packages/private-p2p` is the browser-safe protocol core: schemas, crypto,
+the reducer, and the transport-independent sync decision plane. It depends on
+`@licio/shared` and `zod` only, never on `@licio/db` and never on
+`@licio/lcap` (§1 — the two planes share no keys and no code). The shipped
+layout:
+
 ```text
-packages/private-p2p/
-  src/schemas/
-    manifest.ts
-    envelope.ts
-    operations.ts
-    invites.ts
-    reports.ts
-    local-index.ts
-  src/crypto/
-    aead.ts
-    hpke.ts
-    mls.ts
-    kdf.ts
-    signatures.ts
-    canonical.ts
-  src/ipld/
-    cid-profile.ts
-    block-codecs.ts
-    car.ts
-  src/reducer/
-    validate-op.ts
-    reduce-room.ts
-    conflicts.ts
-    snapshots.ts
-  src/sync/
-    protocol.ts
-    head-exchange.ts
-    reconciliation.ts
-  src/testing/
-    vectors.ts
-    generators.ts
+packages/private-p2p/src/
+  schemas/       common · envelope · manifest · ops · invite · attachment
+                 · report · search        (the §3 NORMATIVE zod surface)
+  crypto/        canonical (DAG-CBOR) · cid · hkdf · aead · hpke · ecdh
+                 · signatures · mls (the ONLY ts-mls importer, §10.7)
+                 · epoch · key-store (the four §10.8 tiers) · recovery
+                 · safety-number · attachment · device-blind
+                 · record-encoding · runtime
+    bbs/         suite · signature · blind · proof · pseudonym
+  reducer/       validate-op · validate · reduce · state · order · op-id
+                 · capabilities · conflicts-by-policy (in `reduce`)
+                 · snapshot · snapshot-seal · snapshot-state · overlay
+                 · search · recovery-threshold · intake-context
+  sync/          rendezvous · signaling · secure-channel · handshake
+                 · head-sync · op-exchange · fragment · archive (the §15.9
+                 offline encrypted-archive exchange)
+  rendezvous-cap/ credential · announcement · poll-filter · session
+                 · coordinator
+  engine/        room-engine · room-lifecycle · invite · migration
 ```
+
+Two deviations from the original sketch are deliberate. There is **no
+`src/ipld/` directory**: the maintainer-chosen lighter-transport path drops
+Helia, so content addressing is the dependency-free CIDv1-over-ciphertext
+profile in `crypto/cid.ts` (pinned byte-for-byte against `multiformats`), and
+the CAR-equivalent is `sync/archive.ts`. There is **no `src/testing/`
+directory**: vectors and generators live beside the code they pin, under
+`src/**/__tests__/` (including the RFC-vector fixtures in
+`crypto/bbs/__tests__/fixtures/`).
 
 ### 22.2 Web integration
 
+The web side holds only what needs the browser — IndexedDB persistence, the
+WebRTC carrier, and the HTTP rendezvous transport — so the protocol core stays
+environment-free and testable in Node. It is a flat module directory, not a
+mirror of §22.1:
+
 ```text
 apps/web/src/private-p2p/
-  node/
-    helia-node.ts
-    libp2p-config.ts
-    private-blockstore.ts
-  crypto/
-    key-store.ts
-    key-agent-client.ts
-    recovery-kit.ts
-  sync/
-    sync-engine.ts
-    rendezvous-client.ts
-    peer-session.ts
-    block-exchange.ts
-    offline-car.ts
-  state/
-    room-db.ts
-    reducer-worker.ts
-    local-search.ts
-    replication-health.ts
-  ui/
-    PrivateRoomShell.tsx
-    PrivateRoomCreate.tsx
-    PrivateInvitePanel.tsx
-    PrivateMemberPanel.tsx
-    PrivateThreadView.tsx
-    PrivateComposer.tsx
-    PrivateReplicationHealth.tsx
-    PrivateBackupPanel.tsx
+  storage.ts               the `licio_private_p2p` IndexedDB adapter
+  room-manager.ts          PrivateRoomSession: create / load / connect
+  session-store.ts         in-tab session state
+  connect-peer.ts          the live WebRTC carrier (rendezvous → sealed
+                           signaling → membership handshake → PeerChannel)
+  sync-session.ts          drives the §15.7 op exchange over a PeerChannel
+  rendezvous-client.ts     zod-validated fetch transport for
+                           POST /v1/private-rendezvous/*
+  rendezvous-cap-manager.ts  peer-side Tier-2 cap enrolment
+  ice-config.ts            VITE_ICE_SERVERS parsing (fails closed to none)
+  migrate.ts               re-authoring a frozen server room into a P2P room
+  e2e-room-harness.ts      Playwright entry points (real-browser convergence)
+  e2e-carrier-harness.ts
+
+apps/web/src/components/private-rooms/
+  CreatePrivateRoomWizard   PrivateRoomView   InvitePanel
+  JoinPanel                 SafetyNumberPanel
 ```
+
+The enforced boundary is narrower than "this directory is lazy", and the
+distinction matters when one of the two mechanisms breaks. What
+`check:private-p2p-split` forbids is a static VALUE import of the
+`@licio/private-p2p` PACKAGE — the protocol/crypto core — so that core is
+reached only through `await import(…)`. The web glue above is ordinary module
+code and IS statically imported by its consumers (`CreatePrivateRoomWizard`
+imports `room-manager.ts` directly, for instance); what keeps it out of first
+paint is route code-splitting plus the measured initial-payload budget in
+`check-bundle-size.ts`, which also fails if `index.html` preloads a plane
+chunk. Reading the rule as "the whole directory is dynamic" would send a future
+change at the wrong invariant.
 
 ### 22.3 Worker architecture
 
@@ -2755,73 +3077,111 @@ Controls:
 
 ## 29. Launch checklist
 
-P2P private rooms are launch-ready only if every item is true:
+P2P private rooms are launch-ready only if every item is true. A checked box
+means the property is enforced in the tree AND covered by a test or CI gate —
+not that someone believes it holds. The unchecked items are the honest residue;
+`docs/private-p2p/README.md` carries the per-card mapping.
 
 ### Product and UX
 
-- [ ] Current server-private rooms are no longer labeled simply “private.”
-- [ ] P2P private creation includes mandatory disclosures.
-- [ ] Removal disclosure explains no retroactive deletion.
-- [ ] Recovery UX is clear and tested.
-- [ ] Replication health is visible.
-- [ ] Invite risks are clear.
+- [x] Current server-private rooms are no longer labeled simply “private.” (The §20.1 "Members-only server room" labels are BLOCKING copy in `packages/shared/src/constants/private-rooms.ts`, pinned by the prohibited-language copy-lint.)
+- [x] P2P private creation includes mandatory disclosures. (`CreatePrivateRoomWizard` — the five §20.2 acknowledgments, each blocking.)
+- [x] Removal disclosure explains no retroactive deletion. (§10.9 copy in the same SSOT; `DELETE /v1/private-rooms/:id` says it removes Licio's directory record, not the room.)
+- [x] Recovery UX is clear and tested. (`crypto/recovery.ts` portable kit + `reducer/recovery-threshold.ts`; the §12.7 terminality copy states that losing every member key is unrecoverable.)
+- [x] Replication health is visible. (`PrivateRoomView` surfaces peer/sync state from `sync-session.ts`.)
+- [x] Invite risks are clear. (`InvitePanel`/`JoinPanel` carry the §12 disclosures.)
 
 ### Server non-storage
 
-- [ ] P2P rooms cannot create server stories.
-- [ ] P2P rooms cannot create server contributions.
-- [ ] P2P rooms never enter ranking/search.
-- [ ] P2P content events cannot be emitted.
-- [ ] Server logs exclude private CIDs/op IDs/invite fragments.
-- [ ] DB tests prove no private content rows after E2E tests.
+- [x] P2P rooms cannot create server stories. (Submission guard → `409 p2p_room_requires_client_sync`, plus the migration-`0045` `stories_no_p2p_room` trigger.)
+- [x] P2P rooms cannot create server contributions. (Contribution guard → `404`, plus the `threads_no_p2p_room` trigger.)
+- [x] P2P rooms never enter ranking/search. (`check:p2p-ranking-exclusion`, `check:p2p-search-exclusion`; `roomVisibleToUser` also keeps the shell out of `GET /v1/rooms`.)
+- [x] P2P content events cannot be emitted. (The event router refuses any content event referencing a p2p room and counts the refusal.)
+- [x] Server logs exclude private CIDs/op IDs/invite fragments. (`check:no-private-cid-egress`.)
+- [x] DB tests prove no private content rows after E2E tests. (`private-no-server-content.audit.test.ts` + the `checkPrivateServerTables()` column allowlist.)
 
 ### Crypto
 
-- [ ] MLS add/remove works across devices.
-- [ ] HPKE invites use reviewed libraries and vectors.
-- [ ] Epoch rotation works.
-- [ ] Removed devices fail to decrypt future content.
-- [ ] Nonce uniqueness tests pass.
-- [ ] External crypto review complete.
+- [x] MLS add/remove works across devices. (`crypto/mls.ts` over `ts-mls`, RFC 9420; the cross-epoch sync suite.)
+- [x] HPKE invites use reviewed libraries and vectors. (RFC 9180 suite A.1 over WebCrypto, pinned to an `@hpke/core` interop ciphertext + RFC 7748 §6.1 DH.)
+- [x] Epoch rotation works. (`crypto/epoch.ts` — atomic rotation per commit, manifest-fork divergence.)
+- [x] Removed devices fail to decrypt future content. (The forward-secrecy property suite.)
+- [x] Nonce uniqueness tests pass. (The §3.7 nonce-uniqueness + fail-closed fuzz suite.)
+- [ ] External crypto review complete. — **OPEN.** `ts-mls` also carries its own not-yet-audited disclaimer; it is isolated behind the one-file wrapper (`check:p2p-mls-wrapper`) for a future swap.
 
 ### P2P/IPFS
 
-- [ ] Private Helia profile disables public DHT/gateways/delegated routing/IPNI/reprovide.
-- [ ] Private CIDs never go to public gateways.
-- [ ] Block exchange validates CID/signature/AEAD.
-- [ ] Relay-only mode works.
-- [ ] Offline CAR import/export works.
+- [x] Private CIDs never go to public gateways. (`check:no-private-cid-egress`; the CID profile is the dependency-free `crypto/cid.ts` over ciphertext.)
+- [x] Block exchange validates CID/signature/AEAD. (§14.2 stage-1 runs on every envelope, including on archive import — no container-conferred trust.)
+- [x] Relay-only mode works. (§15.4 ICE suppression; note that relay-only needs a TURN entry in `VITE_ICE_SERVERS`.)
+- [x] Offline CAR import/export works. (`sync/archive.ts`, the §15.9 encrypted-archive exchange.)
+- [ ] Private Helia profile disables public DHT/gateways/delegated routing/IPNI/reprovide. — **NOT APPLICABLE as written.** The maintainer chose the lighter-transport path: there is no Helia node in the private plane, so there is no public-routing surface to disable. The property it protected (no private data reaches public routing) is carried by the gate above.
 
 ### Trust/update channel
 
-- [ ] Private-mode bundle is reproducible.
-- [ ] Bundle hash is signed and in transparency log.
-- [ ] Service worker pins verified private bundle.
-- [ ] Private rooms lock on unverified bundle.
-- [ ] CSP/Trusted Types/no dynamic code checks pass.
-- [ ] Local key agent prototype or documented Tier 1 limitation exists.
+- [x] Bundle hash is signed and in transparency log. (`gen:update-manifest` — Ed25519 signature + RFC 9162 inclusion proof.)
+- [x] Service worker pins verified private bundle. (`apps/web/src/update/` + the SW pin.)
+- [x] Private rooms lock on unverified bundle. (`ensurePrivateBundleTrusted()` in `PrivateRoomSession.{create,load}`; typed lock reasons, room keys stay sealed.)
+- [x] CSP/Trusted Types/no dynamic code checks pass. (`check:csp-parity`, `check:sw`, `lint:security`, `check:private-bundle-transparency`.)
+- [x] Local key agent prototype or documented Tier 1 limitation exists. (The §10.8 `local-key-agent` tier is modelled in `crypto/key-store.ts`; the Tier-1 limitation is stated in §3.2 and in the creation copy.)
+- [ ] Private-mode bundle is reproducible. — **OPEN.** The bundle is signed and transparency-logged, but independent byte-for-byte reproduction (§30 Q9) is not yet demonstrated.
 
 ### Safety
 
-- [ ] Local moderation ops work.
-- [ ] Member block/hide works.
-- [ ] Voluntary report package preview works.
-- [ ] Directory abuse tools work for listed stubs.
-- [ ] Support docs do not promise impossible recovery/moderation.
+- [x] Local moderation ops work. (`reducer/overlay.ts` — the §14.6 device-local moderation overlays.)
+- [x] Member block/hide works. (Same overlay plane.)
+- [x] Voluntary report package preview works. (The §19.4 report schema; the package is member-assembled and member-sent.)
+- [x] Directory abuse tools work for listed stubs. (`POST /v1/private-rooms/:id/delist` — the ONLY thing platform staff can do to a P2P room, per §11.4, and it requires the same per-session MFA every other steward action does. `DELETE /v1/private-rooms/:id` is creator-owned: staff can stop a room advertising itself, and cannot remove its bootstrap record, because members holding the token must keep resolving it. Every staff delist writes an actor/target entry to the moderation audit trail.)
+- [x] Support docs do not promise impossible recovery/moderation. (The copy-lint rejects "secure"/"deleted everywhere" framing in the §6/§20 SSOT.)
 
 ---
 
 ## 30. Open questions
 
-1. Which audited MLS implementation will be used in the TypeScript/browser stack, and does it support required test vectors and export secrets cleanly?
-2. Which HPKE suite and library will be pinned for invite bootstrap?
-3. Is Tier 3 local key agent in scope for v1 launch, or will v1 launch with Tier 1/Tier 2 disclosures only?
-4. Should detached rooms be available in the first release or hidden behind an advanced flag?
-5. What is the exact browser support matrix for WebRTC/WebTransport/libp2p transports **and for WebCrypto `Ed25519`/`X25519`** in the target PWA environments, and where is the audited curve-library fallback (§10.7) required?
-6. What local metadata-stripping library is acceptable for images and videos without server scanning?
+Four of the original ten were settled by implementation; they are kept with
+their answers rather than deleted, because the answer is the part a reader
+needs and a silently-dropped question reads as a question nobody asked.
+
+**Settled**
+
+1. ~~Which audited MLS implementation?~~ → **`ts-mls`**, RFC 9420, suite
+   `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` pinned at module load. It
+   exports secrets cleanly (the §10.4 epoch bridge derives `room_epoch_secret`
+   through the MLS Exporter) and passes its RFC vectors. It is **not yet
+   formally audited** — its own disclaimer — so it is confined to the single
+   wrapper `crypto/mls.ts`, with `check:p2p-mls-wrapper` forbidding a deep
+   import anywhere else so a swap stays a one-file change. The external review
+   remains open (§29).
+2. ~~Which HPKE suite and library?~~ → **RFC 9180 suite A.1**, DHKEM(X25519,
+   HKDF-SHA256) / HKDF-SHA256 / AES-128-GCM, hand-rolled over WebCrypto
+   primitives (no HPKE dependency) and pinned to an `@hpke/core` interop
+   ciphertext plus the RFC 7748 §6.1 DH vector.
+5. ~~Browser support matrix / where is the curve fallback required?~~ → The
+   plane targets **WebRTC data channels** (no WebTransport/libp2p dependency),
+   and `@noble/curves` is the pinned audited fallback wherever WebCrypto
+   `Ed25519`/`X25519` is absent — `crypto/signatures.ts` is cross-validated
+   byte-for-byte against it.
+8. ~~Threshold membership changes / is Shamir in scope?~~ → **Threshold
+   recovery shipped; Shamir did not, and deliberately.**
+   `reducer/recovery-threshold.ts` counts *M distinct recover-capable admins*
+   — a CAPABILITY threshold, so the operation carries no key material at all —
+   and a successful recovery is an ordinary `member.add` (MLS Add + epoch
+   rotation). Secret-sharing was the wrong tool for the requirement and is not
+   deferred so much as declined.
+
+**Open**
+
+3. Is the Tier 3 local key agent in scope for v1 launch, or will v1 launch with
+   Tier 1/Tier 2 disclosures only? (The `local-key-agent` tier is modelled in
+   the §10.8 key store; no agent binary ships.)
+4. Should detached rooms be available in the first release or hidden behind an
+   advanced flag?
+6. What local metadata-stripping library is acceptable for images and videos
+   without server scanning?
 7. What is the default padding policy for mobile users with limited bandwidth?
-8. Should rooms support threshold admin membership changes in v1, or begin with admin-only changes — and should the optional **Shamir-secret-sharing recovery variant** (§12.6.1) be in scope at all, or remain deferred behind a separate audit?
-9. How will private-mode reproducible builds be independently verified and displayed to users?
+9. How will private-mode reproducible builds be independently verified and
+   displayed to users? (The bundle is signed and transparency-logged today;
+   independent byte-for-byte reproduction is not yet demonstrated — §29.)
 10. How much old server-private history should migration import by default?
 
 ---

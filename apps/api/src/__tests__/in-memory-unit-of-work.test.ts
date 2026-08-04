@@ -159,3 +159,96 @@ describe('InMemoryUnitOfWork', () => {
     expect(store.rows.has('doomed')).toBe(false);
   });
 });
+
+describe('units that SHARE a participant', () => {
+  /** An append-only log, snapshotted and restored by LENGTH — the shape of the
+   *  real `InMemoryAuditStore`, and the one that makes a stale restore delete
+   *  somebody else's committed row. */
+  class Log implements InMemoryRollback {
+    readonly entries: string[] = [];
+    beginRollback(): () => void {
+      const length = this.entries.length;
+      return () => {
+        this.entries.length = length;
+      };
+    }
+  }
+
+  it('does not let one domain ROLL BACK another domain’s committed append', async () => {
+    // Five domains hold their own unit and several list the SAME participants —
+    // the audit store above all, because a durable change and the record of it
+    // commit together everywhere. Serialising per INSTANCE made "units run one
+    // at a time" true of each domain and false of the runtime: a failing unit
+    // restored a length from before the other unit's append and deleted an audit
+    // row whose change had already committed.
+    const audit = new Log();
+    const forumRows = new Rows();
+    const identityRows = new Rows();
+    const forum = new InMemoryUnitOfWork(forumRows, [forumRows, audit]);
+    const identity = new InMemoryUnitOfWork(identityRows, [identityRows, audit]);
+
+    // DETERMINISTIC, not a race: the forum unit appends and then waits on a
+    // TIMER, while the identity unit only awaits microtasks — which always run
+    // first. So without one queue the identity unit is guaranteed to commit its
+    // append inside the forum unit's window, and the forum unit's restore is
+    // guaranteed to arrive after it.
+    const results = await Promise.allSettled([
+      // Fails AFTER appending, so its rollback runs.
+      forum.run(async () => {
+        audit.entries.push('forum-attempt');
+        await new Promise((r) => setTimeout(r, 20));
+        throw new Error('forum unit failed');
+      }),
+      // Succeeds, and its audit row must survive the other unit's undo.
+      identity.run(async (rows) => {
+        rows.rows.set('user', 'renamed');
+        audit.entries.push('identity-committed');
+        return 'ok';
+      }),
+    ]);
+
+    expect(results[0]?.status).toBe('rejected');
+    expect(results[1]?.status).toBe('fulfilled');
+    // The failed unit takes back ONLY its own append…
+    expect(audit.entries).toEqual(['identity-committed']);
+    // …and the committed change it accounts for is still there, so the two
+    // agree rather than one being a change with no record.
+    expect(identityRows.rows.get('user')).toBe('renamed');
+  });
+
+  it('joins a unit nested across domains rather than deadlocking on the shared queue', async () => {
+    // One shared queue makes a cross-domain nested call a deadlock unless it is
+    // recognised: it would wait for a slot its own caller holds. It is one
+    // logical transaction, so it joins — and its participants roll back with the
+    // outer unit.
+    const audit = new Log();
+    const forumRows = new Rows();
+    const identityRows = new Rows();
+    const forum = new InMemoryUnitOfWork(forumRows, [forumRows, audit]);
+    const identity = new InMemoryUnitOfWork(identityRows, [identityRows, audit]);
+
+    const joined = await forum.run(async (rows) => {
+      rows.rows.set('room', 'created');
+      return identity.run(async (inner) => {
+        inner.rows.set('actor', 'linked');
+        audit.entries.push('nested');
+        return 'joined';
+      });
+    });
+    expect(joined).toBe('joined');
+    expect(identityRows.rows.get('actor')).toBe('linked');
+
+    // …and a failure in the OUTER unit undoes the nested one's writes too.
+    await expect(
+      forum.run(async (rows) => {
+        rows.rows.set('room', 'second');
+        await identity.run(async (inner) => {
+          inner.rows.set('actor', 'should-not-survive');
+        });
+        throw new Error('outer failed');
+      }),
+    ).rejects.toThrow('outer failed');
+    expect(identityRows.rows.get('actor')).toBe('linked');
+    expect(forumRows.rows.get('room')).toBe('created');
+  });
+});

@@ -240,6 +240,64 @@ export class IndexedDbPrivateRoomStorage implements PrivateRoomStorage {
     }
   }
 
+  /**
+   * CLAIM one use of an invite, atomically, or refuse.
+   *
+   * `null` ⇒ the budget is spent; otherwise the number this claim took (1-based).
+   *
+   * The read and the write are one IndexedDB readwrite transaction, which is the
+   * only place this can be decided. Reading the count, admitting the member, and
+   * charging the use afterwards is a check, not a budget: `runExclusive` is a
+   * per-INSTANCE mutex, so the same room open in two tabs gives two managers
+   * that never see each other. Both read `usesSoFar = 0` on a single-use invite,
+   * both pass the §10.3 budget check, both add a member and both return a grant
+   * — two members admitted on one use, each through its own MLS commit, which is
+   * how a room ends up with divergent branches.
+   *
+   * Claiming FIRST inverts that: the loser is refused before it touches MLS
+   * state, and a claim whose admission then fails is handed back by
+   * `releaseInviteUse`, so a mid-admit failure still burns nothing.
+   */
+  async claimInviteUse(inviteId: string, maxUses: number): Promise<number | null> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(INVITE_USES_STORE, 'readwrite');
+      const store = tx.objectStore(INVITE_USES_STORE);
+      const existing = (await promisify(store.get([this.roomId, inviteId]))) as
+        | StoredInviteUseRow
+        | undefined;
+      const used = existing?.uses ?? 0;
+      if (used >= maxUses) {
+        await txDone(tx);
+        return null;
+      }
+      const uses = used + 1;
+      store.put({ roomId: this.roomId, inviteId, uses } satisfies StoredInviteUseRow);
+      await txDone(tx);
+      return uses;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Hand a claimed use back when the admission it was claimed for did not
+   *  complete.  Floors at zero: a release without a claim must not mint budget. */
+  async releaseInviteUse(inviteId: string): Promise<void> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(INVITE_USES_STORE, 'readwrite');
+      const store = tx.objectStore(INVITE_USES_STORE);
+      const existing = (await promisify(store.get([this.roomId, inviteId]))) as
+        | StoredInviteUseRow
+        | undefined;
+      const uses = Math.max(0, (existing?.uses ?? 0) - 1);
+      store.put({ roomId: this.roomId, inviteId, uses } satisfies StoredInviteUseRow);
+      await txDone(tx);
+    } finally {
+      db.close();
+    }
+  }
+
   /** Charge one accepted join against this invite and return the NEW total.  The
    *  read-modify-write runs in ONE readwrite transaction so concurrent admits
    *  cannot double-spend a single-use invite (admits are also op-lock-serialized). */

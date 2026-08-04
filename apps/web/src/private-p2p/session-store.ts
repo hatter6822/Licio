@@ -55,14 +55,40 @@ const storedRoomSessionSchema = z
       z.object({ deviceId: z.string().min(1), signingPublicKey: z.string().min(1) }),
     ),
     createdAtBucket: z.string().min(1),
+    // Validated rather than passed through: the bootstrap capability inside it
+    // is what a joined device resolves the directory record with, so a
+    // half-written record must be discarded, not carried as a partial handle.
+    directoryStub: z
+      .object({
+        capability: z.object({
+          roomServerId: z.string().min(1),
+          bootstrapBlindId: z.string().min(1),
+        }),
+        // THE TRUST FLAGS ARE PART OF THE BOUNDARY, not passengers on it.
+        //
+        // `createInvite` treats `verified === true` as proof that this handle was
+        // checked against THIS room's key, and refuses to propagate a
+        // `quarantined` one. Leaving them undeclared meant a malformed or
+        // foreign row carrying `verified: true` satisfied the schema and came
+        // straight back out, so a poisoned cross-room handle survived a reload
+        // and walked past the quarantine it exists to enforce. Declared, a
+        // non-boolean discards the whole record.
+        verified: z.boolean().optional(),
+        quarantined: z.boolean().optional(),
+      })
+      .optional(),
   })
   .passthrough();
 
 /** Validate (discard on failure) + normalize a row read from IndexedDB. */
 function readStoredSession(raw: unknown): StoredRoomSession | undefined {
-  if (!storedRoomSessionSchema.safeParse(raw).success) return undefined;
+  // The PARSED value, not the raw one. Discarding it and normalizing the input
+  // meant the schema decided whether to keep the row and then had no say in
+  // what was kept — every check above was advisory.
+  const parsed = storedRoomSessionSchema.safeParse(raw);
+  if (!parsed.success) return undefined;
   try {
-    return normalizeSession(raw as StoredRoomSession);
+    return normalizeSession(parsed.data as unknown as StoredRoomSession);
   } catch {
     return undefined; // a byte field that is not byte-shaped after all
   }
@@ -103,6 +129,75 @@ function normalizeSession(raw: StoredRoomSession): StoredRoomSession {
   };
 }
 
+/**
+ * The §21 directory handle a room holds locally.
+ *
+ * ONLY the capability — the thing any member needs to resolve the record, and
+ * the thing a join grant and an invite carry.
+ *
+ * It deliberately carries no notion of OWNERSHIP. Two proxies for that were
+ * tried and both were wrong: the room's admin role (the endpoints authorize by
+ * ACCOUNT, so a non-founder room admin got controls that 403 and a creator who
+ * lost the role lost controls they still had), and a persisted
+ * "registered on this device" flag (a device outlives a session, so the next
+ * account to sign in here inherited it, while the owner on a second device did
+ * not). Ownership is the server's answer to give — `GET /v1/private-rooms/mine`
+ * — and a local record cannot hold it without going stale.
+ */
+export interface StoredDirectoryStub {
+  readonly capability: {
+    /** The server-minted handle every §21 call takes. */
+    readonly roomServerId: string;
+    /** The §21.2 token that opens the record. Epoch-0 derived, never rotates. */
+    readonly bootstrapBlindId: string;
+  };
+  /**
+   * Set when the record this handle opens FAILED to verify against this room.
+   *
+   * A handle arrives in a sealed invite, and neither it nor the capability is
+   * bound to the room the invite is for — so an inviter who belongs to room A
+   * can put A's handle into an invite for room B. After joining B, the panel
+   * checks the record against B's own key and commitment; when that fails, the
+   * handle is not merely unusable, it is a pointer at ANOTHER room, and a member
+   * who later becomes an admin would copy it into every invite they issue.
+   *
+   * Quarantined rather than deleted: the member should be told what happened and
+   * decide, and a silent deletion is indistinguishable from never having had
+   * one. Nothing propagates it while this is set.
+   */
+  readonly quarantined?: boolean;
+  /**
+   * Has the record this handle opens been CHECKED against this room?
+   *
+   * The absence of `quarantined` used to stand in for "fine", which is only true
+   * for a handle this device MINTED — the wizard registers the record and holds
+   * the room key that signed it. A handle that arrived in someone else's invite
+   * has been checked by nobody at the moment it is stored, and the check is
+   * asynchronous and lives in a panel the admin need never open: an invite
+   * issued before it finishes propagates another room's stable bootstrap
+   * capability through an otherwise honest member.
+   *
+   * So the default is UNVERIFIED and travel requires this flag, not merely the
+   * absence of the other one. `verifyDirectoryRecord` succeeding is what sets
+   * it.
+   */
+  readonly verified?: boolean;
+}
+
+/*
+ * TWO fields, and the two that were dropped are worth naming.
+ *
+ * `stubId` had no consumer: every §21 endpoint is keyed by `room_server_id`.
+ * `directoryMode` had one and it was WRONG — a delist changes the mode on the
+ * server, so a copy stored at registration is stale from the first delist
+ * onward. The panel reads the live mode from the bootstrap record it fetches
+ * anyway, which is the only place the answer is true.
+ *
+ * Both mattered because this record now arrives through an INVITE, which knows
+ * neither: it carries the room's stub reference and its capability, and would
+ * have had to invent the other two.
+ */
+
 /** One persisted epoch's key material (mirrors the engine's `HeldEpochKeys`). */
 export interface StoredEpochKeys {
   readonly epoch: number;
@@ -136,6 +231,23 @@ export interface StoredRoomSession {
   readonly bootstrapDevices: ReadonlyArray<{ deviceId: string; signingPublicKey: string }>;
   /** A coarse creation bucket for the room list (never an exact timestamp). */
   readonly createdAtBucket: string;
+  /**
+   * The §21 directory record this room registered, when it registered one.
+   *
+   * Persisted because the server-minted `room_server_id` is the ONLY handle for
+   * every later bootstrap, patch, delist and delete — and there is no endpoint
+   * that lists an account's stubs, so discarding it at creation would leave the
+   * record unreachable and unmanageable forever. Absent ⇒ a `detached` room, or
+   * one whose registration did not succeed.
+   *
+   * `bootstrapBlindId` is stored, not re-derived. It comes from the room's
+   * EPOCH-0 rendezvous key (§21.2 — it must not rotate, or every outstanding
+   * invite would break at the next membership change), and a device admitted at
+   * epoch N never holds epoch 0. Only a stored copy can be handed on through a
+   * join grant, so this is the field that makes the directory record reachable
+   * by anyone other than the founder.
+   */
+  readonly directoryStub?: StoredDirectoryStub;
 }
 
 /** Persist (insert or replace) a room session. */

@@ -26,7 +26,12 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
-import type { InMemoryRollback as InMemoryRollbackContract } from '../lib/in-memory-rollback.js';
+import type { PwattConfigStore } from '../events/stores.js';
+import type { AuditStore } from '../identity/audit.js';
+import {
+  type InMemoryRollback as InMemoryRollbackContract,
+  mapRollback,
+} from '../lib/in-memory-rollback.js';
 import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { UniqueViolationError } from '../lib/pg-errors.js';
 
@@ -515,6 +520,27 @@ export interface ComplianceTxStores {
   sars: SarStore;
   lawfulAccess: LawfulAccessStore;
   pins: WalletRiskPinStore;
+  /** §19.1 region declarations — a declaration change is one of the mutations
+   *  that carries an identity-trail row, so it belongs in the same unit. */
+  declarations: RegionDeclarationStore;
+  /** KYC standing — a reviewer's verify/revoke is the same shape. */
+  kyc: KycVerificationStore;
+  /**
+   * The WS-D identity audit, on this handle too.
+   *
+   * A compliance mutation carries TWO records: this module's own hash-chained
+   * entry, and the identity trail row a user reads on their security page. They
+   * describe one action, so they commit with it — otherwise a declaration can
+   * change with the user's own trail silently missing the change, which is the
+   * half a §19.1 subject would notice.
+   */
+  identityAudit: AuditStore;
+  /** Published legal disclosures — an immutable publish plus its identity-trail
+   *  mirror, which used to be a best-effort append after the fact. */
+  disclosures: DisclosureStore;
+  /** The runtime-config store, so a `compliance.*` key change and the record of
+   *  who made it commit together. */
+  config: PwattConfigStore;
 }
 
 /**
@@ -984,7 +1010,15 @@ export class InMemoryCaseAuditStore implements CaseAuditStore, InMemoryRollbackC
   }
 }
 
-export class InMemoryRegionDeclarationStore implements RegionDeclarationStore {
+export class InMemoryRegionDeclarationStore
+  implements RegionDeclarationStore, InMemoryRollbackContract
+{
+  /** The unit of work's undo — this store now takes part in one, because its
+   *  writes carry an identity-trail row that commits with them. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, RegionDeclarationRecord>();
 
   async get(userId: string): Promise<RegionDeclarationRecord | null> {
@@ -1017,7 +1051,15 @@ export class InMemoryRegionDeclarationStore implements RegionDeclarationStore {
   }
 }
 
-export class InMemoryKycVerificationStore implements KycVerificationStore {
+export class InMemoryKycVerificationStore
+  implements KycVerificationStore, InMemoryRollbackContract
+{
+  /** The unit of work's undo — this store now takes part in one, because its
+   *  writes carry an identity-trail row that commits with them. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, KycVerificationRecord>();
 
   async get(userId: string): Promise<KycVerificationRecord | null> {
@@ -1055,8 +1097,18 @@ export class InMemoryKycVerificationStore implements KycVerificationStore {
   }
 }
 
-export class InMemoryDisclosureStore implements DisclosureStore {
+export class InMemoryDisclosureStore implements DisclosureStore, InMemoryRollbackContract {
   readonly #rows: DisclosureVersionRecord[] = [];
+
+  /** The unit of work's undo — a publish carries its publisher in the row AND a
+   *  mirror in the identity trail, and the two commit together. */
+  beginRollback(): () => void {
+    const saved = [...this.#rows];
+    return () => {
+      this.#rows.length = 0;
+      this.#rows.push(...saved);
+    };
+  }
 
   async publish(record: DisclosureVersionRecord): Promise<DisclosureVersionRecord> {
     if (

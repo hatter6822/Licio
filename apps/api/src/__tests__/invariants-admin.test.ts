@@ -7,6 +7,7 @@
 // the version-comparison query, the GWEI transparency export shape, and
 // the public SCOI/MERI read surfaces (404-over-403 on hidden stories).
 import { randomUUID } from 'node:crypto';
+import { COMMONS_ROOM_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 import { hourWindow } from '../invariants/runner.js';
@@ -49,6 +50,52 @@ describe('steward gating', () => {
     const user = await seedUserWithSession(fixture.identity);
     const nonSteward = await adminRequest(fixture, user.cookie, '/health');
     expect(nonSteward.status).toBe(403);
+  });
+});
+
+describe('reeb/landscape — the Civic Map (WS-H.7.4)', () => {
+  it('is steward-gated like every other route on this surface', async () => {
+    const fixture = freshInvariantServices();
+    const anonymous = await app().request('http://local/v1/invariants/admin/reeb/landscape');
+    expect(anonymous.status).toBe(401);
+    const user = await seedUserWithSession(fixture.identity);
+    const nonSteward = await adminRequest(fixture, user.cookie, '/reeb/landscape');
+    expect(nonSteward.status).toBe(403);
+  });
+
+  it('refuses a steward WITHOUT integrity-queue access (analyst-grade, not steward-grade)', async () => {
+    // `requireSteward()` is a PLATFORM-role check, so on its own it would hand
+    // per-story titles and exact event-count levels to evidence-only and
+    // appeals-only stewards. This surface answers the same question as the
+    // coordinated-report incidents beside it, and that queue is ROLE_INTEGRITY.
+    const fixture = freshInvariantServices();
+    // Platform steward, but an evidence-only doctrine grant — the health and
+    // outputs routes admit them; the landscape must not.
+    const steward = await seedUserWithSession(fixture.identity, {
+      steward: true,
+      stewardRoles: ['ROLE_EVIDENCE'],
+    });
+    const response = await adminRequest(fixture, steward.cookie, '/reeb/landscape');
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(['insufficient_capability', 'mfa_required']).toContain(body.error.code);
+  });
+
+  it('answers 200 with an explicit null when there is nothing to map', async () => {
+    // A quiet window is a REAL state, not a 404: an analyst has to be able to
+    // tell "nothing happened this hour" apart from "the endpoint is broken".
+    const fixture = freshInvariantServices();
+    // BOTH bars: the platform `steward` role `requireSteward()` checks, AND the
+    // ROLE_INTEGRITY doctrine grant the landscape adds on top.
+    const analyst = await seedUserWithSession(fixture.identity, {
+      steward: true,
+      stewardRoles: ['ROLE_INTEGRITY'],
+    });
+    const response = await adminRequest(fixture, analyst.cookie, '/reeb/landscape');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { landscape: unknown };
+    expect(body).toHaveProperty('landscape');
+    expect(body.landscape).toBe(null);
   });
 });
 
@@ -289,6 +336,74 @@ describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
       body: JSON.stringify({ action: 'confirmed' }),
     });
     expect(again.status).toBe(404);
+  });
+
+  it('leaves the freeze IN PLACE when the resolution fails to record', async () => {
+    // Clearing a case lifts a safety freeze. Called with the process-wide
+    // services the clear committed on its own, so an append failure rolled the
+    // case back while the target stayed unfrozen — protection removed by a
+    // decision that did not happen, and `resolve` is a compare-and-set, so the
+    // retry could no longer make the same transition.
+    //
+    // The two halves are covered separately, and this is the in-memory one: the
+    // twin's undo (the safety store's rollback registration). The PRODUCTION
+    // half is the binding — `tx.safety` is a `DrizzleItemSafetyStateStore` over
+    // the same transaction — and `unit-of-work-rollback.test.ts` is what refuses
+    // a tx surface carrying a store the unit cannot undo.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { storyId } = await seedStory(fixture);
+    const caseId = randomUUID();
+    await fixture.events.safetyStore.set({
+      itemId: storyId,
+      safetyState: 'frozen',
+      frozenScore: 1,
+      frozenActiveAttention: null,
+      frozenParticipation: null,
+      caseId,
+      updatedBy: 'system:test',
+      updatedAt: new Date().toISOString(),
+    });
+    await fixture.invariants.mfciCases.insert({
+      caseId,
+      targetType: 'story',
+      targetId: storyId,
+      riskState: 'high',
+      statistic: 'target_concentration',
+      mfciScore: 6,
+      pHat: 0.002,
+      sampleCount: 1000,
+      fixedMarginsRef: 'margins:test',
+      summary: 'Coordination signal',
+      appealSummary: 'What was detected: …',
+      status: 'open',
+      openedAt: new Date().toISOString(),
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+
+    // The unit's record fails.
+    const realAppend = fixture.identity.audit.append.bind(fixture.identity.audit);
+    fixture.identity.audit.append = async (entry, createdAt) => {
+      if (entry.eventType === 'mfci_case_action') throw new Error('audit unavailable');
+      return realAppend(entry, createdAt);
+    };
+    const resolved = await adminRequest(fixture, steward.cookie, `/mfci/cases/${caseId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'cleared' }),
+    });
+    fixture.identity.audit.append = realAppend;
+    expect(resolved.status).toBeGreaterThanOrEqual(500);
+
+    // The freeze is STILL ON and the case still open, so the retry can make the
+    // same transition.
+    expect((await fixture.events.safetyStore.get(storyId))?.safetyState).toBe('frozen');
+    const retried = await adminRequest(fixture, steward.cookie, `/mfci/cases/${caseId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'cleared' }),
+    });
+    expect(retried.status).toBe(200);
+    expect((await fixture.events.safetyStore.get(storyId))?.safetyState).toBe('normal');
   });
 
   it('a fixed_margins_ref dereferences to the persisted conditioning (MFCI-4)', async () => {
@@ -545,10 +660,81 @@ describe('public WS-H read surfaces', () => {
 });
 
 describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
+  /**
+   * Fill a room with `total` threads and measure all but the `unmeasuredFirst`
+   * the SCAN reaches first — returning how many carry a SCOI row.
+   *
+   * The measurement targets are chosen by READING the scan's own ordering back,
+   * not by seeding order. `listThreadsByRoom` pages `(created_at, thread_id)`
+   * descending, and rows seeded within one millisecond tie-break on a random
+   * UUID — so "the first 25 I created" and "the first 25 the report examines"
+   * are unrelated sets, and a test that conflates them measures a shuffle.
+   */
+  async function seedRoomThreads(
+    fixture: InvariantServicesFixture,
+    roomId: string,
+    total: number,
+    unmeasuredFirst: number,
+  ): Promise<number> {
+    /** The room's threads in the order the report pages them. */
+    const scanOrder = async (): Promise<string[]> => {
+      const order: string[] = [];
+      let cursor: { createdAt: string; threadId: string } | null = null;
+      for (;;) {
+        const page = await fixture.ingestion.stories.listThreadsByRoom(roomId, cursor, 50);
+        if (page.length === 0) break;
+        for (const thread of page) order.push(thread.threadId);
+        const last = page[page.length - 1];
+        if (last === undefined || page.length < 50) break;
+        cursor = { createdAt: last.createdAt, threadId: last.threadId };
+      }
+      return order;
+    };
+
+    // `seedSplitRoom` already left its divergent thread here, so top the room up
+    // to `total` rather than adding that many.
+    const existing = (await scanOrder()).length;
+    for (let i = existing; i < total; i += 1) {
+      const { threadId } = await seedStory(fixture);
+      await fixture.ingestion.stories.updateThread(threadId, { roomId });
+    }
+    const order = await scanOrder();
+    expect(order).toHaveLength(total);
+
+    let measured = 0;
+    for (const threadId of order.slice(unmeasuredFirst)) {
+      const thread = await fixture.ingestion.stories.getThreadById(threadId);
+      if (thread === null) continue;
+      const storyId = thread.storyId;
+      await fixture.events.invariantStore.upsert({
+        invariantType: 'SCOI',
+        targetType: 'story',
+        targetId: storyId,
+        timeWindow: hourWindow(Date.now()),
+        version: 'v0',
+        scoreVector: { scoi: 0.42, context_state: 'divergent' },
+        explanationSummary: 'seeded',
+        confidence: 1,
+        coverage: 1,
+        reasonCodes: [],
+        fallbackUsed: false,
+        versionMetadata: null,
+        shadowMode: true,
+        createdAt: new Date().toISOString(),
+      });
+      measured += 1;
+    }
+    return measured;
+  }
+
   /** A room with two lenses reading the SAME story divergently, plus a
    * multi-lens participant (the bridge candidate), with the acting user as
    * the room's steward. */
-  async function seedSplitRoom(fixture: InvariantServicesFixture, stewardUserId: string) {
+  async function seedSplitRoom(
+    fixture: InvariantServicesFixture,
+    stewardUserId: string,
+    topicIds?: string[],
+  ) {
     const roomId = randomUUID();
     const inserted = await fixture.forum.rooms.insert({
       roomId,
@@ -583,7 +769,10 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
       });
       if (lens.ok) lensIds.push(lens.lens.lensId);
     }
-    const { storyId, threadId } = await seedStory(fixture);
+    const { storyId, threadId } = await seedStory(
+      fixture,
+      topicIds === undefined ? {} : { topicIds },
+    );
     await fixture.ingestion.stories.updateThread(threadId, { roomId });
     const bridgeUser = await seedUserWithSession(fixture.identity);
     const bodies: Record<string, string> = {
@@ -704,6 +893,343 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
       { method: 'POST', body: JSON.stringify({}) },
     );
     expect(orphanBridge.status).toBe(404);
+  });
+
+  it('finds a quiet room\u2019s conversations under a platform full of newer ones', async () => {
+    // The report used to start from the platform's 200 most recent stories and
+    // filter down to this room, so the budget was spent before the room was
+    // considered: a busier platform pushed a quiet room's threads out of the
+    // scan entirely and its stewards read an empty report \u2014 which says "no
+    // divergent conversations here", not "nothing of yours was looked at".
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId, storyId } = await seedSplitRoom(fixture, steward.userId);
+    await fixture.invariants.scoi
+      .computeBatch([{ targetType: 'story', targetId: storyId }], hourWindow(Date.now()))
+      .then((outputs) =>
+        Promise.all(
+          outputs.map((o) =>
+            fixture.events.invariantStore.upsert({
+              invariantType: o.invariantType,
+              targetType: o.target.targetType,
+              targetId: o.target.targetId,
+              timeWindow: o.window,
+              version: o.version,
+              scoreVector: o.score_vector,
+              explanationSummary: o.explanationSummary,
+              confidence: o.confidence,
+              coverage: o.coverage,
+              reasonCodes: o.reason_codes,
+              fallbackUsed: o.fallback_used,
+              versionMetadata: null,
+              shadowMode: true,
+              createdAt: new Date().toISOString(),
+            }),
+          ),
+        ),
+      );
+    // …and then 250 newer stories elsewhere, which is an ordinary hour on a
+    // platform with any volume.
+    for (let i = 0; i < 250; i += 1) await seedStory(fixture);
+
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    expect(report.status).toBe(200);
+    const body = (await report.json()) as { reports: Array<{ story_id: string }> };
+    expect(body.reports.map((entry) => entry.story_id)).toEqual([storyId]);
+  });
+
+  it('says when the room scan was CUT SHORT rather than complete', async () => {
+    // A bounded scan that returns a bare list is indistinguishable from a
+    // complete one that found nothing — the same ambiguity the room-scoped
+    // paging was introduced to remove, one layer in. A room deeper than the
+    // scan ceiling must not read as a clean room.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId } = await seedSplitRoom(fixture, steward.userId);
+    // 520 threads in this room: past the 500-thread ceiling, and none of them
+    // measured, so the report is empty either way. Only `scan.complete`
+    // distinguishes "nothing here" from "we stopped looking".
+    for (let i = 0; i < 520; i += 1) {
+      const { threadId } = await seedStory(fixture);
+      await fixture.ingestion.stories.updateThread(threadId, { roomId });
+    }
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    expect(report.status).toBe(200);
+    const body = (await report.json()) as {
+      reports: unknown[];
+      scan: { complete: boolean; examined: number };
+    };
+    expect(body.scan.complete).toBe(false);
+    expect(body.scan.examined).toBeGreaterThanOrEqual(500);
+
+    // …and a room the scan reaches the end of says so, which is what makes the
+    // flag worth reading.
+    const small = await seedSplitRoom(fixture, steward.userId);
+    const complete = await adminRequest(fixture, steward.cookie, `/scoi/reports/${small.roomId}`);
+    expect(((await complete.json()) as { scan: { complete: boolean } }).scan.complete).toBe(true);
+  });
+
+  it('calls a scan COMPLETE when the entry cap lands on the room’s last thread', async () => {
+    // The two exits raced, and the wrong one won. Filling the 100-entry cap
+    // breaks out of the page loop; reaching a short page ends the room. When
+    // BOTH happen on the same thread — the hundredth finding is the room's final
+    // conversation — the cap's exit ran first and the room was reported as
+    // truncated. A steward reading `complete: false` on a room they have in fact
+    // seen all of goes looking for findings that do not exist, and the flag they
+    // were given to tell "nothing here" from "we stopped early" says the wrong
+    // one of the two.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId } = await seedSplitRoom(fixture, steward.userId);
+
+    // 125 threads — pages of 50 are 50, 50, 25, so the last page is short — with
+    // the 25 the scan reaches FIRST left unmeasured. The hundredth reportable
+    // entry is then the room's final thread, which is the case at issue.
+    const measured = await seedRoomThreads(fixture, roomId, 125, 25);
+    expect(measured).toBe(100);
+
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    expect(report.status).toBe(200);
+    const body = (await report.json()) as {
+      reports: unknown[];
+      scan: { complete: boolean; examined: number };
+    };
+    expect(body.reports).toHaveLength(100);
+    expect(body.scan.complete).toBe(true);
+    // Every thread in the room was walked — and `examined` counts walked, not
+    // paged: a cap that stops mid-page must not claim the rest of that page.
+    expect(body.scan.examined).toBe(125);
+  });
+
+  it('calls a scan COMPLETE when the room ends on a FULL page boundary', async () => {
+    // The room whose thread count is an exact multiple of the page size never
+    // produces a short page, so the walk consumes its last full page and the
+    // entry cap ends the loop with nothing left to read — a room examined
+    // ENTIRELY, reported as truncated. Same wrong answer as the short-page case,
+    // one page boundary further along, and only a lookahead can tell it from a
+    // room that really does continue.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId } = await seedSplitRoom(fixture, steward.userId);
+    // Exactly 100 threads (pages of 50 → 50, 50 — both full), all measured, so
+    // the hundredth entry is the room's final thread.
+    const measured = await seedRoomThreads(fixture, roomId, 100, 0);
+    expect(measured).toBe(100);
+
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    const body = (await report.json()) as {
+      reports: unknown[];
+      scan: { complete: boolean; examined: number };
+    };
+    expect(body.reports).toHaveLength(100);
+    expect(body.scan.complete).toBe(true);
+    expect(body.scan.examined).toBe(100);
+  });
+
+  it('still reports INCOMPLETE when the cap stops it mid-page', async () => {
+    // The other side of the fix: the cap landing anywhere but the final thread
+    // leaves threads genuinely unexamined, and neither flag nor count may
+    // pretend otherwise.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId } = await seedSplitRoom(fixture, steward.userId);
+    await seedRoomThreads(fixture, roomId, 130, 25);
+
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    const body = (await report.json()) as {
+      reports: unknown[];
+      scan: { complete: boolean; examined: number };
+    };
+    expect(body.reports).toHaveLength(100);
+    expect(body.scan.complete).toBe(false);
+    // 125 walked of 130: the cap fell five threads short of the room's end.
+    expect(body.scan.examined).toBe(125);
+  });
+
+  it('opens ONE attempt under a concurrent pair, and none without its audit row', async () => {
+    // Two stewards of the same room both see the Civic Map's fragile join, so
+    // the concurrent pair is the expected case rather than a rare one. A
+    // `openForThread` read above the insert let both through: the credit
+    // consumer credits the newest, the older row becomes "the open attempt"
+    // again, and a later contribution credits a second time for one bridge.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { threadId, storyId } = await seedSplitRoom(fixture, steward.userId);
+    const attempt = (id: string) => ({
+      attemptId: id,
+      threadId,
+      storyId,
+      status: 'requested' as const,
+      requestedBy: `steward:${steward.userId}`,
+      candidateUserIds: [],
+      contributionId: null,
+      bridgeUserId: null,
+      scoiBaseline: 0.4,
+      scoiAfter: null,
+      createdAt: new Date().toISOString(),
+      resolvedAt: null,
+    });
+    const first = await fixture.invariants.bridgeAttempts.insertIfNoneOpen(attempt(randomUUID()));
+    const second = await fixture.invariants.bridgeAttempts.insertIfNoneOpen(attempt(randomUUID()));
+    expect(first.inserted).toBe(true);
+    expect(second.inserted).toBe(false);
+    // The loser is told about the attempt that IS open, not about its own.
+    expect(second.attempt.attemptId).toBe(first.attempt.attemptId);
+    expect(await fixture.invariants.bridgeAttempts.listForThread(threadId, 10)).toHaveLength(1);
+  });
+
+  it('leaves NO attempt behind when the audit record cannot be written', async () => {
+    // The insert and the append were sequential steps: an append failure
+    // answered 500 with a live request behind it, so the map withheld the
+    // target, every retry said `already_open`, and the durable action had no
+    // record at all. They commit together now.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { threadId, storyId } = await seedSplitRoom(fixture, steward.userId);
+    fixture.identity.audit.append = () => Promise.reject(new Error('audit down'));
+
+    await expect(
+      fixture.invariants.transact(async (tx) => {
+        await tx.bridgeAttempts.insertIfNoneOpen({
+          attemptId: randomUUID(),
+          threadId,
+          storyId,
+          status: 'requested',
+          requestedBy: `steward:${steward.userId}`,
+          candidateUserIds: [],
+          contributionId: null,
+          bridgeUserId: null,
+          scoiBaseline: 0.4,
+          scoiAfter: null,
+          createdAt: new Date().toISOString(),
+          resolvedAt: null,
+        });
+        await tx.audit({
+          actorUserId: steward.userId,
+          eventType: 'bridge_request',
+          targetRef: threadId,
+          context: {},
+        });
+      }),
+    ).rejects.toThrow(/audit down/);
+    // Rolled back — and so the thread is still open to a real request.
+    expect(await fixture.invariants.bridgeAttempts.openForThread(threadId)).toBeNull();
+  });
+
+  it('withdraws a bridge target once a request is OPEN on it', async () => {
+    // The map published a target the POST beside it answers `409 already_open`
+    // for: eligibility asked "may this caller act here?" and never "is there
+    // anything left to do here?". The steward clicked, got a 409, and the
+    // button stayed live because nothing re-read the map.
+    const fixture = freshInvariantServices();
+    const analyst = await seedUserWithSession(fixture.identity, {
+      steward: true,
+      stewardRoles: ['ROLE_INTEGRITY'],
+    });
+    // The landscape hydrates PUBLIC stories only, and `seedStory` files them in
+    // the commons — which has to exist as a public server room for any of them
+    // to appear at all.
+    await fixture.forum.rooms.insert({
+      roomId: COMMONS_ROOM_ID,
+      name: 'Commons',
+      slug: 'commons',
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    // Two peaks on DIFFERENT topics joined through one lower story that shares
+    // both: that join is the fragile merge a bridge request targets. (Two
+    // same-topic stories are one basin with a shoulder, not a merge.)
+    const peakA = await seedSplitRoom(fixture, analyst.userId, ['topic-a']);
+    const peakB = await seedSplitRoom(fixture, analyst.userId, ['topic-b']);
+    const connector = await seedSplitRoom(fixture, analyst.userId, ['topic-a', 'topic-b']);
+    const hourMs = 3_600_000;
+    const windowStart = new Date(Math.floor(Date.now() / hourMs) * hourMs - hourMs).toISOString();
+    for (const [storyId, count] of [
+      [peakA.storyId, 20],
+      [peakB.storyId, 18],
+      [connector.storyId, 2],
+    ] as const) {
+      await fixture.events.windowStore.upsert({
+        itemId: storyId,
+        windowStart,
+        windowSize: '1h',
+        uniqueActiveUsers: count,
+        sourceOpens: 0,
+        contextOpens: 0,
+        returnVisits: 0,
+        contributionCounts: {},
+        antiSignalCounts: {},
+        eventCount: count,
+        computedAt: new Date().toISOString(),
+      });
+    }
+
+    // A STORED baseline for each: the map consults `latestScoiFor` and never
+    // recomputes (a read that persists a year-retained row per node is what the
+    // shared eligibility check exists to prevent), so a story with no stored
+    // measurement is simply not offered.
+    for (const storyId of [peakA.storyId, peakB.storyId, connector.storyId]) {
+      const outputs = await fixture.invariants.scoi.computeBatch(
+        [{ targetType: 'story', targetId: storyId }],
+        hourWindow(Date.now()),
+      );
+      for (const o of outputs) {
+        await fixture.events.invariantStore.upsert({
+          invariantType: o.invariantType,
+          targetType: o.target.targetType,
+          targetId: o.target.targetId,
+          timeWindow: o.window,
+          version: o.version,
+          scoreVector: o.score_vector,
+          explanationSummary: o.explanationSummary,
+          confidence: o.confidence,
+          coverage: o.coverage,
+          reasonCodes: o.reason_codes,
+          fallbackUsed: o.fallback_used,
+          versionMetadata: null,
+          shadowMode: true,
+          createdAt: new Date().toISOString(),
+        });
+      }
+    }
+
+    const read = async (): Promise<Array<string | null>> => {
+      const response = await adminRequest(fixture, analyst.cookie, '/reeb/landscape');
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        landscape: { merges: Array<{ bridge_thread_id: string | null }> } | null;
+      };
+      return (body.landscape?.merges ?? []).map((saddle) => saddle.bridge_thread_id);
+    };
+
+    const offered = (await read()).filter((id): id is string => id !== null);
+    expect(offered.length).toBeGreaterThan(0);
+    const target = offered[0] ?? '';
+    const opened = await adminRequest(
+      fixture,
+      analyst.cookie,
+      `/scoi/threads/${target}/bridge-requests`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    expect(opened.status).toBe(200);
+    // The SAME request now 409s…
+    const again = await adminRequest(
+      fixture,
+      analyst.cookie,
+      `/scoi/threads/${target}/bridge-requests`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    expect(again.status).toBe(409);
+    // …so the map must stop pointing at it.
+    expect(await read()).not.toContain(target);
   });
 
   it('bridge requests route multi-lens candidates; a reducing contribution credits (SCOI-2)', async () => {

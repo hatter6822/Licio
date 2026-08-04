@@ -4,6 +4,7 @@ import type { AgeBand, UserAccountState } from '@licio/shared';
 import { defaultPersonalizationSettings, defaultPrivacySettings } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { sha256Hex } from '../identity/crypto.js';
 import type { Role } from '../identity/rbac.js';
 import {
   createInMemoryIdentityServices,
@@ -145,8 +146,17 @@ describe('authMiddleware', () => {
       async get() {
         throw new Error('redis down');
       },
-      async put() {},
+      async create() {},
       async delete() {},
+      async take() {
+        throw new Error('redis down');
+      },
+      async putIfVersion() {
+        throw new Error('redis down');
+      },
+      async rotate() {
+        throw new Error('redis down');
+      },
       async listForUser() {
         return [];
       },
@@ -189,11 +199,11 @@ describe('authMiddleware', () => {
     // touchSession reaches the failing put().
     const cookie = await seedSessionCookie({ sessionAge: 10 * 60_000 });
     // Delegate to the REAL store (a class with private fields — a spread would drop
-    // its methods and make validateSession itself throw), overriding only `put` so
-    // ONLY the throttled slide write fails.
+    // its methods and make validateSession itself throw), overriding only the
+    // conditional write so ONLY the throttled slide fails.
     const brokenSessions = new Proxy(services.sessions, {
       get(target, prop, receiver) {
-        if (prop === 'put') {
+        if (prop === 'putIfVersion') {
           return async () => {
             throw new Error('redis write blip');
           };
@@ -277,6 +287,49 @@ describe('requireSteward (role + MFA-verified session)', () => {
         })
       ).status,
     ).toBe(200);
+  });
+
+  it('reads MFA standing from the DURABLE grant when the session lacks the flag', async () => {
+    // The session flag is a Redis write; a recovery code is spent in Postgres.
+    // Keeping the two in step by ordering is what four rounds of review kept
+    // finding holes in, so the spend IS the grant: `consumeRecoveryCode` records
+    // the session it verifies in the same statement, and this is where that is
+    // read back. A session whose flag never landed is still verified.
+    const cookie = await seedSessionCookie({ roles: ['steward'], mfa: true, mfaVerified: false });
+    const app = guardedApp();
+    // Without a grant, an unflagged session is reduced-assurance.
+    expect((await app.request('/steward', { headers: { cookie } })).status).toBe(403);
+
+    // Spend a code FOR THIS SESSION — the whole grant, in one statement.
+    const userId = (await services.store.getUserByHandle('guarduser'))?.userId as string;
+    const codeHash = sha256Hex('recovery-code');
+    await services.store.setAuth(userId, { recoveryCodeHashes: [codeHash] });
+    const tokenHash = sha256Hex(cookie.split('=')[1] as string);
+    expect(await services.store.consumeRecoveryCode(userId, codeHash, tokenHash)).not.toBeNull();
+
+    // …and the session now clears the steward gate, with nothing written to it.
+    expect((await app.request('/steward', { headers: { cookie } })).status).toBe(200);
+    expect((await services.sessions.get(tokenHash))?.record.mfa_verified).toBe(false);
+
+    // A DIFFERENT session gets nothing from that grant — it names one session.
+    const other = await seedSessionCookie({ roles: ['steward'], mfa: true, mfaVerified: false });
+    expect((await app.request('/steward', { headers: { cookie: other } })).status).toBe(403);
+  });
+
+  it('revokes derived standing when the factor that issued it is replaced', async () => {
+    // Re-enrolling ends the factor the grant was about; a session verified by a
+    // retired code must stop deriving its standing from it.
+    const cookie = await seedSessionCookie({ roles: ['steward'], mfa: true, mfaVerified: false });
+    const app = guardedApp();
+    const userId = (await services.store.getUserByHandle('guarduser'))?.userId as string;
+    const codeHash = sha256Hex('recovery-code');
+    await services.store.setAuth(userId, { recoveryCodeHashes: [codeHash] });
+    const tokenHash = sha256Hex(cookie.split('=')[1] as string);
+    await services.store.consumeRecoveryCode(userId, codeHash, tokenHash);
+    expect((await app.request('/steward', { headers: { cookie } })).status).toBe(200);
+
+    await services.store.setAuth(userId, { recoveryCodeHashes: [sha256Hex('fresh')] });
+    expect((await app.request('/steward', { headers: { cookie } })).status).toBe(403);
   });
 });
 

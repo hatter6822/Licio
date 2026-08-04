@@ -8,16 +8,8 @@
 // route PATTERN only (never a URL), a numeric value — no user identifier, no
 // IP, no attention/behavioral content (SPEC §19, §6.10).
 import { sql } from 'drizzle-orm';
-import {
-  check,
-  doublePrecision,
-  index,
-  integer,
-  pgTable,
-  text,
-  timestamp,
-  uuid,
-} from 'drizzle-orm/pg-core';
+import { check, doublePrecision, index, integer, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 
 const METRIC_CHECK = sql.raw(`in ('LCP', 'INP', 'CLS')`);
 const DEVICE_CHECK = sql.raw(`in ('low', 'mid', 'high', 'unknown')`);
@@ -33,7 +25,7 @@ export const webVitalSamples = pgTable(
     /** The route PATTERN (e.g. `/stories/$storyId`), never a concrete path. */
     route: text('route').notNull(),
     value: doublePrecision('value').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [
     index('web_vital_samples_created_idx').on(t.createdAt),
@@ -54,7 +46,7 @@ export const webVitalAggregates = pgTable(
     route: text('route').notNull(),
     p75: doublePrecision('p75').notNull(),
     sampleCount: integer('sample_count').notNull(),
-    windowEnd: timestamp('window_end', { withTimezone: true }).notNull(),
+    windowEnd: instant('window_end').notNull(),
   },
   (t) => [
     index('web_vital_aggregates_metric_idx').on(t.metric, t.windowEnd),

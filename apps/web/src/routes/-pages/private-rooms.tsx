@@ -9,6 +9,7 @@
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useCallback, useEffect, useState } from 'react';
 import { CreatePrivateRoomWizard } from '../../components/private-rooms/CreatePrivateRoomWizard/index.js';
+import { PrivateRoomDirectory } from '../../components/private-rooms/PrivateRoomDirectory/index.js';
 import { PrivateRoomView } from '../../components/private-rooms/PrivateRoomView/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { Card } from '../../components/ui/Card/index.js';
@@ -58,6 +59,10 @@ export function PrivateRoomsPage(): React.ReactElement {
                 refresh();
                 void navigate({ to: '/private/$roomId', params: { roomId } });
               }}
+              // The room can exist while the wizard stays open to report a
+              // directory failure — refresh then too, or dismissing that warning
+              // leaves a real room missing from this list until a reload.
+              onRoomPersisted={() => refresh()}
             />
           </Card>
         ) : null}
@@ -89,6 +94,13 @@ export function PrivateRoomsPage(): React.ReactElement {
             </li>
           ))}
         </ul>
+
+        {/* §4.2 — rooms that chose to publish a name.  Below this device's own
+            rooms, and visibly separate from them: these are not rooms you are
+            in, and the only thing the directory can do is tell you they exist. */}
+        <div className="border-line border-t pt-4">
+          <PrivateRoomDirectory />
+        </div>
       </div>
     </>
   );

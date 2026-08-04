@@ -30,34 +30,93 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { InMemoryRollback } from './in-memory-rollback.js';
 
+/**
+ * ONE queue for every unit, because the state they protect is shared.
+ *
+ * Serialising per INSTANCE made "units run one at a time" true of each domain
+ * and false of the runtime.  Five domains hold their own unit, and several of
+ * them list the SAME participants — the audit store above all, since a durable
+ * change and the record of it commit together everywhere.  So a forum unit and
+ * an identity unit ran concurrently over one `InMemoryAuditStore`, and the
+ * snapshot each took was of the whole store: when one failed, its restore put
+ * back an array length from before the OTHER unit's append, deleting an audit
+ * row whose change had already committed.  Atomicity for one unit, silently
+ * taken out of another.
+ *
+ * The scope of the lock has to be the scope of the state, and the participants
+ * are shared globally, so the lock is global.  This is an in-memory twin for
+ * dev and tests — there is no throughput to protect, and a unit here is a few
+ * Map writes.
+ */
+let sharedQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Whether THIS async chain is already inside some unit — any unit, not just
+ * this instance's.
+ *
+ * A nested call must never queue: it would wait for a slot its own caller
+ * holds, which is a deadlock rather than a delay.  The per-instance ambient
+ * below answers that for a call back into the SAME domain; with one shared
+ * queue a call into a DIFFERENT domain has the same problem and needs the same
+ * answer, so the marker is global too.
+ */
+const inUnit = new AsyncLocalStorage<{ undo: (() => void)[] }>();
+
 export class InMemoryUnitOfWork<S> {
   readonly #stores: S;
-  readonly #rollbacks: readonly InMemoryRollback[];
+  readonly #rollbacks: () => readonly InMemoryRollback[];
   readonly #ambient = new AsyncLocalStorage<S>();
-  #queue: Promise<unknown> = Promise.resolve();
 
-  constructor(stores: S, rollbacks: readonly InMemoryRollback[]) {
+  /**
+   * @param rollbacks the participants, read at RUN time rather than captured.
+   *
+   * A composition root cannot always construct every participant before the unit
+   * — the private-room stub store is built after the moderation services — and a
+   * list fixed at construction silently excludes whatever came later. Reading it
+   * per run removes the ordering constraint instead of documenting it.
+   */
+  constructor(
+    stores: S,
+    rollbacks: readonly InMemoryRollback[] | (() => readonly InMemoryRollback[]),
+  ) {
     this.#stores = stores;
-    this.#rollbacks = rollbacks;
+    this.#rollbacks = typeof rollbacks === 'function' ? rollbacks : () => rollbacks;
   }
 
   async run<T>(work: (stores: S) => Promise<T>): Promise<T> {
     const ambient = this.#ambient.getStore();
     if (ambient !== undefined) return work(ambient); // genuinely nested — join it
-    const running = this.#queue.then(() =>
+
+    // NESTED ACROSS DOMAINS — a moderation unit reaching into the forum's, say.
+    // It is one logical transaction, so it joins the unit in flight rather than
+    // opening its own: it runs inline (queueing behind its own caller would
+    // deadlock), and its participants are snapshotted onto the OUTER unit's undo
+    // list so a later failure rolls back the whole thing and not just the half
+    // the outer unit happens to know about.
+    const outer = inUnit.getStore();
+    if (outer !== undefined) {
+      outer.undo.push(...this.#rollbacks().map((store) => store.beginRollback()));
+      return this.#ambient.run(this.#stores, () => work(this.#stores));
+    }
+
+    const running = sharedQueue.then(() =>
       this.#ambient.run(this.#stores, async () => {
-        const undo = this.#rollbacks.map((store) => store.beginRollback());
-        try {
-          return await work(this.#stores);
-        } catch (error) {
-          for (const restore of undo) restore();
-          throw error;
-        }
+        const undo = this.#rollbacks().map((store) => store.beginRollback());
+        return inUnit.run({ undo }, async () => {
+          try {
+            return await work(this.#stores);
+          } catch (error) {
+            // Newest first: a nested unit's snapshot was taken after this one's,
+            // so restoring it last would put back the state from before it.
+            for (const restore of [...undo].reverse()) restore();
+            throw error;
+          }
+        });
       }),
     );
     // The queue advances on SETTLEMENT, not on success: a unit that throws must still
     // release the next one, or one failure wedges every later write.
-    this.#queue = running.then(
+    sharedQueue = running.then(
       () => undefined,
       () => undefined,
     );

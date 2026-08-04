@@ -4,7 +4,10 @@
 // keyset pagination, SLA state thresholds, the side-by-side snapshot + thread
 // context, user history (no financial field), and the appeal queue + review
 // panel.  Exercised over in-memory stores with a snapshot-bearing content port.
+import { AUDIT_NOTES_MAX, auditRecordViewSchema } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { writeAudit } from '../moderation/audit.js';
+import { computeAuditEntryHash } from '../moderation/audit-chain.js';
 import type { StewardActor } from '../moderation/authz.js';
 import type {
   ContentSnapshot,
@@ -435,6 +438,137 @@ describe('buildCaseReview (snapshot + thread + side-by-side)', () => {
     expect(review?.reported_contribution_id).toBe('rc-1');
     expect(review?.available_actions).toContain('remove');
     expect(await buildCaseReview(services, SAFETY, 'missing')).toBeNull();
+  });
+
+  it('MACs the at-most-once key, so clearing it breaks the chain', async () => {
+    // The key is what the one-evidence-per-case guarantee rests on, and this
+    // chain's threat model is a superuser or a doctored restore — so a key that
+    // is not in the preimage can be nulled, a second evidence row appended, and
+    // `verifyAuditChain` still reports the trail valid.
+    const caseId = await insertCase({ caseId: 'eeeeeeee-0000-4000-9000-0000000000ac' });
+    const written = await writeAudit(services, {
+      actorUserId: null,
+      actorRole: null,
+      action: 'private_room_listing_reported',
+      targetType: 'private_room_stub',
+      targetId: '00000000-0000-4000-8000-0000000000ac',
+      caseId,
+      reversible: false,
+      notes: 'evidence',
+      idempotencyKey: `listing-evidence:${caseId}`,
+    });
+    expect(written).not.toBeNull();
+
+    const [row] = await services.audit.list({ caseId, limit: 1 });
+    if (!row) throw new Error('no audit row');
+    const key = services.auditChain.key;
+    const refOf = services.auditChain.refOf;
+    // As stored, it verifies…
+    expect(computeAuditEntryHash(row, key, refOf)).toBe(row.integrityHash);
+    // …and with the key cleared, it does not.
+    expect(computeAuditEntryHash({ ...row, idempotencyKey: null }, key, refOf)).not.toBe(
+      row.integrityHash,
+    );
+  });
+
+  it('appends an AT-MOST-ONCE row once, however many writers try', async () => {
+    // The §21 listing capture is one per case: a second snapshot carries text
+    // the reporter never saw, labelled as what they reported. Enforcing that by
+    // reading the trail and then appending is a check — two distinct reports
+    // joining the same open case both pass it before either writes — so the key
+    // moved into the write, where the store settles it.
+    const caseId = await insertCase({ caseId: 'eeeeeeee-0000-4000-9000-0000000000ab' });
+    const row = {
+      actorUserId: null,
+      actorRole: null,
+      action: 'private_room_listing_reported',
+      targetType: 'private_room_stub',
+      targetId: '00000000-0000-4000-8000-0000000000ab',
+      caseId,
+      reversible: false,
+      idempotencyKey: `listing-evidence:${caseId}`,
+    } as const;
+
+    expect(await writeAudit(services, { ...row, notes: 'first' })).not.toBeNull();
+    // The second writer is told nothing landed — because nothing needed to.
+    expect(await writeAudit(services, { ...row, notes: 'second' })).toBeNull();
+
+    const trail = await services.audit.list({ caseId, limit: 10 });
+    const captures = trail.filter((r) => r.action === 'private_room_listing_reported');
+    expect(captures).toHaveLength(1);
+    expect(captures[0]?.notes).toBe('first');
+  });
+
+  it('keeps an over-long note RENDERABLE — a stored row that cannot be read is not a record', async () => {
+    // The console reads every audit row through `auditRecordViewSchema`, whose
+    // `notes` is bounded, so a longer note stored fine and then failed the parse
+    // on EVERY later read of that case — the case about a room whose reported
+    // listing carried a 120-character name and a 2000-character description
+    // became the one case staff could not open, review, or delist from.
+    //
+    // Pinned at the FUNNEL rather than at the call site that hit it: every
+    // writer (writeAudit, appendAudit, the transactor's tx.audit) passes through
+    // the same append, so the invariant is "a row that can be stored can be
+    // rendered" rather than "each writer remembers the limit".
+    const caseId = await insertCase({ caseId: 'eeeeeeee-0000-4000-9000-00000000000f' });
+    await writeAudit(services, {
+      actorUserId: null,
+      actorRole: null,
+      action: 'private_room_listing_reported',
+      targetType: 'private_room_stub',
+      targetId: '00000000-0000-4000-8000-00000000000f',
+      caseId,
+      reversible: false,
+      notes: 'x'.repeat(AUDIT_NOTES_MAX * 3),
+    });
+    const review = await buildCaseReview(services, SAFETY, caseId);
+    const stored = review?.case_history.find(
+      (row) => row.action === 'private_room_listing_reported',
+    );
+    // The row the case panel renders parses — which is the thing that was
+    // broken, and it is the WHOLE response that failed on it: one row over the
+    // bound took `caseReviewResponseSchema.parse` down and with it every read of
+    // this case.
+    expect(() => auditRecordViewSchema.parse(stored)).not.toThrow();
+    expect(stored?.notes?.length).toBeLessThanOrEqual(AUDIT_NOTES_MAX);
+    // …and a reader can tell an excerpt from the whole text.
+    expect(stored?.notes).toMatch(/truncated/);
+  });
+
+  it('withholds the ENFORCEMENT verbs while MFCI-2 holds the case — and says so', async () => {
+    // `applyAction` refuses an enforcement verb with `enforcement_delayed` while
+    // a coordinated-report incident holds the case, and the palette offered them
+    // anyway: the reviewer's only way to learn about the hold was to trip it.
+    const caseId = await insertCase({
+      caseId: 'eeeeeeee-0000-4000-9000-00000000000d',
+      targetId: '00000000-0000-4000-8000-00000000held',
+      enforcementDelayed: true,
+    });
+    const held = await buildCaseReview(services, SAFETY, caseId);
+    expect(held?.enforcement_held).toBe(true);
+    expect(held?.available_actions).not.toContain('remove');
+    expect(held?.available_actions).not.toContain('hide');
+    // The case still MOVES: workflow verbs are never held, which is what the
+    // endpoint allows and the only way a held case leaves the queue.
+    expect(held?.available_actions).toContain('escalate');
+    expect(held?.available_actions).toContain('clear');
+  });
+
+  it('never holds an integrity analyst — they ARE the review', async () => {
+    const caseId = await insertCase({
+      caseId: 'eeeeeeee-0000-4000-9000-00000000000e',
+      targetId: '00000000-0000-4000-8000-0000000intg',
+      enforcementDelayed: true,
+    });
+    const analyst: StewardActor = {
+      userId: '00000000-0000-4000-8000-0000000000c9',
+      platformRoles: ['steward'],
+      stewardRoles: ['ROLE_INTEGRITY'],
+      mfaActive: true,
+      mfaVerified: true,
+    };
+    const review = await buildCaseReview(services, analyst, caseId);
+    expect(review?.enforcement_held).toBe(false);
   });
 
   it('carries THIS case history — including untargeted events, excluding other cases', async () => {

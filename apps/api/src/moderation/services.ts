@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import type { ModerationQueue } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
+import type { InMemoryRollback } from '../lib/in-memory-rollback.js';
 import { appendAudit } from './audit.js';
 import type { AuditChainDeps } from './audit-chain.js';
 import {
@@ -90,6 +91,35 @@ export interface ModerationServices {
    * same question about what a failed unit leaves behind.
    */
   transactor: ModerationTransactor;
+  /**
+   * The WS-S §21.4 demotion a moderation unit performs, wired at boot.
+   *
+   * Held on the services rather than imported, so moderation never reaches into
+   * the private-rooms domain to construct its store — the same rule `content`
+   * follows. Absent ⇒ the unit reports "nothing matched", which is the
+   * fail-closed answer: a staff delist that cannot reach the store must not be
+   * recorded as one that did.
+   */
+  delistListedRoom?: (roomServerId: string) => Promise<boolean>;
+  /**
+   * Is this room's §21 directory record publicly LISTED?
+   *
+   * Read-only, and the case review's only question about the private plane: it
+   * decides whether §11.4's delist is offered on a room case at all. Injected
+   * for the same reason `delistListedRoom` is — moderation does not reach into
+   * the private-rooms domain. Absent ⇒ never offered, which is fail-closed.
+   */
+  isPubliclyListedRoom?: (roomServerId: string) => Promise<boolean>;
+  /**
+   * Add a store from another domain to the in-memory unit's rollback boundary.
+   *
+   * A method rather than a constructor option because the participant may not
+   * exist yet: the private-room stub store is built after these services in both
+   * composition roots. The list is read per run, so registering later is
+   * enough — and getting it wrong now shows up as a demotion surviving a failed
+   * audit in dev and test, which is the failure the unit exists to prevent.
+   */
+  registerRollback(store: InMemoryRollback): void;
   /** The audit trail's tamper-evidence key + identifier ref (WS-J.2.5, migration 0118).
    *
    *  Present by DEFAULT — in dev and test as well as production — because a chain that
@@ -137,6 +167,17 @@ export interface ModerationServices {
 export interface InMemoryModerationOptions {
   /** Override the audit chain's MAC key (production passes the derived one). */
   auditChainKey?: string;
+  /**
+   * Stores from OTHER domains that a unit may write, so the in-memory rollback
+   * boundary covers them too.
+   *
+   * The private-room stub store is one: §21.4's staff demotion runs inside the
+   * unit, and a unit that restores only the moderation stores would leave a
+   * demotion standing when its audit throws. Injected rather than imported —
+   * moderation does not construct another domain's store, here or in the
+   * Postgres transactor.
+   */
+  extraRollbacks?: readonly InMemoryRollback[];
   config?: Partial<ModerationRuntimeConfig>;
   content?: ModerationContentPort;
   users?: ModerationUserPort;
@@ -166,7 +207,12 @@ export function createInMemoryModerationServices(
   const noticeStore = new InMemoryModerationNoticeStore(now);
   const appealStore = new InMemoryModerationAppealStore(now);
   const incidentStore = new InMemoryCoordinatedReportIncidentStore(now);
+  /** Participants registered after construction — see `registerRollback`. */
+  const extraRollbacks: InMemoryRollback[] = [];
   const services: ModerationServices = {
+    registerRollback: (store) => {
+      if (!extraRollbacks.includes(store)) extraRollbacks.push(store);
+    },
     cases: caseStore,
     reports: new InMemoryModerationReportStore(now),
     actions: actionStore,
@@ -181,6 +227,12 @@ export function createInMemoryModerationServices(
         notices: noticeStore,
         appeals: appealStore,
         incidents: incidentStore,
+        // Read at CALL time: the production boot swaps in the Drizzle config
+        // store after this object is built, and a captured reference would keep
+        // writing where nothing else reads.
+        get config() {
+          return services.configStore;
+        },
         // A no-op: the in-memory transactor already runs units one at a time, which is
         // the property the Postgres advisory lock buys.
         lockRevertScope: async () => {},
@@ -190,9 +242,35 @@ export function createInMemoryModerationServices(
           applyContentState: (...args) => services.content.applyContentState(...args),
           applyAccountState: (...args) => services.content.applyAccountState(...args),
         },
+        // Same reasoning as `content`: the in-memory unit shares the process's own
+        // stub store, and a fold over Maps has no partial commit to protect
+        // against — but the SHAPE must exist on both sides, or the atomicity the
+        // Postgres unit provides would be a property only production has.
+        delistListedRoom: async (roomServerId) =>
+          (await services.delistListedRoom?.(roomServerId)) ?? false,
         audit: (input) => appendAudit(services.auditChain, input),
       },
-      [caseStore, actionStore, noticeStore, appealStore, incidentStore, auditStore],
+      // The private-room stub store is in the ROLLBACK LIST too, or the in-memory
+      // unit would restore the moderation side of a failed staff delist and
+      // leave the demotion standing — the failure the unit exists to prevent,
+      // reproduced only where nobody looks for it. It is supplied by the boot
+      // wiring alongside `delistListedRoom`, so moderation still never
+      // constructs another domain's store.
+      // Read at RUN time: a participant from another domain (the private-room
+      // stub store) is built after these services, so a list fixed here would
+      // silently exclude it — which is how the guarantee ends up holding in one
+      // composition root and not another.
+      () => [
+        caseStore,
+        actionStore,
+        noticeStore,
+        appealStore,
+        incidentStore,
+        auditStore,
+        ...(services.configStore instanceof InMemoryPwattConfigStore ? [services.configStore] : []),
+        ...(options.extraRollbacks ?? []),
+        ...extraRollbacks,
+      ],
     ),
     auditChain: {
       store: auditStore,

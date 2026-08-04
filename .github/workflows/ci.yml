@@ -33,9 +33,11 @@ jobs:
       # names sharing a 63-byte prefix collapse into one.  Migrations are
       # hand-authored here, so the SQL is where a name first reaches the server.
       - run: pnpm check:sql-identifiers
+      - run: pnpm check:timestamp-precision
       # The dev↔prod parity gate: every in-memory adapter needs a boot-wired
       # production counterpart; every env key must be schema-validated or a
       # documented dev flag; production adapters hold no in-memory state.
+      - run: pnpm check:audited-writes
       - run: pnpm check:prod-parity
       # One CSP SSOT (@licio/shared) reaches the header, the E2E preview, and —
       # via a build plugin — the courier WebView's <meta>.  This gate proves the

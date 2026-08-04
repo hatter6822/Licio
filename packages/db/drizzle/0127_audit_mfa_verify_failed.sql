@@ -1,0 +1,19 @@
+-- WS-D.1.5 — a REJECTED second-factor attempt gets its own event type.
+--
+-- The `/mfa/totp/verify` failure path appended `mfa_verify`, the same type a
+-- SUCCESS writes, with an empty context.  So the trail an investigator reads to
+-- answer "did this account clear MFA?" could not distinguish a clearance from a
+-- wrong code, and a brute-force run against a steward account produced rows
+-- indistinguishable from that steward signing in — on the one surface whose
+-- whole purpose is telling those apart.
+--
+-- Additive and therefore safe on the enum: existing `mfa_verify` rows keep
+-- their meaning (they are the successes, plus the historical failures that
+-- cannot be re-classified after the fact), and nothing reads the new value
+-- until the route writes it.
+--
+-- `IF NOT EXISTS` because this migration must be re-runnable against a database
+-- where an earlier partial apply already added the label — `ALTER TYPE … ADD
+-- VALUE` is not transactional in the way the rest of a migration file is, so it
+-- cannot be rolled back with its neighbours.
+ALTER TYPE "audit_event_type" ADD VALUE IF NOT EXISTS 'mfa_verify_failed';

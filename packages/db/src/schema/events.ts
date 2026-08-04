@@ -27,10 +27,10 @@ import {
   pgTable,
   primaryKey,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { users } from './user.js';
 
 // Mirrors of the closed shared enums (packages/shared events schemas); the
@@ -107,7 +107,7 @@ export const events = pgTable(
     /** Routing key; identical to event_type in schema version 1. */
     topic: text('topic').notNull(),
     /** Event time (client-claimed, bounded by the WS-E.1.3b acceptance window). */
-    timestamp: timestamp('timestamp', { withTimezone: true }).notNull(),
+    timestamp: instant('timestamp').notNull(),
     privacyClassification: eventPrivacyClassificationEnum('privacy_classification').notNull(),
     retentionTier: retentionTierEnum('retention_tier').notNull(),
     /** The validated topic payload (conforms to the registry schema). */
@@ -119,15 +119,15 @@ export const events = pgTable(
      */
     ownerUserId: uuid('owner_user_id').references(() => users.userId, { onDelete: 'set null' }),
     /** Server receipt time. */
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
     /**
      * Hard purge deadline computed at write time from tier + user retention
      * preference + jurisdiction override (WS-E.1.4); null ⇒ tier default
      * applies at sweep time.
      */
-    purgeAfter: timestamp('purge_after', { withTimezone: true }),
+    purgeAfter: instant('purge_after'),
     /** Set by the annual-review sweep for moderation_legal rows (WS-E.1.4). */
-    reviewFlaggedAt: timestamp('review_flagged_at', { withTimezone: true }),
+    reviewFlaggedAt: instant('review_flagged_at'),
   },
   (t) => [
     // The partition key must be part of the PK on a partitioned table.
@@ -159,7 +159,7 @@ export const attentionAggregates = pgTable(
     replyDepthBucket: replyDepthBucketEnum('reply_depth_bucket').notNull(),
     returnVisitCountBucket: returnVisitBucketEnum('return_visit_count_bucket').notNull(),
     privacyLevel: collectionPrivacyLevelEnum('privacy_level').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [
     index('attention_aggregates_user_idx').on(t.userIdOrPrivacyBucket),
@@ -177,7 +177,7 @@ export const aggregationWindows = pgTable(
   'aggregation_windows',
   {
     itemId: uuid('item_id').notNull(),
-    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    windowStart: instant('window_start').notNull(),
     windowSize: aggregationWindowSizeEnum('window_size').notNull(),
     /** Distinct actors with any active attention (per-user dedup applied). */
     uniqueActiveUsers: integer('unique_active_users').notNull(),
@@ -190,11 +190,24 @@ export const aggregationWindows = pgTable(
     antiSignalCounts: jsonb('anti_signal_counts').$type<Record<string, number>>().notNull(),
     /** Total events folded into the window (idempotency/threshold metric). */
     eventCount: integer('event_count').notNull(),
-    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+    computedAt: instant('computed_at').notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.itemId, t.windowStart, t.windowSize] }),
     index('aggregation_windows_start_idx').on(t.windowStart),
+    /**
+     * The WS-H.7.4 landscape's read: one window, busiest first.
+     *
+     * `window_start` alone leaves the planner fetching every row in the hour and
+     * sorting it by `event_count` before the LIMIT applies — and the landscape
+     * calls it with growing limits while it scans past restricted stories, so
+     * one Civic Map load repeated that full-hour sort several times. PARTIAL on
+     * `event_count > 0`, because a zero row is not a landscape node and has no
+     * business occupying the index.
+     */
+    index('aggregation_windows_active_idx')
+      .on(t.windowStart, t.windowSize, t.eventCount.desc(), t.itemId)
+      .where(sql`${t.eventCount} > 0`),
     check(
       'aggregation_windows_nonneg',
       sql`${t.uniqueActiveUsers} >= 0 and ${t.sourceOpens} >= 0 and ${t.contextOpens} >= 0 and ${t.returnVisits} >= 0 and ${t.eventCount} >= 0`,
@@ -275,7 +288,7 @@ export const invariantOutputs = pgTable(
      * code change (PWATT_V0_SHADOW_MODE), never configuration.
      */
     shadowMode: boolean('shadow_mode').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('invariant_outputs_run_idx').on(
@@ -328,7 +341,7 @@ export const signalLedgerEntries = pgTable(
       .references(() => users.userId, { onDelete: 'cascade' }),
     itemId: uuid('item_id').notNull(),
     storyTitle: text('story_title').notNull(),
-    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    windowStart: instant('window_start').notNull(),
     windowSize: aggregationWindowSizeEnum('window_size').notNull(),
     /** Bucketed signal breakdown (attention + participation), never raw values. */
     signals: jsonb('signals').$type<Record<string, unknown>>().notNull(),
@@ -338,9 +351,9 @@ export const signalLedgerEntries = pgTable(
     pwattScore: doublePrecision('pwatt_score').notNull(),
     /** Plain-language explanation of how signals were counted. */
     summary: text('summary').notNull(),
-    recordedAt: timestamp('recorded_at', { withTimezone: true }).notNull(),
+    recordedAt: instant('recorded_at').notNull(),
     /** Retention coupling (WS-E.1.4): expires with the user's attention data. */
-    purgeAfter: timestamp('purge_after', { withTimezone: true }).notNull(),
+    purgeAfter: instant('purge_after').notNull(),
   },
   (t) => [
     uniqueIndex('signal_ledger_window_idx').on(
@@ -369,14 +382,14 @@ export const itemSafetyStates = pgTable('item_safety_states', {
   /** The moderation/safety case that drove the current state, when any. */
   caseId: uuid('case_id'),
   updatedBy: text('updated_by').notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 
 /** Tunable PWAtt configuration (WS-E.2.3a-d: changeable without redeploy). */
 export const pwattConfig = pgTable('pwatt_config', {
   configKey: text('config_key').primaryKey(),
   value: jsonb('value').$type<Record<string, unknown>>().notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 
 /** Dead-lettered events per consumer (WS-E.1.5): poisoned events never loop. */
@@ -389,7 +402,7 @@ export const eventDeadLetters = pgTable(
     topic: text('topic').notNull(),
     error: text('error').notNull(),
     attempts: integer('attempts').notNull(),
-    failedAt: timestamp('failed_at', { withTimezone: true }).notNull().defaultNow(),
+    failedAt: instant('failed_at').notNull().defaultNow(),
   },
   (t) => [
     index('event_dead_letters_consumer_idx').on(t.consumerName, t.failedAt),
@@ -402,8 +415,8 @@ export const eventDeadLetters = pgTable(
 /** Durable consumer replay checkpoints (WS-E.1.5 at-least-once recovery). */
 export const consumerCheckpoints = pgTable('consumer_checkpoints', {
   consumerName: text('consumer_name').primaryKey(),
-  lastEventTimestamp: timestamp('last_event_timestamp', { withTimezone: true }).notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  lastEventTimestamp: instant('last_event_timestamp').notNull(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 
 /**
@@ -422,7 +435,7 @@ export const actorBehaviorWindows = pgTable(
     actorRef: uuid('actor_ref')
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
-    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    windowStart: instant('window_start').notNull(),
     eventCount: integer('event_count').notNull(),
     itemsTouched: integer('items_touched').notNull(),
     /** Count of items by per-item MAX dwell bucket (coarse §22.1 buckets). */
@@ -433,7 +446,7 @@ export const actorBehaviorWindows = pgTable(
     contextOpens: integer('context_opens').notNull(),
     saves: integer('saves').notNull(),
     contributions: integer('contributions').notNull(),
-    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+    computedAt: instant('computed_at').notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.actorRef, t.windowStart] }),
@@ -472,7 +485,7 @@ export const actorAuthenticityScores = pgTable(
     /** Deterministic near-duplicate cluster id (null = unclustered). */
     clusterId: text('cluster_id'),
     clusterSize: integer('cluster_size').notNull().default(1),
-    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+    computedAt: instant('computed_at').notNull().defaultNow(),
   },
   (t) => [
     index('actor_authenticity_cluster_idx').on(t.clusterId),

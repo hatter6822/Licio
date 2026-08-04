@@ -30,6 +30,7 @@ import type {
   ThreadConversationState,
   ThreadSafetyState,
 } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 import {
   TIER_UNIQUE_PUBLIC_CONSTRAINT,
   TIER_UNIQUE_ROOM_CONSTRAINT,
@@ -350,6 +351,20 @@ export interface StoryStore {
   getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null>;
   /** Batch thread-shell read keyed by STORY id (WS-I safety filter). */
   getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>>;
+  /**
+   * The thread, LOCKED for the duration of the caller's transaction.
+   *
+   * A predicate the write depends on is not settled by reading it in the same
+   * transaction: READ COMMITTED takes a fresh snapshot per statement, so an
+   * archive can commit between the read and the insert and the row that gated
+   * the write is already stale. `FOR UPDATE` holds it — a concurrent
+   * `updateThread` waits for the unit to finish, which is the difference
+   * between checking a state and depending on one.
+   *
+   * The in-memory twin is the same read: a single-threaded fold has no window
+   * between two awaits it controls.
+   */
+  getThreadByIdForUpdate(threadId: string): Promise<ThreadShellRecord | null>;
   /** Reverse shell lookup (thread-scoped events → story lifecycle/freshness). */
   getStoryIdByThreadId(threadId: string): Promise<string | null>;
   // -- WS-G thread ownership (the forum module reads/writes through these) --
@@ -422,6 +437,21 @@ export interface StoryStore {
   ): Promise<StoryRecord[]>;
   /** Most recent stories (search corpus + admin surfaces). */
   listRecent(limit: number): Promise<StoryRecord[]>;
+  /**
+   * The batched by-id read, restricted to PUBLICLY-VISIBLE, non-hidden rows.
+   *
+   * For a surface that must not disclose room-restricted content to a caller
+   * whose authorization it does not know — the WS-H.7.4 Reeb landscape is one:
+   * it is assembled once, globally, and read by any platform integrity steward,
+   * who may be neither a member nor a steward of the room a `room_only` story
+   * lives in. Filtering afterwards is what a caller forgets; the restriction is
+   * in the QUERY, so a surface reading through this method cannot see a
+   * restricted row to leak in the first place.
+   *
+   * That also closes the window between selecting ids and hydrating them: a
+   * story turned `room_only` in between is simply absent rather than enriched.
+   */
+  getPublicByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>>;
   /**
    * One keyset page of a user's submitted stories (DSAR export, WS-D §19.3):
    * `(created_at, story_id)` ascending, strictly after `after`. The export
@@ -614,7 +644,7 @@ function nowIso(now: () => number): string {
   return new Date(now()).toISOString();
 }
 
-export class InMemoryStoryStore implements StoryStore {
+export class InMemoryStoryStore implements StoryStore, InMemoryRollback {
   readonly #stories = new Map<string, StoryRecord>();
   readonly #threads = new Map<string, ThreadShellRecord>();
   // WS-Q.2.2a — tier-scoped URL slots, faithful to the two partial unique
@@ -630,6 +660,35 @@ export class InMemoryStoryStore implements StoryStore {
 
   constructor(now: () => number = Date.now) {
     this.#now = now;
+  }
+
+  /**
+   * The unit of work's undo.
+   *
+   * Without it this store was simply ABSENT from the ingestion unit's rollback
+   * list — the filter keeps only stores that declare `beginRollback`, so a
+   * takedown that hid a story and then failed its audit append left the story
+   * hidden with the takedown rolled back. The twin was quietly weaker than the
+   * production transaction it stands in for, which is the one way a twin can
+   * mislead: every test over it passes while the guarantee is not there.
+   *
+   * All five maps, because the URL-slot indexes are as much state as the rows:
+   * a rolled-back insert that kept its slot would refuse the retry as a
+   * duplicate of a story that no longer exists.
+   */
+  beginRollback(): () => void {
+    const stories = mapRollback(this.#stories);
+    const threads = mapRollback(this.#threads);
+    const publicByUrl = mapRollback(this.#publicByUrl);
+    const roomByUrl = mapRollback(this.#roomByUrl);
+    const sourceLinks = mapRollback(this.#sourceLinks);
+    return () => {
+      stories();
+      threads();
+      publicByUrl();
+      roomByUrl();
+      sourceLinks();
+    };
   }
 
   /** The room-tier URL-dedup map key. A NUL separator (impossible in a UUID
@@ -791,6 +850,12 @@ export class InMemoryStoryStore implements StoryStore {
       if (thread !== undefined) out.set(storyId, thread);
     }
     return out;
+  }
+
+  async getThreadByIdForUpdate(threadId: string): Promise<ThreadShellRecord | null> {
+    // No lock to take: this adapter's fold cannot interleave between the two
+    // awaits the caller controls.
+    return await this.getThreadById(threadId);
   }
 
   async getStoryIdByThreadId(threadId: string): Promise<string | null> {
@@ -960,6 +1025,37 @@ export class InMemoryStoryStore implements StoryStore {
       .slice(0, limit);
   }
 
+  async getPublicByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>> {
+    const out = new Map<string, StoryRecord>();
+    for (const id of storyIds) {
+      const story = this.#stories.get(id);
+      // The item AND its room — see the Drizzle twin: a `public` story can sit
+      // in a PRIVATE room, where the ordinary read bar requires membership.
+      // `publicRoomIds` is injected because this store does not own rooms;
+      // absent ⇒ no room qualifies, which is fail-closed.
+      if (
+        story &&
+        story.visibility === 'public' &&
+        story.hiddenState === null &&
+        (await this.publicRoom(story.roomId))
+      ) {
+        out.set(id, story);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Is this room publicly readable?
+   *
+   * Assigned by the composition root, which is the only place that knows both
+   * domains — this store does not own rooms and must not construct their store.
+   * The DEFAULT is `false`, not `true`: an unwired binding must hide stories
+   * rather than publish them, and a divergence that only shows up in dev is the
+   * kind this whole guard exists to prevent.
+   */
+  publicRoom: (roomId: string) => Promise<boolean> = async () => false;
+
   async listBySubmitter(
     userId: string,
     after: { createdAt: string; storyId: string } | null,
@@ -1021,8 +1117,13 @@ export class InMemoryStoryStore implements StoryStore {
   }
 }
 
-export class InMemorySourceStore implements SourceStore {
+export class InMemorySourceStore implements SourceStore, InMemoryRollback {
   readonly #sources = new Map<string, SourceRecord>();
+
+  /** The unit of work's undo — see `InMemoryStoryStore.beginRollback`. */
+  beginRollback(): () => void {
+    return mapRollback(this.#sources);
+  }
   readonly #byDomain = new Map<string, string>();
   readonly #now: () => number;
   #counter = 0;
@@ -1113,8 +1214,13 @@ export class InMemorySourceStore implements SourceStore {
   }
 }
 
-export class InMemorySyndicationStore implements SyndicationStore {
+export class InMemorySyndicationStore implements SyndicationStore, InMemoryRollback {
   readonly #records = new Map<string, SyndicationRecord>();
+
+  /** The unit of work's undo — see `InMemoryStoryStore.beginRollback`. */
+  beginRollback(): () => void {
+    return mapRollback(this.#records);
+  }
   readonly #now: () => number;
 
   constructor(now: () => number = Date.now) {
@@ -1329,8 +1435,13 @@ export class InMemoryFreshnessStore implements FreshnessStore {
   }
 }
 
-export class InMemoryTakedownStore implements TakedownStore {
+export class InMemoryTakedownStore implements TakedownStore, InMemoryRollback {
   readonly #records = new Map<string, TakedownRecordRow>();
+
+  /** The unit of work's undo — see `InMemoryStoryStore.beginRollback`. */
+  beginRollback(): () => void {
+    return mapRollback(this.#records);
+  }
   readonly #now: () => number;
 
   constructor(now: () => number = Date.now) {
@@ -1370,10 +1481,21 @@ export class InMemoryTakedownStore implements TakedownStore {
   }
 }
 
-export class InMemoryReviewQueueStore implements ReviewQueueStore {
+export class InMemoryReviewQueueStore implements ReviewQueueStore, InMemoryRollback {
   readonly #records = new Map<string, ReviewItemRecord>();
   readonly #now: () => number;
   #counter = 0;
+
+  /** The unit of work's undo — a review resolution commits with the record of
+   *  the steward who made it. */
+  beginRollback(): () => void {
+    const records = mapRollback(this.#records);
+    const counter = this.#counter;
+    return () => {
+      records();
+      this.#counter = counter;
+    };
+  }
 
   constructor(now: () => number = Date.now) {
     this.#now = now;
@@ -1467,8 +1589,13 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export class InMemoryEmbeddingStore implements EmbeddingStore {
+export class InMemoryEmbeddingStore implements EmbeddingStore, InMemoryRollback {
   readonly #records = new Map<string, EmbeddingRecord>();
+
+  /** The unit of work's undo — see `InMemoryStoryStore.beginRollback`. */
+  beginRollback(): () => void {
+    return mapRollback(this.#records);
+  }
   readonly #now: () => number;
 
   constructor(now: () => number = Date.now) {

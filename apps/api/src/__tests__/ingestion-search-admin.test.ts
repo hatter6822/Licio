@@ -223,6 +223,51 @@ describe('takedown intake → action → removal (WS-F.1.4f)', () => {
     expect(activity.some((entry) => entry.event_type === 'takedown_action')).toBe(true);
   });
 
+  it('leaves NOTHING hidden when the audit append fails', async () => {
+    // The hide ran before the unit and on its own, so an append failure rolled
+    // the takedown back to `received` while the story stayed hidden and nothing
+    // recorded who hid it — a live enforcement with no decision behind it, on
+    // the one surface where "who removed this, and under what claim?" is the
+    // entire question.
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    const storyId = await submitBrief(cookie, {
+      title: 'Contested reproduction',
+      body: 'Body text a rights holder objects to.',
+    });
+    const intake = await app().request(
+      post('/v1/takedowns', {
+        target_type: 'story',
+        target_id: storyId,
+        requester_contact: 'rights@example.com',
+        legal_basis: 'copyright',
+        claim_detail: 'The story reproduces our copyrighted article in full.',
+      }),
+    );
+    const { takedown_id } = (await intake.json()) as { takedown_id: string };
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+
+    const realAppend = fixture.identity.audit.append.bind(fixture.identity.audit);
+    fixture.identity.audit.append = async (entry, createdAt) => {
+      if (entry.eventType === 'takedown_action') throw new Error('audit store unavailable');
+      return realAppend(entry, createdAt);
+    };
+    const action = await app().request(
+      post(
+        `/v1/ingestion/admin/takedowns/${takedown_id}/action`,
+        { action: 'actioned', resolution_note: 'Verified claim; story hidden.' },
+        steward.cookie,
+      ),
+    );
+    fixture.identity.audit.append = realAppend;
+    expect(action.status).toBeGreaterThanOrEqual(500);
+
+    // The story is STILL READABLE and the takedown still open: the enforcement
+    // and its record fell together, so a retry acts on the case as it stands.
+    expect((await app().request(`http://localhost/v1/stories/${storyId}`)).status).toBe(200);
+    expect((await fixture.ingestion.stories.getById(storyId))?.hiddenState).toBeNull();
+    expect((await fixture.ingestion.takedowns.getById(takedown_id))?.status).not.toBe('actioned');
+  });
+
   it('a SOURCE takedown cascades: the publisher’s existing stories leave reads + search', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity);
     // Two link stories on the SAME domain resolve to one auto-created source.

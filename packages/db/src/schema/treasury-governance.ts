@@ -23,10 +23,10 @@ import {
   numeric,
   primaryKey,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { knomosisSchema, roomLawPacks } from './governance.js';
 import {
   governanceProposals,
@@ -34,8 +34,6 @@ import {
   knomosisDeployments,
 } from './knomosis-gateway.js';
 import { users } from './user.js';
-
-const tz = (name: string) => timestamp(name, { withTimezone: true });
 
 // ---------------------------------------------------------------------------
 // Enums.
@@ -173,7 +171,7 @@ export const roomGovernanceProfiles = knomosisSchema.table('room_governance_prof
   pauseFlags: jsonb('pause_flags')
     .notNull()
     .default(sql`'{"deposits":false,"proposals":false,"executions":false}'::jsonb`),
-  updatedAt: tz('updated_at').notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 export type RoomGovernanceProfileRow = typeof roomGovernanceProfiles.$inferSelect;
 
@@ -195,7 +193,7 @@ export const governanceCharterVersions = knomosisSchema.table(
     createdByUserId: uuid('created_by_user_id').references(() => users.userId, {
       onDelete: 'set null',
     }),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [uniqueIndex('charter_version_room_version_uq').on(t.roomId, t.version)],
 );
@@ -220,7 +218,7 @@ export const roomTreasuries = knomosisSchema.table(
     acceptedAssets: jsonb('accepted_assets').notNull(), // string[]
     /** Latest RECONCILED balances (asset → minor-unit string); never live. */
     balanceSnapshot: jsonb('balance_snapshot'),
-    balancesReconciledAt: tz('balances_reconciled_at'),
+    balancesReconciledAt: instant('balances_reconciled_at'),
     /** depositLimitsSchema: per-user/per-room/per-deposit + period. */
     depositLimits: jsonb('deposit_limits').notNull(),
     freezeState: treasuryFreezeStateEnum('freeze_state').notNull().default('active'),
@@ -234,7 +232,7 @@ export const roomTreasuries = knomosisSchema.table(
     reconciliationState: treasuryReconciliationStateEnum('reconciliation_state')
       .notNull()
       .default('pending'),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('room_treasury_room_uq').on(t.roomId),
@@ -262,8 +260,8 @@ export const treasuryReservations = knomosisSchema.table(
     asset: text('asset').notNull(),
     amount: numeric('amount', { precision: 78, scale: 0 }).notNull(),
     state: treasuryReservationStateEnum('state').notNull().default('reserved'),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     // One reservation per proposal: a double-approval races into this index,
@@ -310,9 +308,9 @@ export const paymentIntents = knomosisSchema.table(
     /** Soft ref to the knomosis receipt once finalized. */
     receiptId: uuid('receipt_id'),
     idempotencyKey: uuid('idempotency_key').notNull(),
-    expiresAt: tz('expires_at').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    expiresAt: instant('expires_at').notNull(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     // Idempotency scope (user, room, key) — WS-M.3.1c.  The key row is written
@@ -366,7 +364,7 @@ export const treasuryGrants = knomosisSchema.table(
     reviewState: grantReviewStateEnum('review_state').notNull().default('pending'),
     payoutState: grantPayoutStateEnum('payout_state').notNull().default('not_started'),
     auditSummary: text('audit_summary'),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     // One grant per approving proposal (the proposal IS the authorization).
@@ -389,10 +387,10 @@ export const actionBudgets = knomosisSchema.table(
     /** `user:<uuid>` or `workflow:<name>` — the budget subject. */
     actorKey: text('actor_key').notNull(),
     availableUnits: bigint('available_units', { mode: 'number' }).notNull().default(0),
-    lastRefillAt: tz('last_refill_at').notNull().defaultNow(),
+    lastRefillAt: instant('last_refill_at').notNull().defaultNow(),
     /** Abuse-team imposed limits/freezes (documented policy, WS-M.3.2a). */
     rateLimitState: jsonb('rate_limit_state'),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [uniqueIndex('action_budget_actor_uq').on(t.roomId, t.actorKey)],
 );
@@ -418,8 +416,8 @@ export const delegationRecords = knomosisSchema.table(
     /** Deterministic scope key (`all` | `type:<x>`) backing the active-uniqueness. */
     scopeKey: text('scope_key').notNull(),
     state: delegationStateEnum('state').notNull().default('active'),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    revokedAt: tz('revoked_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    revokedAt: instant('revoked_at'),
   },
   (t) => [
     // One ACTIVE delegation per (room, delegator, scope): re-delegating the same
@@ -462,8 +460,8 @@ export const governanceChallenges = knomosisSchema.table(
     resolvedByUserId: uuid('resolved_by_user_id').references(() => users.userId, {
       onDelete: 'set null',
     }),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    resolvedAt: tz('resolved_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    resolvedAt: instant('resolved_at'),
   },
   (t) => [index('governance_challenge_proposal_idx').on(t.proposalId, t.state)],
 );
@@ -493,7 +491,7 @@ export const treasuryReconciliationSnapshots = knomosisSchema.table(
     /** Non-null REQUIRED when result = 'explained' (CHECK in the migration). */
     explanation: jsonb('explanation'),
     result: treasurySnapshotResultEnum('result').notNull(),
-    observedAt: tz('observed_at').notNull().defaultNow(),
+    observedAt: instant('observed_at').notNull().defaultNow(),
   },
   (t) => [index('treasury_snapshot_treasury_idx').on(t.treasuryId, t.observedAt)],
 );
@@ -514,7 +512,7 @@ export const roomReadinessAttestations = knomosisSchema.table(
       onDelete: 'set null',
     }),
     note: text('note').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.roomId, t.item] })],
 );

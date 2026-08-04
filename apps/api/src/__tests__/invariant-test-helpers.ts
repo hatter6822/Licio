@@ -5,6 +5,7 @@
 // and hook closures registered.
 import { randomUUID } from 'node:crypto';
 import { COMMONS_ROOM_ID, type SensitivityLabel } from '@licio/shared';
+import { InMemoryStoryStore } from '../ingestion/stores.js';
 import {
   createInMemoryInvariantServices,
   type InvariantPlatformServices,
@@ -39,6 +40,18 @@ export function freshInvariantServices(
   );
   setInvariantServices(invariants);
   registerInvariantConsumers(base.events, base.ingestion, invariants);
+  // The landscape hydrates through `getPublicByIds`, which requires the owning
+  // ROOM to be publicly readable — a `public` story can sit in a PRIVATE room,
+  // where the ordinary read bar needs membership. The in-memory store does not
+  // own rooms, so the binding arrives from the composition root in production
+  // and from here in a fixture; the default is fail-closed, which is why an
+  // unwired fixture surfaces as an empty landscape rather than a leak.
+  if (base.ingestion.stories instanceof InMemoryStoryStore) {
+    base.ingestion.stories.publicRoom = async (roomId: string) => {
+      const room = await base.forum.rooms.getById(roomId);
+      return room !== null && room.visibility === 'public' && room.storageMode === 'server';
+    };
+  }
   return { ...base, invariants };
 }
 

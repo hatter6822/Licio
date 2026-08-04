@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   bridgeAttempts,
-  type createDbClient,
+  type DbExecutor,
   invariantCalibrations,
   invariantPromotions,
   invariantRunMetadata,
@@ -19,6 +19,7 @@ import {
   mfciRiskStates,
 } from '@licio/db';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   BridgeAttemptRecord,
   BridgeAttemptStatus,
@@ -38,7 +39,9 @@ import type {
   RunMetadataStore,
 } from './stores.js';
 
-type Db = ReturnType<typeof createDbClient>;
+/** The client OR an open transaction — a store a unit of work binds to one
+ *  handle must accept the handle the unit is holding. */
+type Db = DbExecutor;
 
 const iso = (d: Date): string => d.toISOString();
 
@@ -355,6 +358,24 @@ export class DrizzleBridgeAttemptStore implements BridgeAttemptStore {
       createdAt: new Date(record.createdAt),
       resolvedAt: record.resolvedAt ? new Date(record.resolvedAt) : null,
     });
+  }
+
+  async insertIfNoneOpen(
+    record: BridgeAttemptRecord,
+  ): Promise<{ attempt: BridgeAttemptRecord; inserted: boolean }> {
+    // The pre-check and the write are two statements, so POSTGRES decides:
+    // `bridge_attempts_open_thread_uq` is partial on `status = 'requested'`, and
+    // the loser of a concurrent pair sees 23505 and reads the winner's row —
+    // the same answer it would have got a moment earlier.
+    try {
+      await this.insert(record);
+      return { attempt: record, inserted: true };
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const open = await this.openForThread(record.threadId);
+      if (open === null) throw error;
+      return { attempt: open, inserted: false };
+    }
   }
 
   async openForThread(threadId: string): Promise<BridgeAttemptRecord | null> {

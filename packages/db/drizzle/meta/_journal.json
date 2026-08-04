@@ -834,6 +834,83 @@
       "when": 1783728000043,
       "tag": "0119_story_hidden_state_superseded",
       "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1783728000044,
+      "tag": "0120_private_stub_capability_column",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1783728000045,
+      "tag": "0121_private_stub_directory_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1783728000046,
+      "tag": "0122_aggregation_window_active_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1783728000047,
+      "tag": "0123_private_stub_account_room_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1783728001047,
+      "tag": "0124_private_stub_room_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1783728002047,
+      "tag": "0125_bridge_attempt_open_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1783728003047,
+      "tag": "0126_moderation_audit_idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1783728004047,
+      "tag": "0127_audit_mfa_verify_failed",
+      "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1783728005047,
+      "tag": "0128_recovery_code_verification_session",
+      "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1783728006047,
+      "tag": "0129_timestamp_millisecond_precision",
+      "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1783728007047,
+      "tag": "0130_recovery_grant_lookup",
+      "breakpoints": true
     }
   ]
 }

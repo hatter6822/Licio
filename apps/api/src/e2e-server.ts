@@ -51,12 +51,14 @@ import {
 } from './governance/services.js';
 import { createInMemoryGovernanceStores } from './governance/stores.js';
 import { accountRef } from './identity/crypto.js';
+import { installDataRightsHooks } from './identity/data-rights-hooks.js';
 import { buildIdentityServicesFromEnv, setIdentityServices } from './identity/services.js';
 import {
   createInMemoryIngestionServices,
   registerIngestionConsumers,
   setIngestionServices,
 } from './ingestion/services.js';
+import { InMemoryStoryStore } from './ingestion/stores.js';
 import {
   createInMemoryInvariantServices,
   registerInvariantConsumers,
@@ -80,8 +82,15 @@ import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { notFoundHandler } from './middleware/error-handler.js';
+import { getModerationServices } from './moderation/services.js';
 import { RendezvousService, setRendezvousService } from './private-rendezvous/service.js';
 import { InMemoryRendezvousStore } from './private-rendezvous/stores.js';
+import {
+  getPrivateRoomStubService,
+  PrivateRoomStubService,
+  setPrivateRoomStubService,
+} from './private-rooms/service.js';
+import { InMemoryPrivateRoomStubStore } from './private-rooms/stores.js';
 import {
   createInMemoryRankingServices,
   refreshStoryFeatures,
@@ -179,6 +188,22 @@ forumServices.agentModerator = createRoomAgentModerator({
   }),
 });
 setForumServices(forumServices);
+
+// WS-H.7.4 — which rooms the Civic Map's landscape may hydrate a story from.
+//
+// `getPublicByIds` requires the owning ROOM to be publicly readable, because a
+// `public` story can sit in a PRIVATE room where the ordinary read bar needs
+// membership. The in-memory story store does not own rooms, so the binding
+// arrives from the composition root — and this is one, exactly as `index.ts` is.
+// Its default is fail-closed, so without this the landscape answers `null` for a
+// harness that does contain public stories, and the BFF specs cannot exercise
+// the surface they serve.
+if (ingestionServices.stories instanceof InMemoryStoryStore) {
+  ingestionServices.stories.publicRoom = async (roomId) => {
+    const room = await forumServices.rooms.getById(roomId);
+    return room !== null && room.visibility === 'public' && room.storageMode === 'server';
+  };
+}
 registerForumConsumers(eventServices, ingestionServices, forumServices);
 
 const invariantServices = createInMemoryInvariantServices(
@@ -240,6 +265,44 @@ forumServices.debateJudge = buildDebateJudgeRunner(forumServices.now);
 // (500s on the first announce).  Overriding here keeps the rendezvous truly in-memory, like every
 // other harness service, so the two-browser private-room E2E signals over a working endpoint.
 setRendezvousService(new RendezvousService(new InMemoryRendezvousStore()));
+
+// WS-S §21 — the SAME hazard for the directory-stub service: `getPrivateRoomStubService()`
+// binds the Drizzle store whenever `DATABASE_URL` is set, and this harness always sets a dummy
+// one, so the first directory GET or registration POST would 500 against a database that does
+// not exist.  Force the in-memory adapter, like every other harness service.
+const e2eStubStore = new InMemoryPrivateRoomStubStore();
+setPrivateRoomStubService(new PrivateRoomStubService(e2eStubStore));
+
+// …and the SAME moderation bindings `index.ts` installs, or the harness accepts a
+// listed-room report and can do nothing with it: `directory_delistable` would
+// always be false and a staff delist would reach the fail-closed default and
+// 404. The rollback participant matters too — §21.4's demotion runs inside the
+// moderation unit, and a unit that cannot restore this store would leave a
+// listing demoted when its audit throws.
+const e2eModeration = getModerationServices();
+e2eModeration.delistListedRoom = async (roomServerId: string) =>
+  (await getPrivateRoomStubService().delistListed(roomServerId)) !== null;
+e2eModeration.isPubliclyListedRoom = async (roomServerId: string) =>
+  await getPrivateRoomStubService().isPubliclyListed(roomServerId);
+e2eModeration.registerRollback(e2eStubStore);
+
+// …and EVERY §19.3 data-rights hook, through the same installer the production
+// boot calls (GDPR Art. 15 / Art. 17).
+//
+// The harness had none of them. An absent hook is a silent no-op — the archive
+// omits that store, the erasure leaves it behind — so the runtime that drives
+// the authenticated flows was exporting and deleting an account without its
+// attention data, its content, its client state, its moderation notices or (the
+// review finding that prompted this) its private-room directory record, and no
+// test could fail on any of it. One call, both roots, no drift; the parity gate
+// requires it.
+installDataRightsHooks(identityServices, {
+  events: eventServices,
+  ingestion: ingestionServices,
+  forum: forumServices,
+  moderation: e2eModeration,
+  log: logger,
+});
 
 // WS-R.12 — same dummy-DATABASE_URL hazard for the LCAP ingestion server: `getLcapIngestServer()`
 // would otherwise bind the Drizzle store and 500 on the service worker's background C0-sync `/pulse`.

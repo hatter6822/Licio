@@ -7,6 +7,7 @@
 // Every response is re-validated against the shared schema on egress.
 
 import {
+  AUDIT_NOTES_MAX,
   appealCreatedResponseSchema,
   appealEligibilityViewSchema,
   blockListResponseSchema,
@@ -25,11 +26,14 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { roomVisibleToUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { getIdentityServices } from '../identity/services.js';
+import { keysetCursorSchema } from '../lib/keyset-cursor.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { checkEligibility, submitAppeal } from '../moderation/appeals.js';
+import { writeAudit } from '../moderation/audit.js';
 import { listNotices } from '../moderation/notices.js';
 import {
   createBlock,
@@ -39,11 +43,40 @@ import {
   removeBlock,
   removeMute,
 } from '../moderation/relations.js';
-import { submitReport } from '../moderation/reports.js';
+import { findIdempotentReplay, submitReport } from '../moderation/reports.js';
 import { getModerationServices } from '../moderation/services.js';
 import { buildSupportContact } from '../moderation/support.js';
+import { getPrivateRoomStubService } from '../private-rooms/service.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
+
+/**
+ * The report-time listing snapshot, as ONE audit note that the console can
+ * always render.
+ *
+ * §21.3 lets a room's members edit the published name and description, so a
+ * case reviewed later can be about text nobody can still see — the capture is
+ * what keeps the report reviewable. Both fields are member-supplied and bounded
+ * generously on their own (120 and 2000 characters), which TOGETHER exceed the
+ * console's note bound: the audit row stored fine and then failed
+ * `caseReviewResponseSchema` on every read, so the room whose listing was
+ * reported became the one room staff could not review or delist.
+ *
+ * The name is kept whole — it is the thing most reports are about, and it
+ * cannot overrun on its own — and the description takes what is left, cut with
+ * an explicit marker so a reader can tell an excerpt from the whole text.
+ */
+function listingEvidenceNote(listing: {
+  display_name: string | null;
+  display_description: string | null;
+}): string {
+  const head = `Listing as reported — name: ${listing.display_name ?? '(none)'}; description: `;
+  const body = listing.display_description ?? '(none)';
+  const room = AUDIT_NOTES_MAX - head.length;
+  if (body.length <= room) return head + body;
+  const mark = '… [excerpt]';
+  return head + body.slice(0, Math.max(0, room - mark.length)) + mark;
+}
 
 /** Single-param path validator (`:id` → `{ [name]: uuid }`). */
 const uuidParam = <K extends string>(name: K) =>
@@ -95,6 +128,78 @@ async function withHandles<K extends string, H extends string, T extends Record<
   );
 }
 
+/**
+ * The §21 listing-evidence capture, for BOTH the fresh report and the retry.
+ *
+ * Extracted because moving the idempotent replay ahead of the mutable target
+ * checks quietly took the repair with it: a report that committed while its
+ * evidence append failed, whose response was then lost, is precisely the case
+ * this recovery exists for — and every retry began returning the stored
+ * response without ever looking at the case trail. The one path that could
+ * still add the missing row stopped taking it.
+ *
+ * Idempotent by the store's own key, so calling it on every retry is free after
+ * the first success.
+ */
+async function captureListingEvidence(
+  mod: ReturnType<typeof getModerationServices>,
+  input: {
+    enabled: boolean;
+    caseId: string;
+    targetId: string;
+    reportedAt: string;
+    listing: Awaited<ReturnType<ReturnType<typeof getPrivateRoomStubService>['listingSnapshot']>>;
+  },
+): Promise<void> {
+  if (!input.enabled || input.caseId === '') return;
+  const priorCapture =
+    (
+      await mod.audit.list({
+        caseId: input.caseId,
+        action: 'private_room_listing_reported',
+        limit: 1,
+      })
+    ).length > 0;
+  if (priorCapture) return;
+  // Edited SINCE the report means the original is gone: the stub row is edited
+  // in place and keeps no history, so the trail says that rather than
+  // presenting the new text as what was reported.
+  const editedSinceReport =
+    input.listing !== null && Date.parse(input.listing.updated_at) > Date.parse(input.reportedAt);
+  // BEST EFFORT: the report has already committed, and losing the capture must
+  // not un-take it.
+  await writeAudit(mod, {
+    // NO ACTOR. `/moderation-console/audit` resolves every actor to a handle for
+    // any queue reader, while reporter identity is gated to safety and integrity
+    // roles — so naming the reporter here would let a community or appeals
+    // steward read who filed the report straight out of the general feed. The
+    // row is EVIDENCE about the listing, not a record of somebody's action.
+    actorUserId: null,
+    actorRole: null,
+    action: 'private_room_listing_reported',
+    targetType: 'private_room_stub',
+    targetId: input.targetId,
+    // CASE-SCOPED, or the panel never shows it: `buildCaseReview` fetches the
+    // trail by `caseId` alone, and the general audit panel does not render notes.
+    caseId: input.caseId,
+    // AT MOST ONCE PER CASE, decided by the store: two distinct reports joining
+    // the same open case can both see the trail empty before either writes, and
+    // `moderation_audit_idempotency_uq` is what actually settles it.
+    idempotencyKey: `listing-evidence:${input.caseId}`,
+    reversible: false,
+    // BUDGETED against the console's own note bound: the published name and
+    // description are member-supplied and long enough TOGETHER to exceed it
+    // (120 + 2000), and an over-long note used to make every later read of the
+    // case fail its response schema.
+    notes:
+      input.listing === null
+        ? 'Listing UNAVAILABLE — the room was delisted or its record removed between this report being accepted and the capture running, so what was published is gone. The report stands; the text it was about cannot be recovered.'
+        : editedSinceReport
+          ? 'Listing UNAVAILABLE — the published name/description were edited after this report was filed and before this capture could be stored, and the record keeps no history. What is published now is NOT what was reported.'
+          : listingEvidenceNote(input.listing),
+  });
+}
+
 export function createTrustSafetyRoutes() {
   return (
     new Hono<AuthEnv>()
@@ -128,6 +233,48 @@ export function createTrustSafetyRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const request = c.req.valid('json');
           const mod = getModerationServices();
+          // A RETRY IS ANSWERED BEFORE ANY MUTABLE GATE.
+          //
+          // `submitReport` already replays a stored report ahead of its own
+          // mint-only gates, for exactly this reason — but the target-existence
+          // checks below run BEFORE it is ever called, and they read a world
+          // that moves. A listed-room report whose response was lost, retried
+          // after the owner delists or removes the record, met
+          // `target_not_found`: a P2P shell can never satisfy
+          // `roomVisibleToUser`, so an accepted report was reported as a
+          // failure, and the offline queue driving that retry has no way to
+          // tell a real rejection from this one. The stored row already
+          // settles what happened; nothing about the current world can change
+          // it.
+          const replay = await findIdempotentReplay(mod, auth.userId, request.local_operation_id);
+          if (replay) {
+            // …but a replay still RECONCILES the evidence it may be missing.
+            //
+            // The capture is best-effort by design (losing it must not un-take
+            // the report), so the case it failed for is exactly the case a retry
+            // should repair — and returning the stored response without looking
+            // at the case trail took away the only path that could. The capture
+            // is idempotent per case, so this costs one read once the row is
+            // there.
+            // THE STORED TARGET, never the retry's: a replay has skipped every
+            // target check, so the body it arrives with is unvalidated input.
+            // Keyed on the request instead, a retry reusing a committed
+            // operation id with a different `target_id` could attach one room's
+            // listing to another room's case — or to an account case, which has
+            // no listing at all.
+            const replayTarget = replay.targetType === 'room' ? replay.targetId : null;
+            await captureListingEvidence(mod, {
+              enabled: replayTarget !== null,
+              caseId: replay.caseId,
+              targetId: replayTarget ?? '',
+              reportedAt: replay.response.created_at,
+              listing:
+                replayTarget === null
+                  ? null
+                  : await getPrivateRoomStubService().listingSnapshot(replayTarget),
+            });
+            return c.json(reportCreatedResponseSchema.parse(replay.response), 200);
+          }
           // Resolve target existence (against a tombstone where applicable).  For
           // content, the resolver also yields the AUTHORITATIVE kind (story/
           // thread/contribution); we forward it so the case/report/event record
@@ -138,6 +285,11 @@ export function createTrustSafetyRoutes() {
           // The user the case is about — the account itself, or the content's
           // author — stored on the case for the `target_user` queue filter.
           let resolvedSubjectUserId: string | null = null;
+          // Whether the reported target is a publicly LISTED private room — the one
+          // case that carries §21 listing evidence. Hoisted out of the validation
+          // branch because the evidence decision below needs it even when the
+          // listing itself has since vanished.
+          let reportedListedRoom = false;
           if (request.target_type === 'account') {
             const target = await getIdentityServices().store.getUser(request.target_id);
             if (!target) return c.json(deny('target_not_found', 'Target not found'), 404);
@@ -165,9 +317,51 @@ export function createTrustSafetyRoutes() {
           } else if (request.target_type === 'room') {
             // A room report must reference a real room — otherwise a user could
             // open a moderation case against an arbitrary/nonexistent UUID.
-            const room = await getForumServices().rooms.getById(request.target_id);
-            if (!room) return c.json(deny('target_not_found', 'Target not found'), 404);
+            //
+            // "Real" means a SERVER room — OR a P2P room whose directory record
+            // is publicly LISTED.
+            //
+            // Rejecting every p2p shell closed an oracle and closed the only
+            // intake for the remedy §11.4 actually specifies: staff delisting an
+            // abusive public name. A listed room publishes that name to anyone
+            // browsing, so a report about it can reach moderation without
+            // telling anyone anything they could not already read — and the
+            // report is about the LISTING, which is the only thing staff can
+            // act on.
+            //
+            // `unlisted` stays rejected, identically to an unknown id: its
+            // existence is what the blind token protects, and it publishes no
+            // name to be abusive with.
+            // The PUBLIC LISTING is checked first, and a forum row is required
+            // only for an ordinary server room.
+            //
+            // In the default no-`DATABASE_URL` runtime the in-memory stub store
+            // creates no `rooms` shell, so requiring one first made every listed
+            // P2P room 404 before its listing was ever consulted — reporting
+            // worked against Postgres and not in the runtime everyone develops
+            // in. The listing is the thing being reported, so it decides.
+            const forum = getForumServices();
+            reportedListedRoom = await getPrivateRoomStubService().isPubliclyListed(
+              request.target_id,
+            );
+            if (!reportedListedRoom) {
+              const room = await forum.rooms.getById(request.target_id);
+              if (!room || !(await roomVisibleToUser(forum, room, auth.userId))) {
+                return c.json(deny('target_not_found', 'Target not found'), 404);
+              }
+            }
           }
+          // CAPTURE the listing that was reported, before it can be edited.
+          //
+          // §21.3 lets the room's own members change the published name and
+          // description, so a case reviewed later can be about text nobody can
+          // still see — and the console would be asking staff to delist a room
+          // without showing what was complained about. The audit trail is where
+          // "what was true when this happened" belongs, it is already rendered
+          // in the case panel, and it is tamper-evident.
+          const listing = reportedListedRoom
+            ? await getPrivateRoomStubService().listingSnapshot(request.target_id)
+            : null;
           const outcome = await submitReport(
             mod,
             auth.userId,
@@ -175,6 +369,40 @@ export function createTrustSafetyRoutes() {
             resolvedContentKind,
             resolvedSubjectUserId,
           );
+          // ONCE PER CASE, keyed on the CASE'S OWN TRAIL — and only while the
+          // text can still be claimed as the reported one.
+          //
+          // The rule is "one capture per case": §21.3 lets members edit the
+          // published text, so a second capture would attach words the reporter
+          // never saw to the same case, labelled as what they reported. Keying
+          // that on THIS REQUEST's `idempotent` flag enforced something else,
+          // though: `writeAudit` is the catching variant (it returns null on
+          // failure), so a chain-append failure lost the evidence silently and
+          // every retry then skipped the capture as "already done" — the one
+          // case with no snapshot was the one that could never get one. The
+          // trail is the authority on whether a capture exists, so it decides.
+          //
+          // ASKED FOR EVERY REPORT, not only for a retry. A second, DISTINCT
+          // report about the same room joins the SAME open case (that is what a
+          // case is), and keying the question on this request's `idempotent`
+          // flag forced the answer to "no capture yet" — so the second reporter
+          // appended a second row, carrying text that may have been edited since
+          // the first report and labelled as what was reported. The invariant is
+          // one capture per CASE, so only the case can answer it.
+          //
+          // But a retry reads the listing as it is NOW, and this route cannot
+          // reconstruct what it was: the stub row is edited in place and keeps
+          // no history. So the row's `updated_at` decides whether the claim is
+          // true — unchanged since the report means what is here IS what was
+          // reported; edited since means the original is gone, and the trail
+          // says exactly that rather than presenting the new text as evidence.
+          await captureListingEvidence(mod, {
+            enabled: outcome.ok && reportedListedRoom,
+            caseId: outcome.ok ? outcome.caseId : '',
+            targetId: request.target_id,
+            reportedAt: outcome.ok ? outcome.response.created_at : '',
+            listing,
+          });
           if (!outcome.ok) {
             // WS-N.2.3e: key-like material blocked with the standing warning
             // (the matched value was discarded, never stored or echoed).
@@ -206,7 +434,7 @@ export function createTrustSafetyRoutes() {
       .get(
         '/blocks',
         authMiddleware(),
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        zValidator('query', z.object({ cursor: keysetCursorSchema.optional() })),
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
@@ -263,7 +491,7 @@ export function createTrustSafetyRoutes() {
       .get(
         '/mutes',
         authMiddleware(),
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        zValidator('query', z.object({ cursor: keysetCursorSchema.optional() })),
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
@@ -379,7 +607,7 @@ export function createTrustSafetyRoutes() {
       .get(
         '/moderation/notices',
         authMiddleware(),
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        zValidator('query', z.object({ cursor: keysetCursorSchema.optional() })),
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);

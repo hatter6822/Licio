@@ -7,7 +7,8 @@
 // subscription JSON is exactly what the browser's PushManager minted (endpoint
 // + keys), nothing more.  `user_id` cascades with account deletion so a purged
 // account leaves no reachable push endpoint behind (WS-D.2.4).
-import { index, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { index, jsonb, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { users } from './user.js';
 
 export const pushSubscriptions = pgTable(
@@ -18,7 +19,7 @@ export const pushSubscriptions = pgTable(
     /** SHA-256 of the owning session id — the remove-authorization handle. */
     sessionRef: text('session_ref').notNull(),
     userId: uuid('user_id').references(() => users.userId, { onDelete: 'cascade' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [index('push_subscriptions_user_idx').on(t.userId)],
 );
@@ -28,7 +29,7 @@ export const pushPreferences = pgTable('push_preferences', {
    *  anonymous browser) — unlinkable at rest. */
   stateRef: text('state_ref').primaryKey(),
   preferences: jsonb('preferences').$type<Record<string, unknown>>().notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+  updatedAt: instant('updated_at').notNull(),
 });
 
 export type PushSubscriptionRow = typeof pushSubscriptions.$inferSelect;

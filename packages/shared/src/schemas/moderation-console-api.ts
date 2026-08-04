@@ -244,6 +244,19 @@ export type SideBySideView = z.infer<typeof sideBySideViewSchema>;
 // Audit log viewer + transparency export (WS-J.2.5a/b).
 // ---------------------------------------------------------------------------
 
+/**
+ * The most an audit note may carry to a console reader.
+ *
+ * Named because it is a WRITE-side obligation that only shows up on the read:
+ * a row whose note exceeds this is stored happily and then fails
+ * `caseReviewResponseSchema.parse` on every subsequent read of that case, so
+ * one over-long note takes the whole case panel down — including for the room
+ * whose report produced it. The audit append clamps to this value, so the
+ * invariant "a stored row can always be rendered" holds by construction rather
+ * than by every writer remembering the limit.
+ */
+export const AUDIT_NOTES_MAX = 2000;
+
 export const auditRecordViewSchema = z
   .object({
     audit_id: uuidSchema,
@@ -262,7 +275,7 @@ export const auditRecordViewSchema = z
     report_ids: z.array(uuidSchema),
     co_approver_handle: z.string().min(1).nullable(),
     /** Internal note — visible to authorized roles only. */
-    notes: z.string().max(2000).nullable(),
+    notes: z.string().max(AUDIT_NOTES_MAX).nullable(),
   })
   .strict();
 export type AuditRecordView = z.infer<typeof auditRecordViewSchema>;
@@ -298,6 +311,34 @@ export const caseReviewResponseSchema = z
     side_by_side: sideBySideViewSchema.nullable(),
     /** The console actions the requesting reviewer's role may take here. */
     available_actions: z.array(consoleActionSchema),
+    /**
+     * WS-S §11.4 — this case targets a PUBLICLY LISTED Private P2P room, and the
+     * requesting reviewer is platform staff who could delist it.
+     *
+     * Not a `ConsoleAction`, deliberately. The console actions are doctrine
+     * STEWARD capabilities transcribed from `STEWARD_ROLES.md`, and §11.4 grants
+     * this power to platform staff as such rather than to a safety or integrity
+     * lane — adding it to that enum would put a capability in the doctrine
+     * vocabulary that the doctrine document does not grant.
+     *
+     * It exists because reports about a listed room reach this queue, and a
+     * queue whose only available remedy lives on another surface is intake
+     * disconnected from enforcement. False for every other case, including one a
+     * reviewer without platform staff could not act on.
+     */
+    directory_delistable: z.boolean(),
+    /**
+     * MFCI-2 (WS-J.2.6e) — enforcement on this case is HELD pending integrity
+     * review of a coordinated-report incident, for this reviewer.
+     *
+     * The hold is a property of the case AND the actor: an integrity analyst IS
+     * the review and is never held. While it stands, `available_actions` carries
+     * the workflow verbs only (escalate/clear), exactly as `applyAction` allows
+     * — the flag exists so the console can SAY why the enforcement verbs are
+     * absent. A palette that silently shrinks is a reviewer wondering whether
+     * they have lost a role.
+     */
+    enforcement_held: z.boolean(),
   })
   .strict();
 export type CaseReviewResponse = z.infer<typeof caseReviewResponseSchema>;

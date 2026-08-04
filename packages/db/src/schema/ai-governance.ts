@@ -22,10 +22,10 @@ import {
   pgTable,
   primaryKey,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 
 /** The model registry: one row per (name, version); versions are preserved. */
 export const aiModelCards = pgTable(
@@ -38,8 +38,8 @@ export const aiModelCards = pgTable(
     status: text('status').notNull().default('registered'),
     /** Deprecation metadata (present iff status = deprecated). */
     deprecation: jsonb('deprecation').$type<Record<string, unknown>>(),
-    registeredAt: timestamp('registered_at', { withTimezone: true }).notNull().defaultNow(),
-    deployedAt: timestamp('deployed_at', { withTimezone: true }),
+    registeredAt: instant('registered_at').notNull().defaultNow(),
+    deployedAt: instant('deployed_at'),
   },
   (t) => [
     primaryKey({ columns: [t.name, t.version] }),
@@ -59,14 +59,14 @@ export const aiRiskAssessments = pgTable('ai_risk_assessments', {
   assessmentId: text('assessment_id').primaryKey(),
   useCaseId: text('use_case_id').notNull(),
   assessment: jsonb('assessment').$type<Record<string, unknown>>().notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: instant('created_at').notNull().defaultNow(),
 });
 
 /** Version-controlled AI inventory snapshots (WS-K.1.1c) — append-only. */
 export const aiInventoryVersions = pgTable('ai_inventory_versions', {
   version: integer('version').primaryKey(),
   inventory: jsonb('inventory').$type<Record<string, unknown>>().notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 
 /** Immutable, append-only data lineage (WS-K.1.1e). */
@@ -80,7 +80,7 @@ export const aiDataLineage = pgTable(
     usable: boolean('usable').notNull(),
     privacyReviewRef: text('privacy_review_ref'),
     predecessorDatasetId: text('predecessor_dataset_id'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.datasetId, t.version] }),
@@ -107,7 +107,7 @@ export const aiOutputRecords = pgTable(
     useCaseId: text('use_case_id').notNull(),
     /** Set once a downstream human correction exists (WS-K.1.3c/1.4c). */
     correctionRef: text('correction_ref'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [
     index('ai_output_records_model_idx').on(t.modelName, t.modelVersion),
@@ -126,7 +126,7 @@ export const aiEvaluations = pgTable(
     modelVersion: text('model_version').notNull(),
     decision: text('decision').notNull(),
     decisionData: jsonb('decision_data').$type<Record<string, unknown>>().notNull(),
-    evaluatedAt: timestamp('evaluated_at', { withTimezone: true }).notNull(),
+    evaluatedAt: instant('evaluated_at').notNull(),
   },
   (t) => [
     index('ai_evaluations_model_idx').on(t.modelName, t.modelVersion, t.evaluatedAt),
@@ -147,7 +147,7 @@ export const aiCorrections = pgTable(
     /** `steward:<id>` — never a raw identity. */
     stewardRef: text('steward_ref').notNull(),
     category: text('category'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [
     index('ai_corrections_use_case_idx').on(t.useCaseId, t.createdAt),
@@ -171,7 +171,7 @@ export const aiBlockedInvocations = pgTable(
     caller: text('caller').notNull(),
     contextRef: text('context_ref'),
     reason: text('reason').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [
     index('ai_blocked_invocations_prohibition_idx').on(t.prohibition, t.createdAt),
@@ -189,7 +189,7 @@ export const aiSummaryDrafts = pgTable(
     draft: jsonb('draft').$type<Record<string, unknown>>().notNull(),
     outputId: text('output_id').notNull(),
     qualityPassed: boolean('quality_passed').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [index('ai_summary_drafts_thread_idx').on(t.threadId)],
 );
@@ -203,7 +203,7 @@ export const aiSummaryReports = pgTable(
     summaryId: text('summary_id').notNull(),
     reason: text('reason').notNull(),
     correctionText: text('correction_text'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [index('ai_summary_reports_summary_idx').on(t.summaryId, t.createdAt)],
 );
@@ -222,7 +222,7 @@ export const aiTranslations = pgTable(
     outputId: text('output_id').notNull(),
     modelName: text('model_name').notNull(),
     modelVersion: text('model_version').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [
     index('ai_translations_source_idx').on(t.sourceRef, t.targetLang),
@@ -237,7 +237,7 @@ export const aiTranslationReports = pgTable(
     reportId: text('report_id').primaryKey(),
     translationId: text('translation_id').notNull(),
     reason: text('reason').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [index('ai_translation_reports_translation_idx').on(t.translationId)],
 );
@@ -251,7 +251,7 @@ export const aiGovernanceSummaries = pgTable(
     summary: jsonb('summary').$type<Record<string, unknown>>().notNull(),
     outputId: text('output_id').notNull(),
     stewardEdited: boolean('steward_edited').notNull().default(false),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [index('ai_governance_summaries_proposal_idx').on(t.proposalRef)],
 );
@@ -267,7 +267,7 @@ export const aiGovernanceAdvisories = pgTable(
     kind: text('kind').notNull(),
     advisory: jsonb('advisory').$type<Record<string, unknown>>().notNull(),
     outputId: text('output_id').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [index('ai_governance_advisories_proposal_idx').on(t.proposalRef)],
 );
@@ -282,9 +282,9 @@ export const aiGovernanceAdvisories = pgTable(
  */
 export const aiSweepCursors = pgTable('ai_sweep_cursors', {
   sweepName: text('sweep_name').primaryKey(),
-  cursorCreatedAt: timestamp('cursor_created_at', { withTimezone: true }),
+  cursorCreatedAt: instant('cursor_created_at'),
   cursorRef: text('cursor_ref'),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 
 /** Runtime AI monitoring metric time series (WS-K.1.2f). */
@@ -296,7 +296,7 @@ export const aiRuntimeMetrics = pgTable(
     modelVersion: text('model_version').notNull(),
     metric: text('metric').notNull(),
     value: doublePrecision('value').notNull(),
-    recordedAt: timestamp('recorded_at', { withTimezone: true }).notNull(),
+    recordedAt: instant('recorded_at').notNull(),
   },
   (t) => [
     index('ai_runtime_metrics_model_idx').on(t.modelName, t.modelVersion, t.metric, t.recordedAt),
@@ -315,7 +315,7 @@ export const aiRuntimeAlerts = pgTable(
     threshold: doublePrecision('threshold').notNull(),
     /** A recommended (never auto-executed) rollback target version. */
     rollbackRecommendation: text('rollback_recommendation'),
-    raisedAt: timestamp('raised_at', { withTimezone: true }).notNull(),
+    raisedAt: instant('raised_at').notNull(),
   },
   (t) => [index('ai_runtime_alerts_model_idx').on(t.modelName, t.modelVersion, t.raisedAt)],
 );
@@ -333,8 +333,8 @@ export const aiReviewQueue = pgTable(
     status: text('status').notNull().default('pending'),
     resolution: text('resolution'),
     resolvedBy: text('resolved_by'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
-    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    createdAt: instant('created_at').notNull(),
+    resolvedAt: instant('resolved_at'),
   },
   (t) => [
     index('ai_review_queue_status_idx').on(t.status, t.createdAt),
@@ -375,7 +375,7 @@ export const aiModerationDecisions = pgTable(
     clamped: boolean('clamped').notNull(),
     /** The AIOutputRecord id of the invocation (provenance); null if none. */
     outputId: text('output_id'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    createdAt: instant('created_at').notNull(),
   },
   (t) => [index('ai_moderation_decisions_room_idx').on(t.roomId, t.createdAt)],
 );

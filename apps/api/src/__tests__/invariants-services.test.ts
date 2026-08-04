@@ -780,7 +780,37 @@ describe('supporting invariant services (WS-H.7)', () => {
     expect(tropical.length).toBeGreaterThan(0);
     const braid = await fixture.invariants.braid.computeBatch([], window);
     expect(braid.length).toBe(1);
+    // The Reeb landscape is built from stories with ACTIVITY IN THE WINDOW, and
+    // these are seeded without any — so it reports INSUFFICIENT_COVERAGE rather
+    // than a `peak_count: 0` measurement. That distinction is the point: a
+    // level-0 node would otherwise become a basin out of topic adjacency alone.
     const reeb = await fixture.invariants.reeb.computeBatch([], window);
-    expect(reeb[0]?.score_vector['peak_count']).toBeGreaterThanOrEqual(0);
+    expect(reeb[0]?.reason_codes).toContain('INSUFFICIENT_COVERAGE');
+    expect(reeb[0]?.score_vector).toEqual({});
+
+    // …and with a real hourly count, the landscape appears.
+    const active = await seedStory(fixture, { topicIds: ['water'] });
+    // The landscape reads the hour BEFORE `now`, keyed off the service's own
+    // clock rather than the passed window — the same instant `assembleEngagementLandscape`
+    // computes.
+    const hourMs = 3_600_000;
+    const landscapeWindow = new Date(
+      Math.floor(Date.now() / hourMs) * hourMs - hourMs,
+    ).toISOString();
+    await fixture.events.windowStore.upsert({
+      itemId: active.storyId,
+      windowStart: landscapeWindow,
+      windowSize: '1h',
+      uniqueActiveUsers: 3,
+      sourceOpens: 1,
+      contextOpens: 0,
+      returnVisits: 0,
+      contributionCounts: {},
+      antiSignalCounts: {},
+      eventCount: 5,
+      computedAt: new Date(Date.now()).toISOString(),
+    });
+    const measured = await fixture.invariants.reeb.computeBatch([], window);
+    expect(measured[0]?.score_vector['peak_count']).toBeGreaterThanOrEqual(1);
   });
 });

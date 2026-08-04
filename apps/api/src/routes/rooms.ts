@@ -192,6 +192,10 @@ export function createRoomsRoutes() {
               for (const roomId of joinedSet) {
                 const room = await forum.rooms.getById(roomId);
                 if (!room) continue;
+                // WS-S §8 — never list a P2P shell, on any path. A p2p room has
+                // no server subscription row so this should be unreachable; the
+                // guard keeps the rule uniform rather than resting on that.
+                if (room.storageMode !== 'server') continue;
                 if (query.type !== undefined && room.roomType !== query.type) continue;
                 if (query.q !== undefined && !roomMatchesQuery(room, query.q)) continue;
                 rows.push(room);
@@ -205,6 +209,10 @@ export function createRoomsRoutes() {
               const candidates = await forum.rooms.list({
                 ...(query.type !== undefined ? { roomType: query.type } : {}),
                 ...(query.q !== undefined ? { query: query.q } : {}),
+                // P2P shells are invisible on every room surface, so they are
+                // excluded in the query rather than dropped from the result —
+                // otherwise they spend a bound meant for rooms a caller can see.
+                storageMode: 'server',
                 limit: 1_000,
               });
               for (const room of candidates) {
@@ -234,7 +242,14 @@ export function createRoomsRoutes() {
             let after: { createdAt: string; id: string } | null = null;
             if (query.cursor !== undefined) {
               const lastRoom = await forum.rooms.getById(query.cursor);
-              if (lastRoom) after = { createdAt: lastRoom.createdAt, id: lastRoom.roomId };
+              // A cursor that RESOLVES starts the page after it; one that does
+              // not starts at the beginning — so accepting any room id here
+              // lets a caller probe existence by watching where the page
+              // begins. Only a server room may position this keyset, which
+              // makes a P2P id indistinguishable from a nonexistent one.
+              if (lastRoom && lastRoom.storageMode === 'server') {
+                after = { createdAt: lastRoom.createdAt, id: lastRoom.roomId };
+              }
             }
             const visible: RoomRecord[] = [];
             let exhausted = false;
@@ -244,6 +259,11 @@ export function createRoomsRoutes() {
               const batch = await forum.rooms.list({
                 ...(query.type !== undefined ? { roomType: query.type } : {}),
                 ...(query.q !== undefined ? { query: query.q } : {}),
+                // See the candidates read above: without this a run of P2P
+                // shells fills all 25 batches, `visible` stays empty, and the
+                // handler reports `nextCursor: null` over server rooms that
+                // exist beyond it.
+                storageMode: 'server',
                 after,
                 limit: BATCH,
               });
@@ -297,78 +317,91 @@ export function createRoomsRoutes() {
           }
           // WS-Q.3.3a — apply the documented visibility/join/posting defaults.
           const axes = resolveRoomCreateAxes(request);
-          const created = await forum.rooms.insert({
-            roomId: randomUUID(),
-            name: request.name,
-            slug,
-            description: request.description,
-            roomType: request.room_type,
-            visibility: axes.visibility,
-            joinModel: axes.joinModel,
-            postingPolicy: axes.postingPolicy,
-            // WS-S.1.3 — the server room-create endpoint ALWAYS mints a
-            // server-storage room; a Private P2P room is created client-side
-            // and never through this path (the §8 non-storage contract).
-            storageMode: 'server',
-            createdBy: auth.userId,
-            governanceMode: 'ordinary', // ALWAYS the default (§17.4)
-            charterSummary: null,
-            typeMetadata: roomTypeMetadata(request),
-            latestActivityAt: null,
+          // THE WHOLE ROOM IS ONE UNIT.
+          //
+          // The room, the creator's steward grant, their membership and the
+          // record of it are one act. They used to be four moments: the insert
+          // and `addSteward` committed on their own, and only the subscription
+          // and the audit shared a transaction — so an append failure answered
+          // 500 having left a durable room with a steward, no member, and no
+          // trail, and the retry the operator would obviously try then answered
+          // `duplicate_room` against the wreck of the first attempt.
+          const created = await forum.transact(async (tx) => {
+            const room = await tx.rooms.insert({
+              roomId: randomUUID(),
+              name: request.name,
+              slug,
+              description: request.description,
+              roomType: request.room_type,
+              visibility: axes.visibility,
+              joinModel: axes.joinModel,
+              postingPolicy: axes.postingPolicy,
+              // WS-S.1.3 — the server room-create endpoint ALWAYS mints a
+              // server-storage room; a Private P2P room is created client-side
+              // and never through this path (the §8 non-storage contract).
+              storageMode: 'server',
+              createdBy: auth.userId,
+              governanceMode: 'ordinary', // ALWAYS the default (§17.4)
+              charterSummary: null,
+              typeMetadata: roomTypeMetadata(request),
+              latestActivityAt: null,
+            });
+            // The name collision is a REFUSAL, not a failure: it leaves the unit
+            // by returning rather than throwing, so nothing rolls back that was
+            // never written.
+            if (!room.ok) return null;
+            // Creator becomes community steward (WS-G.2.3c acceptance).
+            await tx.rooms.addSteward({
+              roomId: room.room.roomId,
+              userId: auth.userId,
+              role: 'community_steward',
+              assignedAt: new Date(forum.now()).toISOString(),
+            });
+            await tx.rooms.upsertSubscription({
+              roomId: room.room.roomId,
+              userId: auth.userId,
+              status: 'active',
+              // WS-G.2.2 — a new room's creator starts Undecided (they can pick
+              // a posting lens later via the room's lens control).
+              lensId: null,
+              requestId: randomUUID(),
+              requestedAt: new Date(forum.now()).toISOString(),
+              joinedAt: new Date(forum.now()).toISOString(),
+            });
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'room_steward_change',
+              targetRef: room.room.roomId,
+              context: { setting: 'community_steward', new_value: 'creator_auto_assigned' },
+            });
+            return room.room;
           });
-          if (!created.ok) {
+          if (created === null) {
             return c.json(
               deny('duplicate_room', 'A room with this name already exists for this type'),
               409,
             );
           }
-          // Creator becomes community steward (WS-G.2.3c acceptance).
-          await forum.rooms.addSteward({
-            roomId: created.room.roomId,
-            userId: auth.userId,
-            role: 'community_steward',
-            assignedAt: new Date(forum.now()).toISOString(),
-          });
           // WS-U §16.6: bootstrap the elected-room-steward seat to the creator
           // (the first member); a Knomosis election re-seats it after the term.
-          // BEST-EFFORT + isolated: the seat lives in the separate `knomosis`
-          // context (no shared transaction), so a governance-store hiccup must
-          // never fail or roll back the room creation. `bootstrapSeat` is
-          // idempotent, so a later interaction (or a manual re-bootstrap) heals a
-          // missed seat.
+          // BEST-EFFORT + isolated, and AFTER the commit: the seat lives in the
+          // separate `knomosis` context (no shared transaction), so a governance
+          // hiccup must never fail or roll back the room — and running it inside
+          // the unit would have made an un-rollback-able write part of something
+          // that can roll back. `bootstrapSeat` is idempotent, so a later
+          // interaction (or a manual re-bootstrap) heals a missed seat.
           try {
-            await getGovernanceService().bootstrapSeat(created.room.roomId, auth.userId);
+            await getGovernanceService().bootstrapSeat(created.roomId, auth.userId);
           } catch (error) {
             forum.log('governance.seat_bootstrap_failed', {
-              room_id: created.room.roomId,
+              room_id: created.roomId,
               error: String(error),
             });
           }
-          const identity = getIdentityServices();
-          await identity.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'room_steward_change',
-            targetRef: created.room.roomId,
-            context: { setting: 'community_steward', new_value: 'creator_auto_assigned' },
-          });
-          // Immediate ACTIVE self-subscription — creators are members of
-          // their rooms regardless of visibility (a restricted room's
-          // creator must never be a pending applicant in their own room).
-          await forum.rooms.upsertSubscription({
-            roomId: created.room.roomId,
-            userId: auth.userId,
-            status: 'active',
-            // WS-G.2.2 — a new room's creator starts Undecided (they can pick a
-            // posting lens later via the room's lens control).
-            lensId: null,
-            requestId: randomUUID(),
-            requestedAt: new Date(forum.now()).toISOString(),
-            joinedAt: new Date(forum.now()).toISOString(),
-          });
           forum.metrics.increment('rooms.created');
           return c.json(
             roomSummarySchema.parse(
-              await toRoomSummary(forum, created.room, 0, auth.userId, auth.roles),
+              await toRoomSummary(forum, created, 0, auth.userId, auth.roles),
             ),
             201,
           );
@@ -384,6 +417,15 @@ export function createRoomsRoutes() {
         const { userId, roles } = await softUserContext(c.req.header('cookie'), identity);
         const room = await forum.rooms.getById(roomId);
         if (!room) return c.json(notFound, 404);
+        // WS-S §8/§21 — a Private P2P shell is NOT a server room surface, and
+        // this read resolves an arbitrary id directly. Without the guard,
+        // anyone holding or probing an `unlisted` `room_server_id` could
+        // confirm the room exists and read its shell here, which defeats the
+        // identical-404 contract `GET /v1/private-rooms/:id/bootstrap` enforces
+        // one route away. The same `notFound` the unknown-id case returns, so
+        // this adds no oracle of its own. (The list paths reach the same
+        // conclusion through `roomVisibleToUser`; this path never calls it.)
+        if (room.storageMode !== 'server') return c.json(notFound, 404);
         // WS-Q.3.1a — TIER ONE (existence) is universal: the room's shell
         // (name, description, visibility, stewards, join affordance) is visible
         // to ALL, so a private room is discoverable and joinable. TIER TWO
@@ -646,7 +688,6 @@ export function createRoomsRoutes() {
           const { roomId, requestId } = c.req.valid('param');
           const { decision } = c.req.valid('json');
           const forum = getForumServices();
-          const identity = getIdentityServices();
           // WS-S §8: no server-side join surface for a p2p stub (see the list route).
           const decideRoomRecord = await forum.rooms.getById(roomId);
           if (decideRoomRecord?.storageMode !== 'server') {
@@ -659,20 +700,25 @@ export function createRoomsRoutes() {
           if (!request || request.roomId !== roomId || request.status !== 'pending') {
             return c.json(notFound, 404);
           }
-          if (decision === 'approve') {
-            await forum.rooms.upsertSubscription({
-              ...request,
-              status: 'active',
-              joinedAt: new Date(forum.now()).toISOString(),
+          // The membership decision and its record commit together: an approval
+          // with no trail is a member nobody admitted, and a rejection with no
+          // trail is a removal nobody made.
+          await forum.transact(async (tx) => {
+            if (decision === 'approve') {
+              await tx.rooms.upsertSubscription({
+                ...request,
+                status: 'active',
+                joinedAt: new Date(forum.now()).toISOString(),
+              });
+            } else {
+              await tx.rooms.deleteSubscription(request.roomId, request.userId);
+            }
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'room_steward_change',
+              targetRef: roomId,
+              context: { setting: 'join_request', new_value: decision },
             });
-          } else {
-            await forum.rooms.deleteSubscription(request.roomId, request.userId);
-          }
-          await identity.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'room_steward_change',
-            targetRef: roomId,
-            context: { setting: 'join_request', new_value: decision },
           });
           forum.metrics.increment(`rooms.join_${decision}`);
           return c.json({ request_id: requestId, decision });

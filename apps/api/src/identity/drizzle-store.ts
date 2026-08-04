@@ -40,7 +40,7 @@ import {
   type SecurityActivityEntry,
   type StewardRoleId,
 } from '@licio/shared';
-import { and, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import {
   type AuditEntryInput,
   type AuditStore,
@@ -335,6 +335,22 @@ export class DrizzleIdentityStore implements IdentityStore {
               ),
             );
         }
+        // A FACTOR RESET INVALIDATES EVERY PENDING RESUME.
+        //
+        // `verification_session_hash` IS the MFA grant a spent code conferred.
+        // Nothing bound it to an enrollment GENERATION: a session verified by a
+        // code from the OLD factor went on deriving its standing after that
+        // factor was replaced. Replacing the code set is exactly the moment
+        // every outstanding grant stops being about the factor that issued it.
+        await tx
+          .update(mfaRecoveryCodes)
+          .set({ verificationSessionHash: null })
+          .where(
+            and(
+              eq(mfaRecoveryCodes.userId, userId),
+              isNotNull(mfaRecoveryCodes.verificationSessionHash),
+            ),
+          );
         const known = new Set(active);
         const fresh = [...next].filter((hex) => !known.has(hex));
         if (fresh.length > 0) {
@@ -350,6 +366,51 @@ export class DrizzleIdentityStore implements IdentityStore {
       }
       return this.#assembleAuth(row, active);
     });
+  }
+
+  async consumeRecoveryCode(
+    userId: string,
+    codeHash: string,
+    verificationSessionHash: string,
+  ): Promise<{ remaining: number } | null> {
+    if (!isUuid(userId)) return null;
+    return this.#db.transaction(async (tx) => {
+      // The PRECONDITION IS THE WHERE CLAUSE: `used_at IS NULL` is what makes
+      // this single-use. Two requests presenting the same code race here and
+      // exactly one updates a row; the loser sees zero rows and is told the
+      // code is not valid, which it no longer is.
+      const spent = await tx
+        .update(mfaRecoveryCodes)
+        // The GRANT rides the same statement as the consumption, which is what
+        // makes them one fact: a session is MFA-verified if a spent row names
+        // it, so there is no second write to fail and nothing to reconcile.
+        .set({ usedAt: new Date(), verificationSessionHash })
+        .where(
+          and(
+            eq(mfaRecoveryCodes.userId, userId),
+            eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
+            isNull(mfaRecoveryCodes.usedAt),
+          ),
+        )
+        .returning({ codeHash: mfaRecoveryCodes.codeHash });
+      if (spent.length === 0) return null;
+      // Stamped, never deleted — single-use forensics (WS-D.1.5a), same as the
+      // `setAuth` projection above.
+      const remaining = await this.#activeRecoveryCodes(tx, userId);
+      return { remaining: remaining.length };
+    });
+  }
+
+  async sessionHasRecoveryGrant(sessionHash: string): Promise<boolean> {
+    // THE GRANT, read back.  One indexed lookup, and only for a session whose
+    // own record does not already carry the flag — which is the failure case
+    // (the Redis write did not land) and nothing else.
+    const rows = await this.#db
+      .select({ id: mfaRecoveryCodes.id })
+      .from(mfaRecoveryCodes)
+      .where(eq(mfaRecoveryCodes.verificationSessionHash, sessionHash))
+      .limit(1);
+    return rows.length > 0;
   }
 
   /** Active (unconsumed) recovery-code hashes, as hex strings. */
@@ -565,6 +626,14 @@ export class DrizzleIdentityStore implements IdentityStore {
           lte(deletionRequests.purgeAt, new Date(now)),
         ),
       );
+    return rows.map(rowToDeletion);
+  }
+
+  async pendingDeletions(): Promise<StoredDeletionRequest[]> {
+    const rows = await this.#db
+      .select()
+      .from(deletionRequests)
+      .where(eq(deletionRequests.state, 'grace_period'));
     return rows.map(rowToDeletion);
   }
 

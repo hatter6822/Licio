@@ -13,6 +13,7 @@
 // publication (`trackBackground`) so extraction latency never blocks the
 // 201 response (WS-F.1.4c ≤ 500 ms budget); crash-safety is the durable
 // log + checkpoint replay, not the in-flight promise.
+
 import type {
   ContentNormalizedEvent,
   ContentSubmittedEvent,
@@ -20,6 +21,10 @@ import type {
 } from '@licio/shared';
 import { InMemorySlidingWindowStore } from '../events/ingest-limiter.js';
 import type { EventPipelineServices } from '../events/services.js';
+import type { AuditStore } from '../identity/audit.js';
+import { getIdentityServices } from '../identity/services.js';
+import type { InMemoryRollback } from '../lib/in-memory-rollback.js';
+import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { type ClaimExtractor, HeuristicClaimExtractor } from './claims.js';
 import {
   DEFAULT_INGESTION_CONFIG,
@@ -79,10 +84,27 @@ export class IngestionMetrics implements LifecycleMetricsSink {
   }
 }
 
+/** The stores one INGESTION unit writes through, bound to a single handle. */
+export interface IngestionTx {
+  readonly sources: SourceStore;
+  readonly syndications: SyndicationStore;
+  readonly takedowns: TakedownStore;
+  readonly stories: StoryStore;
+  readonly embeddings: EmbeddingStore;
+  /** The steward review queue — a resolution is a durable decision and carries
+   *  the identity-trail row naming who made it. */
+  readonly reviewQueue: ReviewQueueStore;
+  /** The WS-D identity trail, on that handle: an operator action on a source,
+   *  syndication or takedown is accountable or it did not happen. */
+  readonly identityAudit: AuditStore;
+}
+
 export interface IngestionServices {
   stories: StoryStore;
   sources: SourceStore;
   syndications: SyndicationStore;
+  /** Commit an operator action WITH the record of it. */
+  transact<T>(work: (tx: IngestionTx) => Promise<T>): Promise<T>;
   claims: ClaimStore;
   signatures: SignatureStore;
   lifecycleAudits: LifecycleAuditStore;
@@ -327,8 +349,49 @@ export function createInMemoryIngestionServices(
   // built after ingestion). Default: a no-op.
   let topicRevalidator: (storyId: string, text: string) => Promise<void> = async () => {};
 
+  // The unit reads its stores from `services` at RUN time, so the production
+  // boot's swap to the Drizzle adapters is honoured rather than captured.
+  const unit = new InMemoryUnitOfWork<IngestionTx>(
+    {
+      get sources(): SourceStore {
+        return services.sources;
+      },
+      get syndications(): SyndicationStore {
+        return services.syndications;
+      },
+      get takedowns(): TakedownStore {
+        return services.takedowns;
+      },
+      get stories(): StoryStore {
+        return services.stories;
+      },
+      get embeddings(): EmbeddingStore {
+        return services.embeddings;
+      },
+      get reviewQueue(): ReviewQueueStore {
+        return services.reviewQueue;
+      },
+      get identityAudit(): AuditStore {
+        return getIdentityServices().audit;
+      },
+    },
+    () =>
+      [
+        services.sources,
+        services.syndications,
+        services.takedowns,
+        services.stories,
+        services.embeddings,
+        services.reviewQueue,
+        getIdentityServices().audit,
+      ].filter(
+        (store): store is typeof store & InMemoryRollback =>
+          typeof (store as { beginRollback?: unknown }).beginRollback === 'function',
+      ),
+  );
   const services: IngestionServices = {
     stories,
+    transact: (work) => unit.run(work),
     sources: new InMemorySourceStore(now),
     syndications: new InMemorySyndicationStore(now),
     claims,

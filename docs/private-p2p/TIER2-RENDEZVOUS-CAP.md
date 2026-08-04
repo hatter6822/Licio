@@ -17,11 +17,21 @@
 > Tier-1 sample-poll. The sections below that describe a *server* verifier
 > (§6.5–6.7, §6.6 slot-keying) are **superseded** by this peer-side model.
 
-**Status:** design proposal (not implemented). Closure target for the
-"Rendezvous presence flood" row of the WS-S §38 risk register
-(`SECURITY-REVIEW.md` §10). Supersedes the "infeasible" framing: a real
+**Status: SHIPPED, peer-side.** This began as a design proposal and the header
+below still reads that way in places; what is actually in the tree is the
+anonymous-credential layer (`packages/private-p2p/src/crypto/bbs/` — BBS suite,
+signature, blind issuance, per-verifier pseudonym) plus the cap itself
+(`packages/private-p2p/src/rendezvous-cap/` — credential, announcement,
+poll-filter, session, coordinator), wired into the room manager through
+`apps/web/src/private-p2p/rendezvous-cap-manager.ts` and enforced by the polling
+member. The **server-side** half was shipped and then removed
+(PRIV-API-RENDEZVOUS-1, banner above); enrolment is best-effort and any failure
+leaves the rendezvous on Tier-1.
+
+Closure target for the "Rendezvous presence flood" row of the WS-S §38 risk
+register (`SECURITY-REVIEW.md` §10). Supersedes the "infeasible" framing: a real
 per-announcer cap *is* achievable without breaking server-blindness, at the
-cost of an anonymous-credential layer specified here.
+cost of the anonymous-credential layer specified here.
 
 **Relationship to Tier-1.** Tier-1 (the implemented sample-poll,
 `apps/api/src/private-rendezvous`) *dilutes* a flood probabilistically; it does
@@ -50,18 +60,31 @@ soundness, unlinkability, blindness) — the strongest available short of fixtur
 official vectors when the drafts publish them. A `check:p2p-bbs-wrapper` gate (mirroring the
 MLS one) should fence deep `@noble/curves/bls12-381` imports to `bbs/`.
 
-**The SERVER-SIDE cap is also SHIPPED + ENFORCED** (`apps/api/src/private-rendezvous`,
-7 tests). The announce gains an optional `cap` proof; a Tier-2 `peer_blind_id` IS the
+**The SERVER-SIDE cap was shipped, then REMOVED — this paragraph is the record of
+what it did, not a description of the tree.** (PRIV-API-RENDEZVOUS-1, the banner at
+the top of this file: server-side verification requires the server to hold the
+per-`(room, epoch)` issuer key, a stable bucket-spanning linking handle that breaks
+the §15.3 cross-bucket unlinkability. `cap-verifier.ts` no longer exists, the announce
+wire carries no `cap`, and `apps/api` does not depend on `@licio/private-p2p` at all.
+The cap now rides sealed INSIDE the announcement and is enforced peer-side by
+`filterVerifiedPresence`, below.) Kept because the soundness additions it describes —
+the server-clock bucket validation and the first-seen issuer-key pin — are the
+properties any future re-introduction would have to re-establish, and because
+deleting it would erase why the peer-side design is shaped the way it is.
+
+As built, the announce gained an optional `cap` proof; a Tier-2 `peer_blind_id` IS the
 base64url pseudonym, so **no new persisted column / migration was needed** (the §8.2
 allowlist is unchanged — the proof is verified then discarded; the pseudonym reuses the
-existing slot key). The service verifies the ZK proof via an injected verifier port
+existing slot key). The service verified the ZK proof via an injected verifier port
 (`cap-verifier.ts`, importing only the blindness-preserving `rendezvous-cap` subpath),
-keys the slot by the pseudonym (dedup = the cap), and FAILS OPEN to Tier-1 on an absent
+keyed the slot by the pseudonym (dedup = the cap), and FAILED OPEN to Tier-1 on an absent
 proof / unverifiable record / no verifier. SOUNDNESS additions over the bare design: the
-time bucket is validated against the server clock (a flooder cannot mint a fresh bucket ⇒
-fresh pseudonym ⇒ fresh slot), and the per-`(room, epoch)` issuer key is first-seen-pinned
-(verify runs against the pin, so a self-issued credential fails; a wrong pin only degrades
-to Tier-1, §8 net-zero).
+time bucket was validated against the server clock (a flooder cannot mint a fresh bucket ⇒
+fresh pseudonym ⇒ fresh slot), and the per-`(room, epoch)` issuer key was first-seen-pinned
+(verify ran against the pin, so a self-issued credential fails; a wrong pin only degraded
+to Tier-1, §8 net-zero). Both properties carry over to the peer-side enforcement: the
+polling member bounds records to its OWN clock's bucket and verifies under the room issuer
+key it already holds — which is exactly why moving the check peer-side cost no soundness.
 
 **The CLIENT-SIDE cap is also SHIPPED** (`src/rendezvous-cap`, 15 tests). Two pieces:
 - **Client-side verified-dedup** (`poll-filter.ts`, §6.8) — `filterVerifiedPresence(...)`: a

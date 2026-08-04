@@ -909,12 +909,17 @@ export class DrizzleRoomStore implements RoomStore {
   async list(opts: {
     roomType?: RoomRecord['roomType'];
     visibilities?: readonly RoomRecord['visibility'][];
+    storageMode?: RoomRecord['storageMode'];
     query?: string;
     after?: CreatedAtCursor | null;
     limit: number;
   }): Promise<RoomRecord[]> {
     const conditions = [];
     if (opts.roomType !== undefined) conditions.push(eq(roomsTable.roomType, opts.roomType));
+    // In the QUERY, so hidden P2P shells never consume the caller's bounded scan.
+    if (opts.storageMode !== undefined) {
+      conditions.push(eq(roomsTable.storageMode, opts.storageMode));
+    }
     if (opts.visibilities) {
       conditions.push(inArray(roomsTable.visibility, [...opts.visibilities]));
     }

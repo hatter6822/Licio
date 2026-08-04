@@ -15,6 +15,7 @@ import {
   revokeOthersForUser,
   rotateSession,
   SESSION_POLICY,
+  type StoredSession,
   sessionSummaries,
   touchSession,
   validateSession,
@@ -85,7 +86,9 @@ describe('validateSession', () => {
     const t0 = 1_700_000_000_000;
     const created = await createSession(store, input(), t0);
     // Force an absolute cap in the past while leaving sliding expiry far ahead.
-    await store.put(created.tokenHash, {
+    const live = (await store.get(created.tokenHash)) as StoredSession;
+    await store.putIfVersion(created.tokenHash, live.version, {
+      ...live,
       record: { ...created.record, absolute_expires_at: new Date(t0 - 1).toISOString() },
       expiresAt: t0 + SESSION_POLICY.defaultTtlMs,
     });
@@ -129,6 +132,79 @@ describe('rotateSession', () => {
   it('returns null when the old token does not exist', async () => {
     const store = new InMemorySessionStore();
     expect(await rotateSession(store, 'nope', Date.now())).toBeNull();
+  });
+
+  it('gives ONE successor when two callers rotate the same token at once', async () => {
+    // A rotation is a HAND-OFF, so exactly one caller may perform it. Read-then-
+    // delete was not that: both callers passed the read, both wrote a successor,
+    // and one session became two — a privilege transition that multiplies
+    // instead of moving, and the shape a stolen cookie replayed alongside the
+    // genuine request used to keep a session of its own.
+    const store = new InMemorySessionStore();
+    const t0 = 1_700_000_000_000;
+    const a = await createSession(store, input(), t0);
+
+    const [first, second] = await Promise.all([
+      rotateSession(store, a.token, t0),
+      rotateSession(store, a.token, t0),
+    ]);
+
+    expect([first, second].filter((r) => r !== null)).toHaveLength(1);
+    expect(await validateSession(store, a.token, t0)).toBeNull(); // the old one is gone
+    // …and the user is left holding exactly one session, not two.
+    expect(await store.listForUser(USER)).toHaveLength(1);
+  });
+});
+
+describe('putIfVersion', () => {
+  it('does not RESURRECT a session deleted since the caller read it', async () => {
+    // Every session mutation is a read-then-write (`get`, edit, `put`), and a
+    // plain `put` does not care whether the row survived the gap — so a
+    // concurrent rotation or sign-out was UNDONE by the write, restoring the
+    // deleted session with whatever privilege the edit was adding.
+    const store = new InMemorySessionStore();
+    const t0 = 1_700_000_000_000;
+    const a = await createSession(store, input(), t0);
+
+    const read = (await store.get(a.tokenHash)) as StoredSession; // the caller's read…
+    await store.delete(a.tokenHash); // …a rotation or revocation lands…
+
+    // …and the write finds nothing to update.
+    expect(await store.putIfVersion(a.tokenHash, read.version, read)).toBe(false);
+    expect(await store.get(a.tokenHash)).toBeNull();
+    expect(await store.listForUser(USER)).toHaveLength(0);
+  });
+
+  it('does not REVERT a change made since the caller read it', async () => {
+    // The half existence alone cannot give. These writes replace the WHOLE
+    // record, so a throttled activity slide holding a snapshot read just before
+    // an MFA grant put `mfa_verified: false` back over it — and the verification
+    // then rotated the reverted record and reported success, spending the
+    // recovery code without any session becoming verified.
+    const store = new InMemorySessionStore();
+    const t0 = 1_700_000_000_000;
+    const a = await createSession(store, input(), t0);
+
+    const stale = (await store.get(a.tokenHash)) as StoredSession; // the slide's read…
+    expect(await markMfaVerified(store, a.tokenHash, t0)).toBe(true); // …the grant lands…
+
+    // …and the slide cannot write its pre-grant copy back.
+    expect(await store.putIfVersion(a.tokenHash, stale.version, stale)).toBe(false);
+    expect((await store.get(a.tokenHash))?.record.mfa_verified).toBe(true);
+  });
+
+  it('writes, bumps the version, and reports it, while the session is unchanged', async () => {
+    const store = new InMemorySessionStore();
+    const t0 = 1_700_000_000_000;
+    const a = await createSession(store, input(), t0);
+    const read = (await store.get(a.tokenHash)) as StoredSession;
+    const updated = { ...read, record: { ...read.record, mfa_verified: true } };
+    expect(await store.putIfVersion(a.tokenHash, read.version, updated)).toBe(true);
+    const after = await store.get(a.tokenHash);
+    expect(after?.record.mfa_verified).toBe(true);
+    // …and the same expected version cannot be used twice.
+    expect(after?.version).toBe(read.version + 1);
+    expect(await store.putIfVersion(a.tokenHash, read.version, updated)).toBe(false);
   });
 });
 

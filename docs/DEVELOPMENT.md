@@ -343,8 +343,10 @@ pnpm exec lefthook install
 > credentials CI uses, then exports `DATABASE_URL`/`REDIS_URL` for the
 > session. It is idempotent and remote-only (`CLAUDE_CODE_REMOTE=true`), so it
 > never starts clusters underneath a developer's own machine. Without it the
-> `DATABASE_URL`/`REDIS_URL`-gated suites self-skip — roughly 260 tests — and a
-> green local run proves strictly less than CI does.
+> `DATABASE_URL`/`REDIS_URL`-gated suites self-skip — roughly 325 tests, which
+> takes the run's skip count from ~340 down to ~12 (the residual being the
+> `RUN_PERF` benchmarks) — and a green local run proves strictly less than CI
+> does.
 
 The repository ships a [`docker-compose.yml`](../docker-compose.yml) that
 provisions both services with development credentials:
@@ -358,7 +360,7 @@ This starts:
 | Service | Image | Port | Credentials / config |
 |---------|-------|------|----------------------|
 | **postgres** | `pgvector/pgvector:pg16` | `5432` | user `licio`, password `licio_dev`, db `licio_dev` |
-| **redis** | `redis:7-alpine` | `6379` | append-only on, 256 MB cap, `allkeys-lru` eviction |
+| **redis** | `redis:7.0-alpine` (digest-pinned) | `6379` | append-only on, 256 MB cap, `allkeys-lru` eviction |
 
 Both have health checks and `restart: unless-stopped`. Named volumes
 (`postgres-data`, `redis-data`) persist their data across restarts.
@@ -799,6 +801,16 @@ navigation hint); every console endpoint still authorizes server-side (role
 capability + verified step-up MFA), so an account without MFA sees the
 console's "access required" card until TOTP is enrolled and verified.
 
+The console's **Integrity** tab (`/moderation?tab=integrity`) carries two views
+of the same question. The **Civic Map** (WS-H.7.4, SPEC §12.4) draws the Reeb
+attention landscape as a merge tree — clusters, branch points, and the fragile
+joins where two clusters are held together by very little — and a fragile join
+opens a bridge request on the joined thread. Below it sits the
+coordinated-report incident queue. On a `pnpm dev` box the traffic simulator
+(§10) supplies the topic-adjacent stories the landscape needs; a quiet window
+honestly renders "No stories in this window to map yet" rather than an empty
+diagram.
+
 There is also a plain demo author, `licio_demo`, that owns most of the seeded
 content. Use the three email accounts above when you need to test role-gated
 behavior. The `.test` top-level domain is reserved by RFC 6761, so these
@@ -958,14 +970,30 @@ production code, not hand-authored fixtures:
 
 The offline (LCAP) and private-P2P (E2EE) surfaces are **client-local by
 construction** — their content lives in the browser's own IndexedDB, never on the
-server — so the server seed produces **no** P2P room (by design, not a gap; a
-`storage_mode='p2p'` row is structurally rejected by the §8.3 database trigger).
+server — so the server seed produces **no** P2P room (by design, not a gap:
+rooms of that class are minted by a client, and the §8.3 database trigger rejects
+any `stories`/`threads`/`room_stewards`/`room_subscriptions`/`lenses` row that
+references one, so there is nothing for a server-side seed to create).
+
+The one server record a P2P room may have is the optional §8.2 **directory
+stub** — a bootstrap pointer carrying cryptographic commitments, a rendezvous
+policy, and (for a `listed` room only) public display metadata, served by
+`/v1/private-rooms/*` (Section 21 of `docs/PRIVATE_SPEC.md`). It holds no
+content, no private CID, no operation head, and no member list; a `detached`
+room stores no stub at all. P2P rooms never appear in `GET /v1/rooms` — a
+`listed` room is browsable through `GET /v1/private-rooms/directory` (display
+metadata only; never the signed stub, which carries the bootstrap capability)
+and resolvable through `GET /v1/private-rooms/:id/bootstrap`, while an
+`unlisted` one resolves only with its invite-derived blind token and appears in
+no listing at all. Browsing is not a way in: every P2P room is invite-only, so
+the directory tells you a room exists and nothing more.
+
 Exercise them directly in the running app:
 
 | Route | Surface | What to try |
 |-------|---------|-------------|
-| `/private` | Private (E2EE) rooms list + `CreatePrivateRoomWizard` | Create a room (5 blocking acknowledgments); it is stored only on this device (`licio_private_p2p` IndexedDB). |
-| `/private/$roomId` | `PrivateRoomView` | Post a story/comment; open `InvitePanel`/`JoinPanel` (copy-paste the recipient key → sealed invite → join request → **grant** → `completeJoin`); verify a device's safety number (`SafetyNumberPanel`); "Connect & sync with members" drives the live WebRTC carrier. |
+| `/private` | Private (E2EE) rooms list + `CreatePrivateRoomWizard` + `PrivateRoomDirectory` | Create a room (5 blocking acknowledgments); it is stored only on this device (`licio_private_p2p` IndexedDB). The directory below the list shows only rooms created as `listed` — the default is `unlisted`, so a room you just made will not be there. |
+| `/private/$roomId` | `PrivateRoomView` | Post a story/comment; open `InvitePanel`/`JoinPanel` (copy-paste the recipient key → sealed invite → join request → **grant** → `completeJoin`); verify a device's safety number (`SafetyNumberPanel`); read and manage what Licio publishes about the room (`DirectoryRecordPanel` — refresh the manifest commitment, delist, remove the record; absent for a `detached` room); "Connect & sync with members" drives the live WebRTC carrier. |
 | `/private/migrate` | `MigrationWizard` | Re-author a server room's content into a destination private room (freeze → re-author → purge). |
 | `/profile/offline` | `OfflineBundlePanel` + `P2pSyncPanel` | Export/import a `.licio-bundle` (incl. a private room's ciphertext via the cross-plane bridge); run a live LCAP P2P sync over WebRTC. |
 | `/profile/mode` | `OperationalModeSelector` + `TransportStatus` + `CourierRunner` | Switch operational mode (minimal/standard/courier/relay/stealth/emergency); drive the native courier (off by default; Stealth/Emergency force it off; the radio-metadata disclosure must be acknowledged first). |
@@ -1193,27 +1221,40 @@ If the certs are absent, both servers silently fall back to HTTP.
 > re-export your shell env, Section 7.7), or cross-origin calls and CORS
 > will mismatch.
 
-### Content-Security-Policy in dev (why the `<meta>` is stripped)
+### Content-Security-Policy in dev (why the `<meta>` never appears)
 
-`apps/web/index.html` carries the full production CSP as a
-`<meta http-equiv="Content-Security-Policy">` — it is the **sole** CSP source
-in the WS-R.15.4a native-courier WebView, which serves the built assets from
-`https://localhost` with no server headers. That strict policy is correct for
-the production build and the preview server (whose header sends the same CSP),
-but it **breaks the Vite dev server**: HMR injects CSS as **inline `<style>`
-elements** and uses inline/eval script + a dev WebSocket, all of which
-`style-src 'self'` / `require-trusted-types-for 'script'` / `connect-src 'self'`
-block — leaving the app **completely unstyled** and flooding the console with
-CSP / Trusted-Types violations.
+The policy is defined **once**, in `packages/shared/src/security/csp.ts`, and
+reaches the browser three ways: the `apps/api` response header, the
+`vite preview` header, and a `<meta http-equiv="Content-Security-Policy">` in
+the built HTML. The meta form is redundant on the web and **load-bearing in
+the WS-R.15.4a native-courier WebView**, which serves the built assets from
+`https://localhost` with no server headers at all.
 
-The `devStripCspMeta` Vite plugin (`apps/web/vite.config.ts`, `apply: 'serve'`)
-therefore **strips the CSP `<meta>` from the served `index.html` in the dev
-server only**. `vite build` (and so the courier `dist` + the preview) keeps the
-meta untouched, and the real CSP is always enforced in production by the API's
-`security-headers.ts` header. So if you ever see a blank/unstyled dev page with
-`Refused to apply inline style … 'style-src 'self''` errors, check that this
-plugin is present and active. (HMR's WebSocket is same-origin, covered by
-`connect-src 'self'` in the production policy.)
+`apps/web/index.html` therefore carries **no hand-written policy**. The
+`licio:inject-csp-meta` Vite plugin (`apps/web/vite.config.ts`) is
+`apply: 'build'`, so it injects the meta into `vite build` output only — the
+courier `dist` and the preview server get the real policy, and the **dev
+server never receives a tag at all**. That is deliberate: the strict policy is
+incompatible with the Vite dev server, because HMR injects CSS as inline
+`<style>` elements and uses inline/eval script plus a dev WebSocket, all
+blocked by `style-src 'self'` / `require-trusted-types-for 'script'` /
+`connect-src 'self'`. A dev server serving that policy renders the app
+**completely unstyled** and floods the console with CSP / Trusted-Types
+violations. (The plugin replaced an earlier dev-only *strip* plugin, which had
+to undo a policy the source file should never have carried.)
+
+Two consequences worth knowing:
+
+- If you ever see a blank/unstyled dev page with `Refused to apply inline
+  style … 'style-src 'self''` errors, something has reintroduced a policy into
+  the served `index.html` — check for a hand-written `<meta>` in the source
+  file, which is a `check:csp-parity` failure.
+- `pnpm check:csp-parity` asserts on the **built artifact**, not the source: it
+  fails if `apps/web/dist/index.html` lacks exactly the injected shared policy,
+  and separately if `apps/web/index.html` reintroduces one (two `<meta>`
+  policies INTERSECT per CSP L3 §8.1). It is the one delivery point the
+  compiler cannot check — a plugin that silently stops firing would ship a
+  courier with no policy at all while everything else stayed green.
 
 ---
 
@@ -1226,12 +1267,13 @@ source of truth; this is the working subset.
 |---------|--------------|
 | `pnpm dev` | Web (5173) + API (3001) together |
 | `pnpm build` | Full ordered build: `shared` → `db`/`invariants` → `ranking`/`governance`/`lcap` → `web`/`api` |
-| `pnpm typecheck` | `tsc -b` strict-mode across every workspace |
-| `pnpm lint` | Biome check (format + lint) |
+| `pnpm typecheck` | Strict-mode `tsc -b` across every workspace, plus `scripts` and the tools project. **Incremental** — a stale `.tsbuildinfo` can report `0 errors` for code that does not compile |
+| `pnpm typecheck:ci` | The AUTHORITATIVE typecheck: `tsc -b --force`, cache-independent. What `pre-push` and the CI Type-Check job run — use this before declaring a branch green |
+| `pnpm lint` | Biome check (format + lint), whole repo — the `pre-commit` hook only lints STAGED files, so an unused import created elsewhere slips past it until `pre-push` |
 | `pnpm lint:fix` | Biome auto-fix |
 | `pnpm test` | Vitest across all projects (with the 80% coverage gate when `--coverage`) |
 | `pnpm test:e2e` | Playwright E2E (needs a build + browsers — Section 13) |
-| `pnpm db:generate` | Generate a new SQL migration from schema changes |
+| `pnpm db:generate` | The stock drizzle-kit generator — **do not use it here**; migrations are hand-authored (Section 15) |
 | `pnpm db:migrate` | Apply pending migrations |
 | `pnpm db:push` | Push schema directly (development only) |
 | `pnpm clean` | Remove build artifacts, coverage, test output, caches |
@@ -1245,20 +1287,74 @@ job, not in `Security Audit`, and it runs on every `pnpm build`). Running them
 locally first
 saves a CI round-trip:
 
+These are **all 31 gates CI invokes by name**, grouped by what each defends,
+plus `check:sw` — which is not a bare CI step because the web `build` script
+chains it, so it runs on every build instead. Per-gate detail lives in each
+`scripts/check-*.ts` header; `CLAUDE.md` says which to run for which kind of
+change.
+
+**No applause, no raw egress, no pay-to-rank**
+
+| Command | Fails if… |
+|---------|-----------|
+| `pnpm check:no-applause` | like/vote/karma/reaction affordances appear in components |
+| `pnpm check:no-raw-egress` | raw attention traces or forbidden network primitives appear in the signals layer (all planes) |
+| `pnpm check:neutrality` | any of the fourteen ranking-neutrality tests fail (the ten SPEC §30.6 pay-to-rank properties + four WS-Q/WS-T containment tests) |
+| `pnpm check:governance-kyc` | a governance-participation POST does not enforce the KYC eligibility floor |
+
+**Private rooms leave nothing on the server (the seven §23.10 WS-S gates)**
+
+| Command | Fails if… |
+|---------|-----------|
+| `pnpm check:no-p2p-server-content` | the umbrella: any server path could store or derive private-room content |
+| `pnpm check:no-private-cid-egress` | a private CID could reach a public routing/logging path |
+| `pnpm check:private-rendezvous-schema` | the rendezvous tables/schemas carry anything beyond opaque blind ids + ciphertext |
+| `pnpm check:private-bundle-transparency` | the private-mode bundle loses its transparency-log binding |
+| `pnpm check:p2p-endpoint-rejections` | a server endpoint stops rejecting `storage_mode = 'p2p'` rooms |
+| `pnpm check:p2p-ranking-exclusion` | a retriever stops excluding P2P rooms |
+| `pnpm check:p2p-search-exclusion` | server search stops excluding P2P content |
+
+**Verified code only, everywhere it runs**
+
 | Command | Fails if… |
 |---------|-----------|
 | `pnpm lint:security` | `innerHTML`/`outerHTML`/`document.write`/`eval`/`new Function`/`javascript:` URLs appear |
-| `pnpm check:no-applause` | like/vote/karma/reaction affordances appear in components |
-| `pnpm check:no-raw-egress` | raw attention traces or forbidden network primitives appear in the signals layer |
-| `pnpm check:deps` | a workspace exceeds its dependency budget (web < 15, api < 20) |
-| `pnpm check:workspace-deps` | a package imports across a forbidden workspace boundary |
-| `pnpm check:policy` | a doctrine/policy document fails validation |
-| `pnpm check:neutrality` | any of the ten ranking-neutrality (pay-to-rank) tests fail |
+| `pnpm check:csp-parity` | `apps/web/index.html` carries a hand-written CSP, or (post-build) `dist/index.html` lacks exactly the injected shared policy — the courier WebView's only policy (Section 11) |
+| `pnpm check:sw` | the **built** service worker contains remote `importScripts`/`eval`. Not a bare CI step: the web `build` script chains it, so it runs on every `pnpm build` |
 | `pnpm check:update-channel` | the WS-S.10 verify-before-activate wiring is lost, or (post-build) `apps/web/dist` lacks a valid signed update manifest — run `pnpm gen:update-manifest` after the web build (Section 17.2) |
-| `pnpm check:knomosis-pins` | a non-`local` Knomosis deployment in `apps/api/src/knomosis/pin.config.json` carries sentinel (all-zero) finality values (Section 17.8) |
 | `pnpm lint:lockfile` | the lockfile's registry/integrity hashes don't validate |
-| `pnpm check:sw` | the **built** service worker contains remote `importScripts`/`eval` (run after `pnpm build`) |
-| `pnpm run sbom` | (generates the CycloneDX SBOM + license-compatibility check; `run` is required — pnpm 11's builtin `sbom` command shadows the bare script name) |
+| `pnpm audit:advisories` | a dependency carries a high/critical advisory (npm BULK endpoint; classic `pnpm audit` is retired) |
+| `pnpm run sbom` | the CycloneDX SBOM or its license-compatibility check fails (`run` is required — pnpm 11's builtin `sbom` command shadows the bare script name) |
+
+**Structural boundaries hold**
+
+| Command | Fails if… |
+|---------|-----------|
+| `pnpm check:deps` | a workspace exceeds its dependency budget (web < 15, api < 20; `workspace:*` excluded) |
+| `pnpm check:workspace-deps` | a package imports across a forbidden workspace boundary |
+| `pnpm check:lcap-p2p-split` | `apps/web` statically imports `@licio/lcap-p2p` (it must be dynamic-only) |
+| `pnpm check:private-p2p-split` | the same for `@licio/private-p2p` |
+| `pnpm check:lcap-schema-egress` | an IP/location/attention/applause field appears in an LCAP schema |
+| `pnpm check:p2p-mls-wrapper` | `ts-mls` is imported outside the single `crypto/mls.ts` wrapper |
+| `pnpm check:dead-exports` | an exported **value** is referenced nowhere (named exports only — see `CLAUDE.md` → "Unreferenced exports") |
+
+**Dev↔prod parity, data, and policy posture**
+
+| Command | Fails if… |
+|---------|-----------|
+| `pnpm check:prod-parity` | an in-memory adapter has no boot-wired production counterpart, an env key is neither schema-validated nor a documented dev flag, a production adapter holds in-memory state, or a composition root does not install the data-rights hooks (an absent export/purge hook is a SILENT no-op — the archive omits that store and the erasure leaves it behind) |
+| `pnpm check:sql-identifiers` | a migration identifier sits at Postgres's 63-byte limit (over-long names truncate silently and can collide — Section 15) |
+| `pnpm check:policy` | a doctrine/policy document fails validation |
+| `pnpm check:knomosis-pins` | a non-`local` Knomosis deployment in `apps/api/src/knomosis/pin.config.json` carries sentinel (all-zero) finality values (Section 17.8) |
+| `pnpm check:a11y-hue-usage` | `text-<hue>` is used for normal text (only `text-<hue>-on-soft` clears WCAG 1.4.3 AA in dark mode) |
+| `pnpm check:adversarial` | the WS-O.4.5 invariant-ensemble adversarial suite fails |
+| `pnpm check:lcap-scheduler` | the WS-R lane anti-starvation property is lost |
+
+Two **surveys** are deliberately NOT in CI while their standing cases are
+worked through (`docs/planning/audit-residuals-2026-07.md`):
+`pnpm survey:internal-exports` (exports confined to their own file) and
+`pnpm survey:barrel-reexports` (module barrels republishing their SSOT
+surface).
 
 **Per-workspace filtering** — run any workspace script in isolation:
 
@@ -1289,8 +1385,8 @@ vitest parks every following flag in `argv['--']`, so the `--` form runs the
 suite with coverage silently disabled.  And run it with `DATABASE_URL` +
 `REDIS_URL` pointing at the Compose services (§2): the WS-D/E/F/G/H/I/U and
 WS-R integration suites carry a meaningful share of the branch coverage, so a
-bare local run measures **≈79.7% branches and FAILS the gate**, while the same
-tree with the services up measures **≈80.9% and passes** — which is what CI
+bare local run measures **79.2% branches and FAILS the gate**, while the same
+tree with the services up measures **80.5% and passes** — which is what CI
 does (it provisions `pgvector/pgvector:pg16` + `redis:7` for that job):
 
 ```sh
@@ -1307,9 +1403,15 @@ root `vitest.config.ts`. Run one project or one file:
 
 ```sh
 pnpm --filter api test                        # just the api project
-pnpm test -- --project web                    # one project via the root run
+pnpm test --project web                       # one project via the root run
 pnpm vitest run apps/api/src/__tests__/health.test.ts   # a single file
 ```
+
+> The **no-`--` rule above applies to every flag**, not just `--coverage`.
+> `pnpm test -- --project web` does not filter anything: pnpm forwards the
+> bare `--` verbatim, vitest parks each following flag in `argv['--']`, and
+> the whole suite runs. It does not even error on a project name that does
+> not exist, so the mistake is silent — always write `pnpm test --project <p>`.
 
 ### Gated integration tests (need Postgres + Redis)
 
@@ -1361,9 +1463,12 @@ pnpm test:e2e         # or: pnpm --filter web test:e2e
 pnpm check:neutrality
 ```
 
-The ten WS-I.3 tests assert the pay-to-rank firewall (wallet links and
-payments never change a feed). They also run inside `pnpm test`; this named
-script is the explicit gate CI surfaces on every PR.
+Fourteen tests assert the pay-to-rank firewall (wallet links and payments
+never change a feed): the ten SPEC §30.6 / WS-I.3.1a–j properties, plus four
+added since — WS-Q two-tier containment, visibility-is-not-a-ranking-signal,
+the every-global-retrieval-path-routes-through-the-visibility-gate check, and
+the WS-T comment remodel staying outside ranking inputs. They also run inside
+`pnpm test`; this named script is the explicit gate CI surfaces on every PR.
 
 ---
 
@@ -1410,7 +1515,9 @@ runs nine jobs on every PR: **Lint & Format** (Biome, `lint:security`, and the
 doctrine scans including `check:no-applause` / `check:no-raw-egress` /
 `check:prod-parity` — the dev↔prod parity gate: every in-memory adapter needs
 a boot-wired production counterpart, every env key must be schema-validated or
-a documented dev flag, and production adapters hold no in-memory state — plus
+a documented dev flag, production adapters hold no in-memory state, and every
+composition root (the production boot AND the E2E harness) installs the §19.3
+data-rights hooks from the one module that owns them — plus
 the private-P2P and update-channel gates), **Type Check** (`typecheck:ci`),
 **Lockfile Integrity**, **Dependency Budget**, **Test & Coverage** (with live
 Postgres/Redis service containers so the gated suites run, plus the named
@@ -1433,7 +1540,7 @@ table definitions. Migrations are ordered SQL files in
 
 **Migrations are hand-authored in this repository.** The tracked Drizzle
 meta snapshots stop far behind the migration chain (they end at `0047`;
-the chain runs past `0090`), so `pnpm db:generate` would diff the schema
+the chain runs well past it), so `pnpm db:generate` would diff the schema
 against a stale snapshot and emit a garbage migration — do not use it here.
 The working loop:
 
@@ -1442,8 +1549,22 @@ The working loop:
 # 2. hand-write packages/db/drizzle/NNNN_short_name.sql (next number in order)
 # 3. append the matching entry to packages/db/drizzle/meta/_journal.json
 pnpm db:migrate                  # apply it locally
+pnpm check:timestamp-precision   # every timestamptz declared (3) — see below
 pnpm --filter @licio/db test     # run the db project's tests
 ```
+
+**Timestamps: `instant('col')`, never `timestamp(…)`.**  A bare `timestamptz`
+is MICROSECOND resolution and nothing here can hold one — every timestamp is
+produced by, and read back through, a JavaScript `Date`.  The extra digits are
+write-only, and they silently delete rows from paged reads: a keyset cursor
+read back through a `Date` has been rounded DOWN, so it names an instant
+strictly *before* the row it came from, a descending page skips every row
+sharing that millisecond, and the page comes back SHORT — which is how a caller
+decides it reached the end.  `instant()` (`schema/_custom.ts`) declares
+`timestamptz(3)`; in SQL write `timestamptz(3)` directly.
+`check:timestamp-precision` fails the build on either spelling of the mistake,
+and the gated `timestamp-precision` suite asks the live server, which is the
+half a static gate cannot see.
 
 The commands:
 

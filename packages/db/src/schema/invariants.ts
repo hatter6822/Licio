@@ -25,9 +25,10 @@ import {
   jsonb,
   pgTable,
   text,
-  timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 
 /** Append-only shadow-status history (WS-H.1.2e). */
 export const invariantPromotions = pgTable(
@@ -41,7 +42,7 @@ export const invariantPromotions = pgTable(
     evidence: jsonb('evidence').$type<Record<string, unknown>>().notNull(),
     /** Named owner sign-off — never a service account. */
     owner: text('owner').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('invariant_promotions_type_idx').on(t.invariantType, t.createdAt),
@@ -65,7 +66,7 @@ export const invariantCalibrations = pgTable(
     version: text('version').notNull(),
     data: jsonb('data').$type<Record<string, unknown>>().notNull(),
     sampleCount: integer('sample_count').notNull(),
-    computedAt: timestamp('computed_at', { withTimezone: true }).notNull(),
+    computedAt: instant('computed_at').notNull(),
   },
   (t) => [check('invariant_calibrations_samples', sql`${t.sampleCount} >= 0`)],
 );
@@ -82,7 +83,7 @@ export const invariantRunMetadata = pgTable(
     success: boolean('success').notNull(),
     /** Reason-code or error class on failure; never payload contents. */
     failureReason: text('failure_reason'),
-    startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+    startedAt: instant('started_at').notNull(),
   },
   (t) => [
     index('invariant_run_metadata_type_idx').on(t.invariantType, t.startedAt),
@@ -110,8 +111,8 @@ export const mfciCases = pgTable(
     /** Identifier-free appeal-facing rationale (MFCI-5). */
     appealSummary: text('appeal_summary').notNull(),
     status: text('status').notNull().default('open'),
-    openedAt: timestamp('opened_at', { withTimezone: true }).notNull().defaultNow(),
-    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    openedAt: instant('opened_at').notNull().defaultNow(),
+    resolvedAt: instant('resolved_at'),
     /** Steward reference (`steward:<uuid>`), never a raw identity. */
     resolvedBy: text('resolved_by'),
   },
@@ -135,10 +136,10 @@ export const mfciMargins = pgTable(
   'mfci_margins',
   {
     marginsRef: text('margins_ref').primaryKey(),
-    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    windowStart: instant('window_start').notNull(),
     /** { axes: string[], margins: number[][], total: number } */
     margins: jsonb('margins').$type<Record<string, unknown>>().notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('mfci_margins_window_idx').on(t.windowStart),
@@ -159,7 +160,7 @@ export const mfciRiskStates = pgTable(
     state: text('state').notNull(),
     score: doublePrecision('score').notNull(),
     reason: text('reason').notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+    updatedAt: instant('updated_at').notNull(),
   },
   (t) => [
     check('mfci_risk_states_state', sql`${t.state} in ('normal', 'elevated', 'high', 'severe')`),
@@ -192,11 +193,27 @@ export const bridgeAttempts = pgTable(
     bridgeUserId: uuid('bridge_user_id'),
     scoiBaseline: doublePrecision('scoi_baseline').notNull(),
     scoiAfter: doublePrecision('scoi_after'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    resolvedAt: instant('resolved_at'),
   },
   (t) => [
     index('bridge_attempts_thread_idx').on(t.threadId, t.status),
+    /**
+     * At most ONE open request per thread — the constraint the route's
+     * `openForThread()` pre-check could only approximate.
+     *
+     * Two stewards of the same room both see the Civic Map's fragile join, so
+     * the concurrent pair is the expected case: both read "none open" and both
+     * insert. The duplicate is not the harm — the credit consumer credits the
+     * NEWEST, after which the older row is "the open attempt" again and a later
+     * contribution credits a second time for one bridge.
+     *
+     * PARTIAL: a thread accumulates any number of CREDITED attempts over its
+     * life, and this must not forbid the next one.
+     */
+    uniqueIndex('bridge_attempts_open_thread_uq')
+      .on(t.threadId)
+      .where(sql`${t.status} = 'requested'`),
     check('bridge_attempts_status', sql`${t.status} in ('requested', 'credited')`),
     check('bridge_attempts_baseline', sql`${t.scoiBaseline} >= 0 and ${t.scoiBaseline} <= 1`),
   ],

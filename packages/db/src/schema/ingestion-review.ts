@@ -7,7 +7,8 @@
 // rejection would be a denial-of-publication vector, auto-linking a spam
 // attachment vector). WS-J.2 takes ownership of the full moderation queue;
 // this table is its durable ingestion inbox.
-import { index, jsonb, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { index, jsonb, pgEnum, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { stories } from './story.js';
 import { users } from './user.js';
 
@@ -37,10 +38,10 @@ export const ingestionReviewItems = pgTable(
     /** Steward resolution (allow / link_existing / merge / reject / retried). */
     resolution: text('resolution'),
     resolvedBy: uuid('resolved_by').references(() => users.userId, { onDelete: 'set null' }),
-    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    resolvedAt: instant('resolved_at'),
     /** Earliest retry time for scheduled re-processing (crawl-delay, backoff). */
-    notBefore: timestamp('not_before', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    notBefore: instant('not_before'),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('ingestion_review_status_idx').on(t.status, t.kind, t.createdAt),

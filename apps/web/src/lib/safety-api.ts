@@ -23,13 +23,17 @@ import {
   auditListResponseSchema,
   type BlockListResponse,
   type BlockRecordView,
+  type BridgeRequestResponse,
   blockListResponseSchema,
   blockRecordSchema,
+  bridgeRequestResponseSchema,
   type CaseReviewResponse,
+  type CivicMapEnvelope,
   type ConsoleAction,
   type CreateAppealRequest,
   type CreateReportRequest,
   caseReviewResponseSchema,
+  civicMapEnvelopeSchema,
   type EvidenceDecisionRequest,
   type EvidenceDecisionsResponse,
   type EvidenceDecisionView,
@@ -328,4 +332,31 @@ export async function applyEvidenceDecision(
 ): Promise<EvidenceDecisionView> {
   const response = await client.v1.moderation['evidence-decisions'].$post({ json: request });
   return parseResponse(response, evidenceDecisionViewSchema);
+}
+
+// --- Civic Map + bridge requests (WS-H.7.4 / WS-H.4.2d, ROLE_INTEGRITY) -----
+//
+// The Reeb attention landscape rendered on the console's Integrity tab, and the
+// §12.4 bridge prompt a fragile saddle routes into. Both are steward-gated
+// server-side; a non-analyst session gets the console's access notice rather
+// than an empty map.
+
+/** The current attention landscape, or `null` when there is nothing to map
+ *  (a quiet window is a real state, not an error). */
+export async function fetchCivicMap(): Promise<CivicMapEnvelope> {
+  const response = await client.v1.invariants.admin.reeb.landscape.$get();
+  // The ENVELOPE, not just its landscape: a `null` map from a window whose
+  // candidates were all restricted is a TRUNCATED hour, not a quiet one, and
+  // `scan` is the only thing that tells them apart.
+  return await parseResponse(response, civicMapEnvelopeSchema);
+}
+
+/** Open a bridge request on a thread joined by a fragile saddle (WS-H.4.2d).
+ *  Authorization is the room-steward bar the server enforces; a 409 means one
+ *  is already open, which the panel reports as such rather than as a failure. */
+export async function openBridgeRequest(threadId: string): Promise<BridgeRequestResponse> {
+  const response = await client.v1.invariants.admin.scoi.threads[':threadId'][
+    'bridge-requests'
+  ].$post({ param: { threadId } });
+  return parseResponse(response, bridgeRequestResponseSchema);
 }

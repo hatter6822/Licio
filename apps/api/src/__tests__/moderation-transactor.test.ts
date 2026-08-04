@@ -202,6 +202,9 @@ describe.skipIf(!DB_URL)('moderation transactor — live Postgres', () => {
         applyContentState: async () => {},
         applyAccountState: async () => {},
       }),
+      // The §21.4 directory binding: unused by these units, present because the
+      // shape is part of the unit rather than optional.
+      () => async () => false,
     );
   });
 
@@ -365,6 +368,9 @@ describe.skipIf(!DB_URL)('moderation transactor — live Postgres', () => {
         },
         applyAccountState: async () => {},
       }),
+      // The §21.4 directory binding: unused by these units, present because the
+      // shape is part of the unit rather than optional.
+      () => async () => false,
     );
 
     await expect(

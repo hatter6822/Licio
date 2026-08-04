@@ -22,6 +22,7 @@ import {
   type DbExecutor,
   embeddings as embeddingsTable,
   ingestionReviewItems,
+  rooms as roomsTable,
   sourceSyndications,
   sources as sourcesTable,
   stories as storiesTable,
@@ -173,6 +174,21 @@ export class DrizzleStoryStore implements StoryStore {
     return rows[0] ? this.#toThread(rows[0]) : null;
   }
 
+  async getThreadByIdForUpdate(threadId: string): Promise<ThreadShellRecord | null> {
+    // `FOR UPDATE`, because the caller's write DEPENDS on this row's state.
+    // Inside a READ COMMITTED transaction a plain SELECT is a snapshot, not a
+    // hold: an `updateThread` archiving the conversation can commit between it
+    // and the insert, and the attempt lands on a thread that can never answer
+    // it. The lock makes the concurrent update wait for this unit instead.
+    const rows = await this.#db
+      .select()
+      .from(threadsTable)
+      .where(eq(threadsTable.threadId, threadId))
+      .limit(1)
+      .for('update');
+    return rows[0] ? this.#toThread(rows[0]) : null;
+  }
+
   async updateThread(
     threadId: string,
     patch: Partial<Pick<ThreadShellRecord, 'roomId' | 'conversationState' | 'safetyState'>>,
@@ -193,6 +209,17 @@ export class DrizzleStoryStore implements StoryStore {
     const conditions = [eq(threadsTable.roomId, roomId)];
     if (before !== null) {
       conditions.push(
+        // A plain comparison, because the COLUMN carries the resolution the
+        // cursor can: `created_at` is `timestamptz(3)` (migration 0129), so a
+        // value read back through a JS `Date` compares exactly against the row
+        // it came from and the `thread_id` tiebreaker is actually reached.
+        //
+        // This used to wrap both sides in `date_trunc('milliseconds', …)`,
+        // which fixed the comparison and left the cause — a truncated column is
+        // not the indexed expression, so the page gave up its index, and the
+        // next cursor written by hand reintroduced the bug (`listThreads`
+        // below, which had the same defect and did not get the same patch).
+        //
         // ISO string + explicit cast — a raw Date in a sql`` fragment is not
         // serializable by the postgres-js driver (gated-test-proven).
         sql`(${threadsTable.createdAt}, ${threadsTable.threadId}) < (${before.createdAt}::timestamptz, ${before.threadId}::uuid)`,
@@ -360,6 +387,35 @@ export class DrizzleStoryStore implements StoryStore {
     return out;
   }
 
+  async getPublicByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>> {
+    const out = new Map<string, StoryRecord>();
+    if (storyIds.length === 0) return out;
+    // The restriction is in the QUERY — so a story hidden between selecting its
+    // id and hydrating it is simply absent rather than enriched.
+    //
+    // And it covers the ROOM, not only the item. A story can carry
+    // `visibility: 'public'` inside a PRIVATE room, where the ordinary read bar
+    // requires membership — filtering on the item alone published its title,
+    // topics and level to every integrity steward. `storyReadableByUser`
+    // enforces the room bar on normal reads; this is the same bar, for a caller
+    // whose membership is unknown and must be assumed absent.
+    const rows = await this.#db
+      .select({ story: storiesTable })
+      .from(storiesTable)
+      .innerJoin(roomsTable, eq(roomsTable.roomId, storiesTable.roomId))
+      .where(
+        and(
+          inArray(storiesTable.storyId, [...storyIds]),
+          eq(storiesTable.visibility, 'public'),
+          isNull(storiesTable.hiddenState),
+          eq(roomsTable.visibility, 'public'),
+          eq(roomsTable.storageMode, 'server'),
+        ),
+      );
+    for (const row of rows) out.set(row.story.storyId, this.#toRecord(row.story));
+    return out;
+  }
+
   async getByCanonicalUrl(canonicalUrl: string, tier: StoryDedupTier): Promise<StoryRecord | null> {
     // WS-Q.2.2a — tier-scoped lookup matching the two partial unique indexes:
     // a VISIBLE (hidden_state IS NULL) public story (global) or room_only story
@@ -467,11 +523,21 @@ export class DrizzleStoryStore implements StoryStore {
   async getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>> {
     const out = new Map<string, ThreadShellRecord>();
     if (storyIds.length === 0) return out;
+    // ONE branch per story, chosen DETERMINISTICALLY.
+    //
+    // A story may retain several thread branches (`(story_id, branch_index)` is
+    // the unique, not `story_id`), and folding unordered rows into one map entry
+    // by overwriting picks whichever Postgres returned last: the Civic Map could
+    // then target an archived branch and suppress a bridge the writable branch
+    // would have accepted, or pick differently across two identical reads.
+    // Branch 0 is the story's original conversation, and it is the same answer
+    // every time.
     const rows = await this.#db
       .select()
       .from(threadsTable)
-      .where(inArray(threadsTable.storyId, [...storyIds]));
-    for (const row of rows) out.set(row.storyId, this.#toThread(row));
+      .where(inArray(threadsTable.storyId, [...storyIds]))
+      .orderBy(asc(threadsTable.storyId), asc(threadsTable.branchIndex));
+    for (const row of rows) if (!out.has(row.storyId)) out.set(row.storyId, this.#toThread(row));
     return out;
   }
 
@@ -1677,20 +1743,21 @@ export class PostgresSearchIndex implements SearchIndex {
     ) =>
       cursor === null
         ? sql`true`
-        : // MILLISECONDS on the column side, matching the resolution the cursor can
-          // actually carry.  `created_at` is microsecond `timestamptz`, but the value
-          // that reaches `encodeSearchCursor` came back from the driver as a JS `Date`
-          // and the cross-corpus merge below re-sorts on that same rounded string — so
-          // the order the caller sees IS the millisecond order.  Comparing a rounded
-          // cursor against the unrounded column instead made the `=` arm unreachable
-          // for any row in the cursor's own millisecond: the equality never held, the
-          // `<` arm excluded them, and the `id` tiebreaker that was supposed to separate
-          // them was never consulted.  Truncating both sides puts the predicate, the
-          // per-corpus ORDER BY (which reads this same alias) and the merge on one
-          // total order.
+        : // The `=` arm is REACHABLE, which is the whole point of the tiebreaker.
+          // `created_at` is `timestamptz(3)` (migration 0129), so the value that
+          // reached `encodeSearchCursor` through a JS `Date` compares exactly
+          // against the row it came from — and the cross-corpus merge below,
+          // which re-sorts on that same string, is on the same total order as
+          // the per-corpus ORDER BY.
+          //
+          // Against a MICROSECOND column the equality never held for any row in
+          // the cursor's own millisecond: the `<` arm swallowed them and the
+          // `id` tiebreaker meant to separate them was never consulted.  The
+          // first fix truncated both sides here; the column now carries the
+          // resolution instead, so the comparison is plain and indexable.
           sql`(${rank} < ${cursor.relevance}
-            or (${rank} = ${cursor.relevance} and date_trunc('milliseconds', ${createdAt}) < ${cursor.createdAt}::timestamptz)
-            or (${rank} = ${cursor.relevance} and date_trunc('milliseconds', ${createdAt}) = ${cursor.createdAt}::timestamptz and ${id} < ${cursor.id}::uuid))`;
+            or (${rank} = ${cursor.relevance} and ${createdAt} < ${cursor.createdAt}::timestamptz)
+            or (${rank} = ${cursor.relevance} and ${createdAt} = ${cursor.createdAt}::timestamptz and ${id} < ${cursor.id}::uuid))`;
 
     // A story-scoped query searches the story's CONVERSATION: the story record
     // itself is the page the reader is already on, so its corpus is skipped
@@ -1719,7 +1786,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'story' as result_type, s.story_id as id, s.story_id as story_id,
                s.title as title, s.excerpt as snippet,
                ${storyRank} as relevance,
-               date_trunc('milliseconds', s.created_at) as created_at,
+               s.created_at as created_at,
                s.dispute_status as dispute_status
         from stories s
         where ${sql.join(filters, sql` and `)}
@@ -1750,7 +1817,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'claim' as result_type, c.claim_id as id, c.story_id as story_id,
                c.canonical_text as title, null as snippet,
                ts_rank_cd(c.search_tsv, ${match})::float8 as relevance,
-               date_trunc('milliseconds', c.created_at) as created_at,
+               c.created_at as created_at,
                'none' as dispute_status
         from claims c
         where ${sql.join(filters, sql` and `)}
@@ -1808,7 +1875,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'comment' as result_type, c.contribution_id as id, t.story_id as story_id,
                s.title as title, left(c.body, ${SEARCH_COMMENT_SNIPPET_LENGTH}) as snippet,
                ${commentRank} as relevance,
-               date_trunc('milliseconds', c.created_at) as created_at,
+               c.created_at as created_at,
                c.dispute_status as dispute_status
         from contributions c
         join threads t on t.thread_id = c.thread_id
@@ -1852,7 +1919,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'room' as result_type, r.room_id as id, null as story_id,
                r.name as title, r.description as snippet,
                ${roomRank} as relevance,
-               date_trunc('milliseconds', r.created_at) as created_at,
+               r.created_at as created_at,
                'none' as dispute_status
         from rooms r
         where ${sql.join(filters, sql` and `)}

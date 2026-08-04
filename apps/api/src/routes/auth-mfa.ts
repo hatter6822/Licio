@@ -20,6 +20,7 @@ import {
   buildSessionCookie,
   markMfaVerified,
   readSessionToken,
+  revokeMfaVerified,
   rotateSession,
 } from '../identity/sessions.js';
 import {
@@ -118,18 +119,23 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           // isReplayedStep check is needed here, only the high-water-mark write).
           await services.otp.set(usedStepKey(auth.userId), String(result.step), MFA_STEP_MEMORY_MS);
           const recoveryCodes = generateRecoveryCodes();
-          await services.store.setAuth(auth.userId, {
-            mfaEnabled: true,
-            mfaPending: false,
-            mfaEnrolledAt: new Date().toISOString(),
-            recoveryCodeHashes: recoveryCodes.map(hashRecoveryCode),
+          // Enrolling MFA and recording it are one fact: an append failure would
+          // leave a second factor active with nothing in the trail — and this is
+          // the trail a compromised-account investigation reads first.
+          await services.transact(async (tx) => {
+            await tx.store.setAuth(auth.userId, {
+              mfaEnabled: true,
+              mfaPending: false,
+              mfaEnrolledAt: new Date().toISOString(),
+              recoveryCodeHashes: recoveryCodes.map(hashRecoveryCode),
+            });
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'mfa_enroll',
+              context: {},
+            });
           });
           await services.otp.delete(attemptsKey(auth.userId));
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'mfa_enroll',
-            context: {},
-          });
           // The enrolling session is now MFA-verified; rotate on the privilege change.
           await markMfaVerified(services.sessions, auth.tokenHash);
           const token = readSessionToken(c.req.header('cookie'));
@@ -179,30 +185,110 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
               String(result.step),
               MFA_STEP_MEMORY_MS,
             );
-            await finishMfa(services, auth.userId, auth.tokenHash, c);
+            try {
+              await finishTotpVerification(services, auth.userId, auth.tokenHash, c);
+            } catch (error) {
+              // The TOTP path spends nothing, so a vanished session is simply a
+              // sign-in-again — never a success reported for a grant that did
+              // not land.
+              if (error instanceof SessionVanishedError) {
+                return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
+              }
+              throw error;
+            }
             return c.json({ status: 'mfa_verified' as const });
           }
 
           // Fall back to a single-use recovery code (constant-time compare).
+          //
+          // The compare is over the READ list only to find which stored hash
+          // was presented; SPENDING it is `consumeRecoveryCode`, whose own
+          // predicate ("still active") decides the outcome — so the code is
+          // burned exactly once even under two simultaneous presentations, and
+          // it is burned INSIDE the unit that records the verification. It used
+          // to be spent by a `setAuth` before `finishMfa` opened its
+          // transaction: an audit failure then answered 500 having permanently
+          // consumed the code without granting access, which on the user's last
+          // code costs them the account.
           const presentedHash = hashRecoveryCode(code);
-          const idx = userAuth.recoveryCodeHashes.findIndex((h) =>
+          const matched = userAuth.recoveryCodeHashes.find((h) =>
             constantTimeEqual(presentedHash, h),
           );
-          if (idx >= 0) {
-            const remaining = userAuth.recoveryCodeHashes.filter((_, i) => i !== idx);
-            await services.store.setAuth(auth.userId, { recoveryCodeHashes: remaining });
-            await finishMfa(services, auth.userId, auth.tokenHash, c);
+          if (matched !== undefined) {
+            // THE COMMIT IS THE GRANT.  `consumeRecoveryCode` spends the code
+            // and records the session it verifies in ONE statement, and
+            // `sessionHasRecoveryGrant` reads that back — so a session is
+            // MFA-verified the moment this transaction commits, whether or not
+            // anything else succeeds afterwards.
+            //
+            // That is why there is no continuation here any more, and no resume
+            // path, window, settle, claim or takeover rule.  All of it existed
+            // to reconcile a Postgres spend with a Redis grant that could fail
+            // independently, and every ordering of those two writes has a window
+            // in it: grant-then-record loses the record, record-then-grant loses
+            // the grant.  With one durable fact there is nothing to reconcile.
+            const spent = await services.transact(async (tx) => {
+              const consumed = await tx.store.consumeRecoveryCode(
+                auth.userId,
+                matched,
+                auth.tokenHash,
+              );
+              if (consumed === null) return null;
+              await tx.audit.append({
+                actorUserId: auth.userId,
+                eventType: 'mfa_verify',
+                context: {},
+              });
+              return consumed;
+            });
+            // Lost the race — another request spent this code between the read
+            // and the write. Nothing was consumed and nothing was recorded.
+            if (spent === null) return c.json(err('invalid_code', 'Invalid code.'), 400);
+
+            // The session flag and the rotation are an OPTIMISATION over the
+            // grant above, not the grant itself, so neither can fail the
+            // request.  The flag saves the derived lookup on later requests; the
+            // rotation is the privilege-change fixation defence.
+            //
+            // ORDER MATTERS ONLY HERE: rotate a session that carries the flag,
+            // never one that does not.  Rotating an unflagged session would move
+            // the holder to a token the durable grant does not name, and THAT
+            // would be the lockout — the one case this ordering has to exclude.
+            try {
+              if (await markMfaVerified(services.sessions, auth.tokenHash)) {
+                const token = readSessionToken(c.req.header('cookie'));
+                const rotated = token ? await rotateSession(services.sessions, token) : null;
+                if (rotated) {
+                  c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
+                    append: true,
+                  });
+                }
+              }
+              await services.otp.delete(attemptsKey(auth.userId));
+            } catch {
+              // The session store is unavailable. The grant is already durable,
+              // so this session is verified from its next request onward — the
+              // code is not lost and the account is not locked.
+            }
             return c.json({
               status: 'mfa_verified' as const,
               recovery_used: true,
-              recovery_remaining: remaining.length,
+              recovery_remaining: spent.remaining,
             });
           }
 
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'mfa_verify',
-            context: {},
+          // A FAILED verification, recorded as one.
+          //
+          // This appended `mfa_verify` — the same event a SUCCESS writes — so
+          // the trail an investigator reads to answer "did this account clear
+          // MFA?" could not distinguish a clearance from a wrong code, and a
+          // brute-force run and a normal sign-in produced identical rows.
+          await services.transact(async (tx) => {
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'mfa_verify_failed',
+              context: {},
+            });
           });
           return c.json(err('invalid_code', 'Invalid code.'), 400);
         },
@@ -221,17 +307,21 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
         if ((await services.store.getAuth(auth.userId))?.mfaEnabled && !auth.mfaVerified) {
           return c.json(err('mfa_reverify_required', 'Verify your current code first.'), 403);
         }
-        await services.store.setAuth(auth.userId, {
-          mfaEnabled: false,
-          mfaPending: false,
-          mfaSecret: null,
-          mfaEnrolledAt: null,
-          recoveryCodeHashes: [],
-        });
-        await services.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'mfa_disable',
-          context: {},
+        // Removing a factor is the change an investigation most wants a record
+        // of, so the two commit together.
+        await services.transact(async (tx) => {
+          await tx.store.setAuth(auth.userId, {
+            mfaEnabled: false,
+            mfaPending: false,
+            mfaSecret: null,
+            mfaEnrolledAt: null,
+            recoveryCodeHashes: [],
+          });
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'mfa_disable',
+            context: {},
+          });
         });
         const token = readSessionToken(c.req.header('cookie'));
         const rotated = token ? await rotateSession(services.sessions, token) : null;
@@ -245,27 +335,75 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
   );
 }
 
+/** The session disappeared between the middleware's check and the grant
+ *  (expired, or revoked from elsewhere).  Only the TOTP path raises it: TOTP
+ *  spends nothing, so signing in again costs the holder a fresh code and
+ *  nothing else. */
+class SessionVanishedError extends Error {
+  constructor() {
+    super('the session no longer exists');
+    this.name = 'SessionVanishedError';
+  }
+}
+
 /**
- * Mark the session MFA-verified, reset the attempt counter, audit success, and
- * rotate the session id on the privilege change — mirroring /confirm and every
- * other privilege transition (a new mfa_verified session id defeats fixation).
- * `markMfaVerified` runs BEFORE the rotation so the rotated record — which
- * `rotateSession` copies from the stored one — carries `mfa_verified=true`.
+ * Record a TOTP verification and grant it to the session.
+ *
+ * ONLY the TOTP path needs this shape.  A TOTP step spends nothing durable, so
+ * a failed grant costs the holder one retry with the next code — there is
+ * nothing to lose and nothing to reconcile.  The recovery-code path used to
+ * share it, and that sharing was the mistake: it made a spend whose loss is
+ * unrecoverable look like one whose loss is free, and every round of trying to
+ * order the Postgres spend against the Redis grant was an attempt to paper over
+ * the difference.  A recovery code now grants itself, durably, in the
+ * transaction that spends it.
+ *
+ * The audit row still commits first: a privilege must not be granted ahead of
+ * the record of it.  Postgres accepting the callback and then failing to COMMIT
+ * would otherwise leave Redis holding a verified session with nothing recording
+ * that it ever cleared MFA.
  */
-async function finishMfa(
+async function finishTotpVerification(
   services: IdentityServices,
   userId: string,
   tokenHash: string,
   c: Context<AuthEnv>,
 ): Promise<void> {
-  await markMfaVerified(services.sessions, tokenHash);
-  await services.otp.delete(attemptsKey(userId));
-  await services.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
-  const token = readSessionToken(c.req.header('cookie'));
-  const rotated = token ? await rotateSession(services.sessions, token) : null;
-  if (rotated) {
-    c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
-      append: true,
+  // THE GRANT FIRST, then the record of it — the opposite of the recovery path,
+  // and for the reason that separates them.
+  //
+  // A TOTP step spends nothing durable, so there is no resource to lose by
+  // granting first: a failure costs the holder one retry with the next code.
+  // What the audit trail must never do is claim a clearance that did not
+  // happen. Committing `mfa_verify` before the grant did exactly that — the
+  // session could be revoked between the middleware's check and this call, or
+  // the store could throw, and the request answered 401/500 leaving a durable
+  // success row behind. Splitting `mfa_verify_failed` out for invalid codes made
+  // that row MORE misleading, not less: an investigator asking "did this account
+  // clear MFA?" now reads it as an unambiguous yes.
+  if (!(await markMfaVerified(services.sessions, tokenHash))) throw new SessionVanishedError();
+  try {
+    await services.transact(async (tx) => {
+      await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
     });
+  } catch (error) {
+    // Granted but unrecorded is the other lie, so it is taken back. The revert
+    // is best-effort — nothing durable was spent, so the honest answer to the
+    // caller is "that did not work, try again", and the trail says nothing
+    // rather than something untrue.
+    await revokeMfaVerified(services.sessions, tokenHash).catch(() => undefined);
+    throw error;
   }
+  await services.otp.delete(attemptsKey(userId));
+  const token = readSessionToken(c.req.header('cookie'));
+  if (token === undefined) return;
+  // `rotateSession` MOVES the session in one step, so a concurrent rotation of
+  // the same cookie yields null here rather than a second successor. Either way
+  // the session this request arrived on is gone, and answering `mfa_verified`
+  // with no usable cookie would be a success the caller cannot act on.
+  const rotated = await rotateSession(services.sessions, token);
+  if (rotated === null) throw new SessionVanishedError();
+  c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
+    append: true,
+  });
 }

@@ -316,6 +316,12 @@ describe('policy admin (WS-N.1.1e)', () => {
       get('/v1/compliance/admin/policy-audit/verify', reviewer.cookie),
     );
     expect(((await verify.json()) as { valid: boolean }).valid).toBe(true);
+    // …AND on the acting account's security trail, in the same unit. Two trails
+    // answer two questions — the chain records what the policy became, this
+    // records what this operator did — and a policy change live and hash-audited
+    // but absent from the actor's history is unreviewable per actor.
+    const activity = await identity.audit.securityActivityForUser(counsel.userId);
+    expect(activity.map((e) => e.event_type)).toContain('compliance_policy_change');
   });
 
   it('carrying an approved enabled cell forward while NARROWING another needs no counsel; widening sideways still does (codex: compare policy deltas before requiring counsel)', async () => {
@@ -647,31 +653,47 @@ describe('a published disclosure always names its publisher (WS-N.1.2d)', () => 
     requires_acknowledgment: true,
   };
 
-  it('the attribution rides the publish, so a failing audit mirror cannot lose it', async () => {
+  it('a failing audit mirror publishes NOTHING, so the retry can complete both', async () => {
+    // This used to answer 201 and swallow the mirror failure, on the reasoning
+    // that the attribution already rides the row (`publishedByRef`) so nothing
+    // was lost. The attribution was not lost — counsel's own security trail
+    // was, permanently: a publish is IMMUTABLE, so no later write could add the
+    // missing entry, and nothing would ever surface the gap.
+    //
+    // Both records now commit together. A mirror failure rolls the publish back
+    // and answers 503, which costs a retry and loses nothing — and the retry
+    // meets no `already_published`, precisely because the first attempt kept
+    // nothing.
     const counsel = await seedUser({
       handle: `l${randomUUID().slice(0, 8)}`,
       platformRoles: ['counsel'],
       mfa: true,
     });
-    // The identity audit log (a DIFFERENT bounded context — it cannot join the
-    // publish's write) is down.
     const original = identity.audit.append.bind(identity.audit);
     identity.audit.append = async () => {
       throw new Error('identity audit down');
     };
+    let published: Response;
     try {
-      const published = await app().request(
+      published = await app().request(
         post('/v1/compliance/admin/disclosures', body, counsel.cookie),
       );
-      // A 500 here would leave an IMMUTABLE published disclosure the client
-      // believes failed — and the retry could only ever meet
-      // `already_published`, so the attribution could never be added.
-      expect(published.status).toBe(201);
     } finally {
       identity.audit.append = original;
     }
+    expect(published.status).toBe(503);
+    expect(await compliance.disclosures.listForRegion('DE')).toHaveLength(0);
+
+    // The retry lands both, and the attribution still rides the row.
+    const retried = await app().request(
+      post('/v1/compliance/admin/disclosures', body, counsel.cookie),
+    );
+    expect(retried.status).toBe(201);
     const [stored] = await compliance.disclosures.listForRegion('DE');
     expect(stored?.publishedByRef).toBe(compliance.opaqueRef(counsel.userId));
+    expect(
+      (await identity.audit.securityActivityForUser(counsel.userId)).map((e) => e.event_type),
+    ).toContain('disclosure_change');
   });
 });
 

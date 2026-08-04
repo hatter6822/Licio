@@ -20,6 +20,7 @@ import {
   type PrivacySettings,
   type UserAccountState,
 } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 import { sha256Hex } from './crypto.js';
 import type { Role } from './rbac.js';
 
@@ -127,6 +128,52 @@ export interface IdentityStore {
   // --- User auth ---
   getAuth(userId: string): Promise<StoredUserAuth | null>;
   setAuth(userId: string, patch: Partial<StoredUserAuth>): Promise<StoredUserAuth | null>;
+  /**
+   * COMPARE-AND-SET: spend a recovery code, only while it is still active.
+   *
+   * `null` ⇒ this code is not an active code for this user (unknown, or a
+   * concurrent request just spent it).  Otherwise the count of codes left.
+   *
+   * A `getAuth` + `setAuth(recoveryCodeHashes: remaining)` cannot express this
+   * for two independent reasons.  The first is the ordinary one: two requests
+   * presenting the SAME code both read it present and both write a list without
+   * it, so a single-use code is used twice — and the second write also
+   * resurrects any code the first spent in between, because it rewrites the
+   * whole list from a stale snapshot.  The second is that the list is a
+   * PROJECTION of `mfa_recovery_codes` rows, so "set the list" has to diff the
+   * old and new sets to decide which rows to stamp — a wide write standing in
+   * for a one-row transition.
+   *
+   * As one statement it is also the only shape that can join the unit that
+   * records it: consuming outside and auditing inside means an append failure
+   * burns the code without granting access — worst on the last one, where it
+   * costs the account its remaining way in.
+   */
+  consumeRecoveryCode(
+    userId: string,
+    codeHash: string,
+    /** The session this code verifies.  Written in the SAME statement as the
+     *  consumption, which is what makes the spend and the grant one fact: a
+     *  session is MFA-verified if a spent row names it, so there is no second
+     *  write to fail and nothing to reconcile afterwards. */
+    verificationSessionHash: string,
+  ): Promise<{ remaining: number } | null>;
+  /**
+   * Has this session been granted MFA by a spent recovery code?
+   *
+   * THE GRANT ITSELF, read back — not a cache of it.  The session record's
+   * `mfa_verified` flag lives in Redis while the code is spent in Postgres, and
+   * for four rounds every attempt to keep those two in step was an ordering
+   * argument with a window in it: grant-then-record loses the record, and
+   * record-then-grant loses the grant.  A recovery code is the one factor where
+   * losing it is unrecoverable — it is finite, and the last one is the account.
+   *
+   * So the durable row IS the grant, and the flag is only an optimisation for
+   * the sessions that already carry it.  Nothing has to be settled, resumed,
+   * claimed or taken over, because nothing can be half-done: either the
+   * transaction that spends the code committed, or it did not.
+   */
+  sessionHasRecoveryGrant(sessionHash: string): Promise<boolean>;
   // --- WebAuthn credentials ---
   /** UPSERT by `credentialId` — counter/last-used updates re-add the credential. */
   addWebauthn(cred: StoredWebauthnCredential): Promise<void>;
@@ -151,6 +198,16 @@ export interface IdentityStore {
   setDeletion(req: StoredDeletionRequest): Promise<void>;
   /** Grace-period deletion requests whose purge instant has passed (scheduler). */
   duePurgeDeletions(now: number): Promise<StoredDeletionRequest[]>;
+  /**
+   * EVERY grace-period request, due or not — the reconciliation set.
+   *
+   * A deletion request commits before its session revoke (only one of the two
+   * can be retried), and the revoke can fail. The client cannot retry it: the
+   * same commit deactivates the account, so `authMiddleware` refuses every route
+   * that is not deletion-pending-aware. The row itself is therefore the durable
+   * record of unfinished work, and the sweep finishes it.
+   */
+  pendingDeletions(): Promise<StoredDeletionRequest[]>;
   // --- Lifecycle ---
   /** Hard-remove every trace of a user (tests / hard purge). */
   purgeUser(userId: string): Promise<void>;
@@ -160,13 +217,41 @@ export interface IdentityStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryIdentityStore implements IdentityStore {
+export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
   readonly #users = new Map<string, StoredUser>();
   readonly #auth = new Map<string, StoredUserAuth>();
+  /** `${userId}:${codeHash}` → the session that spend granted MFA to.  The
+   *  in-memory twin of `mfa_recovery_codes.verification_session_hash`, which is
+   *  the grant itself rather than a note about one. */
+  readonly #recoveryGrants = new Map<string, { sessionHash: string }>();
   readonly #webauthn = new Map<string, StoredWebauthnCredential>();
   readonly #walletAuth = new Map<string, StoredWalletAuthCredential>();
   readonly #exportJobs = new Map<string, StoredExportJob>();
   readonly #deletions = new Map<string, StoredDeletionRequest>();
+
+  /**
+   * The unit of work's undo.
+   *
+   * Every write here REPLACES its row (`{ ...row, ...patch }` then `set`), which
+   * is what makes a shallow snapshot sound — see `mapRollback`. Six maps because
+   * one identity change routinely touches several: disabling email sign-in
+   *  writes `users` and `user_auth`, and a unit that restored only one of them
+   * would answer a different question from the transaction it stands in for.
+   */
+  beginRollback(): () => void {
+    const undo = [
+      mapRollback(this.#users),
+      mapRollback(this.#auth),
+      mapRollback(this.#recoveryGrants),
+      mapRollback(this.#webauthn),
+      mapRollback(this.#walletAuth),
+      mapRollback(this.#exportJobs),
+      mapRollback(this.#deletions),
+    ];
+    return () => {
+      for (const restore of undo) restore();
+    };
+  }
 
   // --- Users ---------------------------------------------------------------
   async createUser(
@@ -247,7 +332,45 @@ export class InMemoryIdentityStore implements IdentityStore {
     if (!auth) return null;
     const updated = { ...auth, ...patch };
     this.#auth.set(userId, updated);
+    // A FACTOR RESET INVALIDATES EVERY PENDING RESUME — see the Drizzle twin: a
+    // grant is about the factor it was issued for, and replacing the code set
+    // ends that factor — so a session that a retired code had verified stops
+    // deriving its MFA standing from it.
+    if (patch.recoveryCodeHashes !== undefined) {
+      for (const key of [...this.#recoveryGrants.keys()]) {
+        if (key.startsWith(`${userId}:`)) this.#recoveryGrants.delete(key);
+      }
+    }
     return updated;
+  }
+
+  async consumeRecoveryCode(
+    userId: string,
+    codeHash: string,
+    verificationSessionHash: string,
+  ): Promise<{ remaining: number } | null> {
+    // Test and write with NO `await` between them — on a single-threaded
+    // runtime that is the same guarantee the conditional UPDATE gives.
+    const auth = this.#auth.get(userId);
+    if (!auth) return null;
+    const idx = auth.recoveryCodeHashes.indexOf(codeHash);
+    if (idx < 0) return null;
+    const remaining = auth.recoveryCodeHashes.filter((_, i) => i !== idx);
+    this.#auth.set(userId, { ...auth, recoveryCodeHashes: remaining });
+    // The grant rides the SAME write as the consumption. A code spent with no
+    // note of what it verified was the lockout this column exists to prevent,
+    // and a second write could fail on its own.
+    this.#recoveryGrants.set(`${userId}:${codeHash}`, {
+      sessionHash: verificationSessionHash,
+    });
+    return { remaining: remaining.length };
+  }
+
+  async sessionHasRecoveryGrant(sessionHash: string): Promise<boolean> {
+    for (const grant of this.#recoveryGrants.values()) {
+      if (grant.sessionHash === sessionHash) return true;
+    }
+    return false;
   }
 
   // --- WebAuthn credentials ------------------------------------------------
@@ -343,6 +466,10 @@ export class InMemoryIdentityStore implements IdentityStore {
     return [...this.#deletions.values()].filter(
       (d) => d.state === 'grace_period' && Date.parse(d.purgeAt) <= now,
     );
+  }
+
+  async pendingDeletions(): Promise<StoredDeletionRequest[]> {
+    return [...this.#deletions.values()].filter((d) => d.state === 'grace_period');
   }
 
   /** Hard-remove every trace of a user (used by tests / hard purge). */

@@ -23,6 +23,7 @@ import type {
   ReviewerAvailability,
   StewardRoleId,
 } from '@licio/shared';
+import { isOpenCaseStatus } from '@licio/shared';
 import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 type Clock = () => number;
@@ -124,6 +125,10 @@ export interface ModerationAuditRecord {
   coApproverUserId: string | null;
   notes: string | null;
   createdAt: string;
+  /** Set when this row must exist AT MOST ONCE (the §21 listing capture is
+   *  `listing-evidence:<caseId>`); NULL for every ordinary row. The partial
+   *  unique index decides, so two concurrent writers cannot both land. */
+  idempotencyKey?: string | null;
 }
 
 export interface AccountBlockRecord {
@@ -290,6 +295,28 @@ export interface ModerationCaseStore {
    */
   delayEnforcementIfNotDelayed(caseId: string): Promise<ModerationCaseRecord | null>;
   /**
+   * COMPARE-AND-SET: resolve a case ONLY while it is still open, and only when
+   * it is the case about the target the caller believes it is.
+   *
+   * Both halves of the precondition live in the write for the same reason
+   * `claimIfUnassigned` puts the assignee there.  A remedy that carries a
+   * `case_id` from a client is carrying a value that can be STALE — resolved
+   * minutes ago by another reviewer, or simply wrong — and an unconditional
+   * `update` then rewrote a completed case: its `resolvedActionId` link to the
+   * enforcement that actually closed it was replaced with null, and the case
+   * history presented a later, unrelated remedy as its resolution.  A read of
+   * `status` before the write cannot fix that, because the whole question is
+   * what happened between the read and the write.
+   *
+   * Null ⇒ no such case, a case about a different target, or one already
+   * resolved — the caller must not claim to have resolved it, and must not
+   * attach its record to it either.
+   */
+  resolveIfOpen(
+    caseId: string,
+    target: { targetType: ReportTargetType; targetId: string },
+  ): Promise<ModerationCaseRecord | null>;
+  /**
    * REASSIGN only if the case is still held by `expectedAssignee`.
    *
    * The reasoned-reassignment path used an unconditional `update`, so two reviewers
@@ -414,6 +441,21 @@ export interface AuditQueryFilter {
   offset?: number;
 }
 
+/**
+ * The audit row this key names already exists.
+ *
+ * A distinct outcome from a chain-fork conflict, which is why it is an error
+ * rather than the `null` that means "retry against the new head": a duplicate
+ * key is settled, and retrying it would spin. `writeAudit` catches it, so the
+ * caller sees the no-op it is.
+ */
+export class DuplicateAuditKeyError extends Error {
+  constructor(readonly key: string) {
+    super(`an audit row already exists for idempotency key '${key}'`);
+    this.name = 'DuplicateAuditKeyError';
+  }
+}
+
 export interface ModerationAuditStore {
   /** Append-only: the only write path. */
   append(
@@ -449,9 +491,13 @@ export interface AccountBlockStore {
   getById(blockId: string): Promise<AccountBlockRecord | null>;
   delete(blockId: string, ownerUserId: string): Promise<boolean>;
   findPair(blockerUserId: string, blockedUserId: string): Promise<AccountBlockRecord | null>;
+  /** Keyset page over `(createdAt, blockId)` DESC — the id is not decoration:
+   *  `created_at` is millisecond-resolution, so two blocks made in the same
+   *  millisecond compare EQUAL, and a timestamp-only cursor drops whichever of
+   *  them the page did not end on. */
   listByBlocker(
     blockerUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly blockId: string } | null,
     limit: number,
   ): Promise<AccountBlockRecord[]>;
   /** True when EITHER user has blocked the other (bilateral enforcement). */
@@ -470,9 +516,10 @@ export interface AccountMuteStore {
   getById(muteId: string): Promise<AccountMuteRecord | null>;
   delete(muteId: string, ownerUserId: string): Promise<boolean>;
   findPair(muterUserId: string, mutedUserId: string): Promise<AccountMuteRecord | null>;
+  /** Keyset page over `(createdAt, muteId)` DESC — see `listByBlocker`. */
   listByMuter(
     muterUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly muteId: string } | null,
     limit: number,
   ): Promise<AccountMuteRecord[]>;
   /** Active (non-expired at `nowIso`) muted-user ids for the muter. */
@@ -523,9 +570,19 @@ export interface ModerationNoticeStore {
   insert(
     record: Omit<ModerationNoticeRecord, 'noticeId' | 'createdAt'>,
   ): Promise<ModerationNoticeRecord>;
+  /**
+   * One page of a user's notices, newest first.
+   *
+   * The cursor is `(createdAt, noticeId)`, not a timestamp alone: Postgres can
+   * stamp several inserts in one transaction with the SAME `now()`, so a
+   * timestamp-only `created_at < cursor` skips every row tied with the last one
+   * on the page. The DSAR export loops this to completion and calls the result
+   * complete, which is where a silently dropped notice stops being a display
+   * bug and becomes a compliance one (§19.3 / GDPR Art. 15).
+   */
   listByUser(
     userId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly noticeId: string } | null,
     limit: number,
   ): Promise<ModerationNoticeRecord[]>;
   markRead(noticeId: string, userId: string, nowIso: string): Promise<boolean>;
@@ -619,8 +676,32 @@ export interface EvidenceDecisionStore {
 // In-memory adapters.
 // ---------------------------------------------------------------------------
 
-function afterCreated<T extends { createdAt: string }>(rows: T[], after: string | null): T[] {
-  return after === null ? rows : rows.filter((r) => r.createdAt < after);
+/**
+ * Descending keyset page over `(createdAt, id)`.
+ *
+ * The id half is load-bearing.  This compared the timestamp ALONE, which is a
+ * page boundary only while no two rows share one — and `created_at` is
+ * millisecond resolution, so two blocks (or mutes) created in the same
+ * millisecond compare equal and `createdAt < after` excludes BOTH.  Whichever
+ * one the page did not end on was dropped from the listing permanently, and
+ * the page came back short, which is how the caller decides it reached the end.
+ */
+function afterKeyset<T extends { createdAt: string }>(
+  rows: T[],
+  after: { createdAt: string; id: string } | null,
+  idOf: (row: T) => string,
+): T[] {
+  if (after === null) return rows;
+  return rows.filter(
+    (r) => r.createdAt < after.createdAt || (r.createdAt === after.createdAt && idOf(r) < after.id),
+  );
+}
+
+/** The same DESC order the keyset predicate assumes; they must not diverge. */
+function byCreatedThenIdDesc<T extends { createdAt: string }>(
+  idOf: (row: T) => string,
+): (a: T, b: T) => number {
+  return (a, b) => b.createdAt.localeCompare(a.createdAt) || idOf(b).localeCompare(idOf(a));
 }
 
 export class InMemoryModerationCaseStore implements ModerationCaseStore, InMemoryRollback {
@@ -704,6 +785,26 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore, InMemor
       enforcementDelayed: true,
       updatedAt: iso(this.#now),
     };
+    this.#rows.set(caseId, updated);
+    return { ...updated };
+  }
+
+  async resolveIfOpen(
+    caseId: string,
+    target: { targetType: ReportTargetType; targetId: string },
+  ): Promise<ModerationCaseRecord | null> {
+    // Read, test and write with NO `await` between them, matching the Drizzle
+    // adapter's one-statement conditional UPDATE.
+    const r = this.#rows.get(caseId);
+    if (
+      !r ||
+      r.targetType !== target.targetType ||
+      r.targetId !== target.targetId ||
+      !isOpenCaseStatus(r.status)
+    ) {
+      return null;
+    }
+    const updated: ModerationCaseRecord = { ...r, status: 'resolved', updatedAt: iso(this.#now) };
     this.#rows.set(caseId, updated);
     return { ...updated };
   }
@@ -1031,6 +1132,22 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore, InMem
     entry: ModerationAuditRecord,
     hashOf: (staged: ModerationAuditRecord) => string,
   ): Promise<ModerationAuditRecord | null> {
+    // AT MOST ONCE, where the caller asked for it — the same partial unique the
+    // SQL adapter has (`moderation_audit_idempotency_uq`). A row that already
+    // carries this key is the answer; a second one is refused rather than
+    // appended, and the caller is told nothing landed because nothing needed to.
+    //
+    // Distinct from the chain conflict below, and it must NOT be reported as
+    // one: the retry loop treats null as "the parent slot was taken, read the
+    // new head and try again", which for a duplicate key would loop until it
+    // gave up. So this throws, and `writeAudit` (the catching variant) turns it
+    // into the no-op it is.
+    if (
+      entry.idempotencyKey != null &&
+      this.#rows.some((r) => r.idempotencyKey === entry.idempotencyKey)
+    ) {
+      throw new DuplicateAuditKeyError(entry.idempotencyKey);
+    }
     // The in-memory stand-in for the fork-proof partial unique.  A single-threaded fold
     // cannot actually race, but the CONTRACT has to be the same one the SQL adapter
     // offers, or the retry loop is exercised by only one of them.
@@ -1148,13 +1265,18 @@ export class InMemoryAccountBlockStore implements AccountBlockStore {
   }
   async listByBlocker(
     blockerUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly blockId: string } | null,
     limit: number,
   ): Promise<AccountBlockRecord[]> {
+    const idOf = (r: AccountBlockRecord) => r.blockId;
     const rows = [...this.#rows.values()]
       .filter((r) => r.blockerUserId === blockerUserId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return afterCreated(rows, afterCreatedAt)
+      .sort(byCreatedThenIdDesc(idOf));
+    return afterKeyset(
+      rows,
+      after === null ? null : { createdAt: after.createdAt, id: after.blockId },
+      idOf,
+    )
       .slice(0, limit)
       .map((r) => ({ ...r }));
   }
@@ -1227,13 +1349,18 @@ export class InMemoryAccountMuteStore implements AccountMuteStore {
   }
   async listByMuter(
     muterUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly muteId: string } | null,
     limit: number,
   ): Promise<AccountMuteRecord[]> {
+    const idOf = (r: AccountMuteRecord) => r.muteId;
     const rows = [...this.#rows.values()]
       .filter((r) => r.muterUserId === muterUserId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return afterCreated(rows, afterCreatedAt)
+      .sort(byCreatedThenIdDesc(idOf));
+    return afterKeyset(
+      rows,
+      after === null ? null : { createdAt: after.createdAt, id: after.muteId },
+      idOf,
+    )
       .slice(0, limit)
       .map((r) => ({ ...r }));
   }
@@ -1388,15 +1515,23 @@ export class InMemoryModerationNoticeStore implements ModerationNoticeStore, InM
   }
   async listByUser(
     userId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly noticeId: string } | null,
     limit: number,
   ): Promise<ModerationNoticeRecord[]> {
+    // The SAME total order the SQL twin pages by — `(createdAt, noticeId)`
+    // descending — so a tie at a page boundary is resumed rather than skipped.
     const rows = [...this.#rows.values()]
       .filter((r) => r.userId === userId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return afterCreated(rows, afterCreatedAt)
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
+      .sort(
+        (a, b) => b.createdAt.localeCompare(a.createdAt) || b.noticeId.localeCompare(a.noticeId),
+      )
+      .filter(
+        (r) =>
+          after === null ||
+          r.createdAt < after.createdAt ||
+          (r.createdAt === after.createdAt && r.noticeId < after.noticeId),
+      );
+    return rows.slice(0, limit).map((r) => ({ ...r }));
   }
   async markRead(noticeId: string, userId: string, nowIso: string): Promise<boolean> {
     const r = this.#rows.get(noticeId);

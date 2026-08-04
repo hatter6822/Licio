@@ -33,6 +33,7 @@ import {
 import { privateOwnershipOutcome } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, revokeAllForUser, validateSession } from '../identity/sessions.js';
+import { createLogger } from '../lib/logger.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { zValidator } from '../lib/validate.js';
 import {
@@ -45,6 +46,9 @@ import {
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60_000;
 const cancelTokenKey = (token: string) => `delcancel:${sha256Hex(token)}`;
 const u = { error: { code: 'unauthenticated', message: 'Authentication required' } } as const;
+
+/** Pino is the only server logging path (redaction lives there). */
+const privacyLogger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 
 export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentityServices) {
   return (
@@ -107,18 +111,23 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
             for (const key of Object.keys(patch.personalization_settings)) changed.push(key);
           }
 
-          await services.store.updateUser(auth.userId, {
-            privacySettings: nextPrivacy,
-            personalizationSettings: nextPersonalization,
-          });
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'privacy_setting_change',
-            context: {
-              setting: changed.join(','),
-              previous_value: String(user.privacySettings.personalization_enabled),
-              new_value: String(nextPrivacy.personalization_enabled),
-            },
+          // §19.3 requires a record of every privacy-setting change, so the
+          // change and the record commit together: an append failure must not
+          // leave a setting silently altered.
+          await services.transact(async (tx) => {
+            await tx.store.updateUser(auth.userId, {
+              privacySettings: nextPrivacy,
+              personalizationSettings: nextPersonalization,
+            });
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'privacy_setting_change',
+              context: {
+                setting: changed.join(','),
+                previous_value: String(user.privacySettings.personalization_enabled),
+                new_value: String(nextPrivacy.personalization_enabled),
+              },
+            });
           });
           // Disabling personalization / retention=none must actually stop collection.
           services.onPrivacyChange?.({
@@ -148,11 +157,27 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
           const { mode } = c.req.valid('json');
-          const removed = (await services.purgeAttention?.(auth.userId, mode)) ?? 0;
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'attention_delete',
-            context: {},
+          // The erasure and its record are ONE COMMIT — through `tx`, not
+          // through the service-level hook.
+          //
+          // Nesting the ordinary hook inside the unit was lexical only: it
+          // writes through separately-composed WS-E stores, so a purge that
+          // succeeded before a later failure destroyed the user's attention
+          // history irreversibly while the `attention_delete` row rolled back
+          // and the endpoint answered 500 — an erasure that happened, is
+          // denied, and has no record. `tx.purgeAttention` is the same purge
+          // built over the identity transaction's own executor (the WS-E tables
+          // are in the same database), so the two commit or fail together. A
+          // root that cannot bind it says so by ABSENCE, and the fallback keeps
+          // the ordering guarantee that is available without binding.
+          const removed = await services.transact(async (tx) => {
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'attention_delete',
+              context: {},
+            });
+            const purge = tx.purgeAttention ?? services.purgeAttention;
+            return (await purge?.(auth.userId, mode)) ?? 0;
           });
           // WS-E.1.1e producer: the privacy pipeline observes the request.
           await emitPrivacyRequestEvent(
@@ -177,13 +202,20 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           if (!auth) return c.json(u, 401);
           // One active export per user: a second request returns the existing job.
           const existing = await services.store.activeExportJob(auth.userId);
-          const job = existing ?? (await services.store.createExportJob(auth.userId));
+          // The job row and the record of the request are one fact (Art. 15 asks
+          // for both), so a new job is minted inside the unit that records it.
+          const job =
+            existing ??
+            (await services.transact(async (tx) => {
+              const created = await tx.store.createExportJob(auth.userId);
+              await tx.audit.append({
+                actorUserId: auth.userId,
+                eventType: 'export_request',
+                context: {},
+              });
+              return created;
+            }));
           if (!existing) {
-            await services.audit.append({
-              actorUserId: auth.userId,
-              eventType: 'export_request',
-              context: {},
-            });
             await emitPrivacyRequestEvent(
               getEventPipelineServices(),
               'export',
@@ -287,21 +319,71 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
           const now = Date.now();
-          await services.store.updateUser(auth.userId, { accountState: 'deactivated' }, now);
-          await services.store.setDeletion({
-            userId: auth.userId,
-            state: 'grace_period',
-            requestedAt: new Date(now).toISOString(),
-            purgeAt: new Date(now + GRACE_PERIOD_MS).toISOString(),
-            cancelledAt: null,
-            completedAt: null,
+          // THREE writes plus a Redis revoke, one fact. The account state and
+          // the deletion row apart is an account deactivated with no scheduled
+          // purge (or a purge scheduled against a live account); the record
+          // missing is an Art. 17 request nothing accounts for.
+          //
+          // THE REVOKE FOLLOWS THE COMMIT, for the same reason the single-session
+          // revoke does: it is a Redis write that cannot join this transaction,
+          // and lexical nesting does not make it roll back. Inside the unit, a
+          // commit failure after a successful revoke left every session gone
+          // while the deactivation, the schedule and the record all rolled back
+          // — an action performed, denied, and unrecorded.
+          //
+          // After it, the ordering is safe in both directions: the account is
+          // already `deactivated`, which `authMiddleware` refuses, so a session
+          // that briefly outlives the commit can do nothing with itself. And
+          // revoking is idempotent, so the retry the 503 asks for finishes it.
+          await services.transact(async (tx) => {
+            await tx.store.updateUser(auth.userId, { accountState: 'deactivated' }, now);
+            await tx.store.setDeletion({
+              userId: auth.userId,
+              state: 'grace_period',
+              requestedAt: new Date(now).toISOString(),
+              purgeAt: new Date(now + GRACE_PERIOD_MS).toISOString(),
+              cancelledAt: null,
+              completedAt: null,
+            });
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'deletion_request',
+              context: {},
+            });
           });
-          await revokeAllForUser(services.sessions, auth.userId);
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'deletion_request',
-            context: {},
-          });
+          try {
+            await revokeAllForUser(services.sessions, auth.userId);
+          } catch (error) {
+            // LOUD: the deletion is recorded and the account deactivated, so a
+            // session store that did not answer is a discrepancy an operator has
+            // to be able to see — not something to swallow behind a 200.
+            // FINISHED BY THE SWEEP, not by a client retry.
+            //
+            // The same commit deactivated this account, so `authMiddleware`
+            // refuses every route that is not deletion-pending-aware — the
+            // caller cannot reach this endpoint again, and telling them to try
+            // was advice they could not take. The grace-period row IS the
+            // durable record of the unfinished revoke, and
+            // `reconcileDeletionRevocations` completes it on the next sweep.
+            privacyLogger.error(
+              {
+                auditAction: 'deletion_revoke_incomplete',
+                userId: auth.userId,
+                message: error instanceof Error ? error.message : 'unknown',
+              },
+              'a deletion request is committed with sessions still live; the sweep will end them',
+            );
+            return c.json(
+              {
+                error: {
+                  code: 'revoke_incomplete',
+                  message:
+                    'Your deletion request was recorded. Existing sessions could not be ended just now and will be ended shortly.',
+                },
+              },
+              503,
+            );
+          }
           await emitPrivacyRequestEvent(
             getEventPipelineServices(),
             'deletion',
@@ -359,16 +441,21 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
         if (req?.state !== 'grace_period') {
           return c.json({ error: { code: 'not_found', message: 'No cancellable deletion.' } }, 404);
         }
-        await services.store.setDeletion({
-          ...req,
-          state: 'cancelled',
-          cancelledAt: new Date().toISOString(),
-        });
-        await services.store.updateUser(userId, { accountState: 'active' });
-        await services.audit.append({
-          actorUserId: userId,
-          eventType: 'deletion_cancel',
-          context: {},
+        // The cancellation and the reactivation are one fact — apart, they leave
+        // an account that is live with a purge still scheduled, or deactivated
+        // with nothing scheduled to finish it — and the record belongs with them.
+        await services.transact(async (tx) => {
+          await tx.store.setDeletion({
+            ...req,
+            state: 'cancelled',
+            cancelledAt: new Date().toISOString(),
+          });
+          await tx.store.updateUser(userId, { accountState: 'active' });
+          await tx.audit.append({
+            actorUserId: userId,
+            eventType: 'deletion_cancel',
+            context: {},
+          });
         });
         await emitPrivacyRequestEvent(getEventPipelineServices(), 'deletion', userId, 'cancelled');
         return c.json(await toDeletionStatus(services, userId));

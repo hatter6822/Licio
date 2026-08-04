@@ -74,7 +74,7 @@ async function ageAssurance(sid: string, ms: number) {
   const token = sid.split('=')[1] as string;
   const stored = await services.sessions.get(sha256Hex(token));
   if (!stored) throw new Error('no session');
-  await services.sessions.put(sha256Hex(token), {
+  await services.sessions.putIfVersion(sha256Hex(token), stored.version, {
     ...stored,
     record: {
       ...stored.record,

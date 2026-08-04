@@ -158,7 +158,37 @@ interfaces.
   app's own dependency-free encoder at its v5 opt-in; the LCAP §22.3
   micro-bundle profile stays pinned to v4) plus the grouped **setup key**
   with a copy affordance for the manual "enter a setup key" path
-  (`apps/web/src/lib/otpauth.ts`).
+  (`apps/web/src/lib/otpauth.ts`).  A recovery code is spent by
+  `IdentityStore.consumeRecoveryCode` — a compare-and-set whose predicate is the
+  `used_at IS NULL` WHERE clause, so single-use is a property of the write rather
+  than of a read before it — and it runs INSIDE the unit that records the
+  verification, so an audit failure cannot burn a code without granting access.
+  A rejected attempt is `mfa_verify_failed`, distinct from the `mfa_verify` a
+  success writes: the trail has to be able to answer "did this account clear
+  MFA?", which it could not while a brute-force run and a sign-in produced
+  identical rows.
+
+  **THE SPEND IS THE GRANT.**  That same statement records which session the code
+  verifies (`mfa_recovery_codes.verification_session_hash`), and
+  `sessionHasRecoveryGrant` reads it back: a session has cleared MFA if its own
+  record says so OR a spent row names it (`authMiddleware`).  So the grant is one
+  durable fact, written once, in the transaction that earns it.
+
+  It was a two-store protocol before — earned in Postgres, stored in Redis — and
+  neither ordering of those two writes is correct: grant-then-record leaves a
+  verified session nothing accounts for, and record-then-grant spends the code
+  without verifying anything, which on the LAST code is the account.  A
+  "continuation" carried the second case and had to be settled, claimed, expired
+  and taken over; four rounds of review found a window in each of those in turn,
+  because the windows are what the shape produces.  None of that machinery
+  survives.  The Redis flag is now an optimisation whose failure costs a lookup,
+  and single-use is held by the database: one code, one session, by a partial
+  UNIQUE index on `verification_session_hash` (migration 0130).
+
+  TOTP keeps the older shape deliberately (`finishTotpVerification`): it spends
+  nothing durable, so a failed grant there costs the holder one retry with the
+  next code.  Sharing a path between the two was itself part of the mistake — it
+  made a spend whose loss is unrecoverable look like one whose loss is free.
 
 WS-D endpoints rely on `SameSite=Strict` + the opaque session model + a per-flow
 `login_attempt_id` binding as the CSRF defense (so they are exempt from the WS-C

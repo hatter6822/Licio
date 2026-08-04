@@ -27,15 +27,13 @@ import {
   jsonb,
   pgSchema,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { users } from './user.js';
 
 export const complianceSchema = pgSchema('compliance');
-
-const tz = (name: string) => timestamp(name, { withTimezone: true });
 
 // ---------------------------------------------------------------------------
 // Enums (closed vocabularies; the JSONB sub-shapes are zod-validated in
@@ -133,8 +131,8 @@ export const jurisdictionFeaturePolicies = complianceSchema.table(
     disclosureRefs: jsonb('disclosure_refs').notNull().default([]),
     /** Null until legal sign-off is recorded; an `enabled` cell REQUIRES it. */
     legalApprovalRef: text('legal_approval_ref'),
-    effectiveAt: tz('effective_at').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    effectiveAt: instant('effective_at').notNull(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('jfp_region_effective_uq').on(t.countryOrRegion, t.effectiveAt),
@@ -166,7 +164,7 @@ export const jurisdictionPolicyAudits = complianceSchema.table(
     approvalRef: text('approval_ref'),
     prevHash: text('prev_hash'),
     integrityHash: text('integrity_hash').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('jpa_chain_parent_uq')
@@ -199,8 +197,8 @@ export const financialComplianceCases = complianceSchema.table(
     retentionPolicy: jsonb('retention_policy').notNull(),
     /** Trigger-scoped dedup key: the same incident never opens two cases. */
     idempotencyKey: text('idempotency_key'),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     index('fcc_review_state_idx').on(t.reviewState),
@@ -235,7 +233,7 @@ export const complianceCaseAudits = complianceSchema.table(
     note: text('note'),
     prevHash: text('prev_hash'),
     integrityHash: text('integrity_hash').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('cca_chain_parent_uq')
@@ -265,10 +263,10 @@ export const regionDeclarations = complianceSchema.table('region_declaration', {
     .default('unverified'),
   /** Opaque evidence reference — never a raw document (data minimization). */
   evidenceRef: text('evidence_ref'),
-  verifiedAt: tz('verified_at'),
+  verifiedAt: instant('verified_at'),
   verifiedBy: uuid('verified_by').references(() => users.userId, { onDelete: 'set null' }),
-  createdAt: tz('created_at').notNull().defaultNow(),
-  updatedAt: tz('updated_at').notNull().defaultNow(),
+  createdAt: instant('created_at').notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 
 // ---------------------------------------------------------------------------
@@ -288,10 +286,10 @@ export const kycVerifications = complianceSchema.table('kyc_verification', {
   status: kycStatusEnum('status').notNull().default('pending'),
   /** Opaque partner/case reference — never a raw document. */
   evidenceRef: text('evidence_ref'),
-  verifiedAt: tz('verified_at'),
+  verifiedAt: instant('verified_at'),
   verifiedBy: uuid('verified_by').references(() => users.userId, { onDelete: 'set null' }),
-  createdAt: tz('created_at').notNull().defaultNow(),
-  updatedAt: tz('updated_at').notNull().defaultNow(),
+  createdAt: instant('created_at').notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 
 // ---------------------------------------------------------------------------
@@ -318,7 +316,7 @@ export const disclosureVersions = complianceSchema.table(
      *  to a failure could never be added — the retry only meets the
      *  already-published row. */
     publishedByRef: text('published_by_ref').notNull(),
-    publishedAt: tz('published_at').notNull().defaultNow(),
+    publishedAt: instant('published_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('dv_identity_uq').on(t.disclosureId, t.region, t.version, t.locale),
@@ -335,7 +333,7 @@ export const disclosureAcknowledgments = complianceSchema.table(
     disclosureId: text('disclosure_id').notNull(),
     version: integer('version').notNull(),
     region: text('region').notNull(),
-    acknowledgedAt: tz('acknowledged_at').notNull().defaultNow(),
+    acknowledgedAt: instant('acknowledged_at').notNull().defaultNow(),
   },
   (t) => [
     // Region is part of the key: the same (disclosure_id, version) carries
@@ -362,8 +360,8 @@ export const walletRiskPins = complianceSchema.table(
     walletAccountId: uuid('wallet_account_id').notNull(),
     reason: text('reason').notNull(),
     pinnedByRef: text('pinned_by_ref').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    releasedAt: tz('released_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    releasedAt: instant('released_at'),
     releasedByRef: text('released_by_ref'),
   },
   (t) => [uniqueIndex('wrp_active_uq').on(t.walletAccountId).where(sql`${t.releasedAt} IS NULL`)],
@@ -387,7 +385,7 @@ export const sarReports = complianceSchema.table(
     status: sarStatusEnum('status').notNull().default('draft'),
     narrative: text('narrative').notNull(),
     filingRef: text('filing_ref'),
-    filedAt: tz('filed_at'),
+    filedAt: instant('filed_at'),
     partnerFiled: boolean('partner_filed').notNull().default(false),
     createdByRef: text('created_by_ref').notNull(),
     approvedByRef: text('approved_by_ref'),
@@ -396,8 +394,8 @@ export const sarReports = complianceSchema.table(
      *  act cannot go on the case chain, which compliance reviewers read
      *  (anti-tipping-off, WS-N.2.1e). */
     filedByRef: text('filed_by_ref'),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [index('sar_case_idx').on(t.caseId)],
 );
@@ -421,12 +419,12 @@ export const lawfulAccessRequests = complianceSchema.table(
     reviewNote: text('review_note'),
     reviewedByRef: text('reviewed_by_ref'),
     productionSummary: text('production_summary'),
-    userNotifiedAt: tz('user_notified_at'),
+    userNotifiedAt: instant('user_notified_at'),
     caseId: uuid('case_id').references(() => financialComplianceCases.caseId, {
       onDelete: 'set null',
     }),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    updatedAt: tz('updated_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [index('lar_status_idx').on(t.status)],
 );

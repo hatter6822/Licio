@@ -34,9 +34,14 @@ import {
 } from '@licio/invariants';
 import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
+import { InMemoryItemSafetyStateStore, type ItemSafetyStateStore } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
+import type { RoomStore } from '../forum/stores.js';
+import { type AuditEntryInput, InMemoryAuditStore } from '../identity/audit.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import type { StoryStore } from '../ingestion/stores.js';
+import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { deterministicEventId } from '../pwatt/scoring.js';
 import { INVARIANT_CARDS, validateAllCards } from './cards.js';
 import {
@@ -80,6 +85,51 @@ import {
   type SessionTopicSequenceStore,
 } from './stores.js';
 
+/**
+ * The stores one invariant UNIT writes through, bound to a single handle.
+ *
+ * Small on purpose: it holds exactly the pair that must commit together — a
+ * durable invariant record and the WS-D audit row that accounts for it.
+ */
+export interface InvariantTx {
+  readonly bridgeAttempts: BridgeAttemptStore;
+  /** The audit append, bound to the SAME handle as the write above. */
+  readonly audit: (input: AuditEntryInput) => Promise<unknown>;
+  /**
+   * The thread read, bound to that handle too.
+   *
+   * A bridge attempt is only writable while its conversation still ACCEPTS
+   * contributions, and reading that through a separately-composed store leaves
+   * the window the check exists to close: the archive commits between the read
+   * and the insert, and the attempt lands anyway — unanswerable, and blocking
+   * the thread's open-row slot for good. A predicate the write depends on has
+   * to be read where the write happens.
+   */
+  readonly threads: Pick<StoryStore, 'getThreadById' | 'getThreadByIdForUpdate'>;
+  /**
+   * The room and its stewards, on that handle too.
+   *
+   * WS-Q moves a thread between rooms and a steward grant can be revoked, so
+   * "this caller may act on this conversation" is as perishable as its
+   * writability — and it is checked before a candidate lookup that takes its own
+   * time. Both are re-asked inside the unit, against the row it holds.
+   */
+  readonly rooms: Pick<RoomStore, 'getById' | 'stewardRolesFor'>;
+  /** The shadow-status history — a promotion is a durable governance decision
+   *  and carries the operator's identity-trail row with it. */
+  readonly promotions: PromotionStore;
+  /** MFCI cases + risk states — a steward's confirm/clear/escalate is a durable
+   *  decision that lifts or holds a safety freeze, and it carries the trail row
+   *  naming who made it. `resolve` is a compare-and-set, so once it lands there
+   *  is no second chance to write that row. */
+  readonly mfciCases: MfciCaseStore;
+  readonly mfciRiskStates: MfciRiskStateStore;
+  /** WS-E item safety state, on this handle: CLEARING a case lifts a freeze,
+   *  and a freeze lifted by a resolution that rolled back is a target left
+   *  unprotected by a decision that did not happen. */
+  readonly safety: ItemSafetyStateStore;
+}
+
 export interface InvariantPlatformServices {
   promotions: PromotionStore;
   calibrations: CalibrationStore;
@@ -88,6 +138,21 @@ export interface InvariantPlatformServices {
   mfciMargins: MfciMarginsStore;
   mfciRiskStates: MfciRiskStateStore;
   bridgeAttempts: BridgeAttemptStore;
+  /**
+   * Commit a durable invariant write WITH its audit record.
+   *
+   * The bridge-request endpoint inserted the attempt and then appended the
+   * audit, so an append failure answered 500 while leaving a live request
+   * behind: the map withheld the target, every retry answered `already_open`,
+   * and the durable action had no record. That is the shape
+   * `ModerationTransactor` exists for one module along, and it is not a
+   * moderation-specific obligation — so the seam lives here too rather than
+   * being re-derived per call site.
+   */
+  transact<T>(work: (tx: InvariantTx) => Promise<T>): Promise<T>;
+  /** The promotion service over a GIVEN store — so a caller inside a unit can
+   *  apply a promotion through the same handle that records it. */
+  promotionServiceOver(store: PromotionStore): PromotionService;
   sessions: SessionTopicSequenceStore;
   promotionService: PromotionService;
   meri: MeriService;
@@ -142,20 +207,65 @@ export function createInMemoryInvariantServices(
 
   const promotions = new InMemoryPromotionStore();
   const sessions = new InMemorySessionTopicSequenceStore();
-  const services: InvariantPlatformServices = {
-    promotions,
-    calibrations: new InMemoryCalibrationStore(),
-    runMetadata: new InMemoryRunMetadataStore(),
-    mfciCases: new InMemoryMfciCaseStore(),
-    mfciMargins: new InMemoryMfciMarginsStore(),
-    mfciRiskStates: new InMemoryMfciRiskStateStore(),
-    bridgeAttempts: new InMemoryBridgeAttemptStore(),
-    sessions,
-    // Pass a GETTER so a post-construction store swap (the production boot
-    // replaces `promotions` with the Drizzle adapter) is honoured — otherwise
-    // the service would keep reading the orphaned in-memory store.
-    promotionService: createPromotionService(
-      () => services.promotions,
+  const bridgeAttempts = new InMemoryBridgeAttemptStore();
+  // The in-memory unit reads its stores from `services` at RUN time, for the
+  // same reason the service getters below do: the production boot swaps the
+  // adapters in afterwards, and a unit that captured the in-memory ones would
+  // keep writing to stores nothing else reads.
+  const unit = new InMemoryUnitOfWork<InvariantTx>(
+    {
+      get bridgeAttempts(): BridgeAttemptStore {
+        return services.bridgeAttempts;
+      },
+      audit: (input) => identity.audit.append(input),
+      get threads(): Pick<StoryStore, 'getThreadById' | 'getThreadByIdForUpdate'> {
+        return ingestion.stories;
+      },
+      get rooms(): Pick<RoomStore, 'getById' | 'stewardRolesFor'> {
+        return forum.rooms;
+      },
+      get promotions(): PromotionStore {
+        return services.promotions;
+      },
+      get mfciCases(): MfciCaseStore {
+        return services.mfciCases;
+      },
+      get mfciRiskStates(): MfciRiskStateStore {
+        return services.mfciRiskStates;
+      },
+      get safety(): ItemSafetyStateStore {
+        return events.safetyStore;
+      },
+    },
+    // The AUDIT belongs in the undo too, and its absence was the same silent
+    // hole the ingestion stores had: `tx.audit` appends through the identity
+    // store, so a unit that recorded a promotion and then failed left the record
+    // of a change that never happened — audit-then-act, reintroduced by the
+    // rollback list rather than by the code that reads correctly above it.
+    () => [
+      ...(services.bridgeAttempts instanceof InMemoryBridgeAttemptStore ? [bridgeAttempts] : []),
+      ...(services.promotions instanceof InMemoryPromotionStore ? [services.promotions] : []),
+      ...(identity.audit instanceof InMemoryAuditStore ? [identity.audit] : []),
+      ...(services.mfciCases instanceof InMemoryMfciCaseStore ? [services.mfciCases] : []),
+      ...(services.mfciRiskStates instanceof InMemoryMfciRiskStateStore
+        ? [services.mfciRiskStates]
+        : []),
+      ...(events.safetyStore instanceof InMemoryItemSafetyStateStore ? [events.safetyStore] : []),
+    ],
+  );
+
+  /**
+   * The promotion service over ONE store.
+   *
+   * Two call sites need it: the container's own (reading whichever adapter is
+   * installed) and `/promotions`, which must apply the change through the unit
+   * that records it — and a second construction would be a second copy of the
+   * regression gate and the observed-evidence reads, which is exactly how the
+   * gate a promotion is checked against drifts from the one documented.
+   */
+  const buildPromotionService = (store: () => PromotionStore): PromotionService =>
+    createPromotionService(
+      store,
       (invariantType) =>
         Object.values(INVARIANT_CARDS).find((c) => c.invariant_type === invariantType) ?? null,
       log,
@@ -177,7 +287,26 @@ export function createInMemoryInvariantServices(
           observedConfidence: health.confidenceRatio,
         };
       },
-    ),
+    );
+
+  const services: InvariantPlatformServices = {
+    promotions,
+    calibrations: new InMemoryCalibrationStore(),
+    runMetadata: new InMemoryRunMetadataStore(),
+    mfciCases: new InMemoryMfciCaseStore(),
+    mfciMargins: new InMemoryMfciMarginsStore(),
+    mfciRiskStates: new InMemoryMfciRiskStateStore(),
+    bridgeAttempts,
+    transact: (work) => unit.run(work),
+    sessions,
+    // Pass a GETTER so a post-construction store swap (the production boot
+    // replaces `promotions` with the Drizzle adapter) is honoured — otherwise
+    // the service would keep reading the orphaned in-memory store.
+    // The SAME service, over a caller-supplied store — so `/promotions` can run
+    // `apply()` inside the unit that records it without re-deriving the
+    // regression gate and the observed-evidence reads.
+    promotionServiceOver: (store) => buildPromotionService(() => store),
+    promotionService: buildPromotionService(() => services.promotions),
     // Services are constructed below (deps need the config getter).
     meri: undefined as unknown as MeriService,
     mfci: undefined as unknown as MfciService,

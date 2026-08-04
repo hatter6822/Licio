@@ -843,34 +843,143 @@ export async function assembleActivitySnapshots(
 // Reeb (WS-H.7.4): engagement landscape over the topic-similarity graph
 // ---------------------------------------------------------------------------
 
+/** The most active PUBLIC items one landscape sweep draws. */
+const LANDSCAPE_NODES = 100;
+/** How many candidates are HYDRATED per round trip while looking for that many.
+ *  Hydration is the expensive half (it joins rooms for the visibility bar), so
+ *  it stays batched even though the candidates arrive in one read. */
+const LANDSCAPE_HYDRATE_BATCH = 200;
+/** …and the point at which it stops looking: a window whose active rows are
+ *  overwhelmingly restricted must not turn one map load into a table walk.
+ *  This is now the size of the SINGLE candidate read, not a sum of pages. */
+const LANDSCAPE_SCAN_CEILING = 1_000;
+
 export async function assembleEngagementLandscape(
   events: EventPipelineServices,
   ingestion: IngestionServices,
   nowMs: number,
-): Promise<{ nodes: ReebNode[]; edges: ReebEdge[] }> {
-  const recent = await ingestion.stories.listRecent(100);
+): Promise<{
+  nodes: ReebNode[];
+  edges: ReebEdge[];
+  stories: Map<string, StoryRecord>;
+  /** What the bounds did. Carried in the RESULT rather than left implicit,
+   *  because a landscape that stopped at its node cap or its scan ceiling is a
+   *  partial hour, and a consumer holding a bare node list cannot tell that
+   *  from a quiet one. */
+  scan: { complete: boolean; examined: number };
+}> {
   const hourMs = 3_600_000;
   const windowStart = new Date(Math.floor(nowMs / hourMs) * hourMs - hourMs).toISOString();
+
+  // START FROM THE WINDOW, not from recency.
+  //
+  // The landscape answers "what drew attention in this hour", and taking the
+  // most RECENT stories and then filtering by activity asks a different
+  // question: an older story with real activity is excluded before it is
+  // considered, and a hundred quiet new ones make an active hour report an
+  // empty landscape. The window rows already ARE the set of things that drew
+  // attention, so the bound applies to them — busiest first, so a truncated
+  // landscape keeps the clusters worth seeing.
+  // The cap counts PUBLIC nodes, so it is applied after hydration rather than to
+  // the candidate read.
+  //
+  // A window's busiest rows are not all public — `room_only`, hidden and deleted
+  // stories draw events too — so limiting the candidate query to
+  // `LANDSCAPE_NODES` spent the whole budget before anything was filtered: a
+  // hundred high-activity restricted rows produced an EMPTY map for an hour with
+  // real public activity. It hydrates in bounded batches until the landscape is
+  // full or the candidates run out, with a hard ceiling on the candidate read so
+  // a window that is overwhelmingly restricted cannot turn one map load into a
+  // table walk.
   const nodes: ReebNode[] = [];
-  for (const story of recent) {
-    const window = await events.windowStore.get(story.storyId, windowStart, '1h');
-    nodes.push({ id: story.storyId, value: window?.eventCount ?? 0 });
+  const topicsById = new Map<string, readonly string[]>();
+  const byId = new Map<string, StoryRecord>();
+  let examined = 0;
+  // ONE SNAPSHOT of the candidates, then a walk over it.
+  //
+  // The scan used to re-read the window with a growing limit and slice off what
+  // it had already seen, which is OFFSET pagination over an ordering that
+  // MUTATES: a late offline event recomputes the completed hour, `event_count`
+  // changes, and a row can move into the prefix the next read discards — never
+  // examined, and (if that enlarged read came back short) reported as a
+  // complete scan. De-duplicating by id, which is what the loop did carry,
+  // prevents a duplicate node; it cannot recover a row that moved into the
+  // discarded prefix.
+  //
+  // A keyset cursor does not fix it either, because the sort key IS the value
+  // that changes. What does is not paging the candidates at all: one bounded
+  // read of the ceiling, ordered once, and every later decision made against
+  // that fixed array. The read is two columns and at most `LANDSCAPE_SCAN_CEILING`
+  // rows; the expensive half — hydration, which joins rooms for the visibility
+  // bar — stays batched below.
+  // ONE ROW PAST THE CEILING, which is what makes "was this truncated?"
+  // answerable rather than assumed.
+  //
+  // Reading exactly the ceiling cannot tell a window that holds precisely that
+  // many candidates from one that holds more, so an hour with exactly 1,000
+  // active rows — every one of them examined — reported itself truncated and
+  // told a steward their complete map might be hiding half the hour. The extra
+  // row is never used as a candidate; it exists only to answer the question,
+  // and it costs one row.
+  const probed = await events.windowStore.listActiveInWindow(
+    windowStart,
+    '1h',
+    LANDSCAPE_SCAN_CEILING + 1,
+  );
+  const truncated = probed.length > LANDSCAPE_SCAN_CEILING;
+  const candidates = truncated ? probed.slice(0, LANDSCAPE_SCAN_CEILING) : probed;
+  for (let at = 0; at < candidates.length; at += LANDSCAPE_HYDRATE_BATCH) {
+    const page = candidates.slice(at, at + LANDSCAPE_HYDRATE_BATCH);
+    // Hydrate PUBLIC-ONLY, in one query: the restriction lives in the read
+    // rather than in a filter afterwards, so a restricted story cannot reach a
+    // surface whose caller's room authority is unknown.
+    const hydrated = await ingestion.stories.getPublicByIds(page.map((row) => row.itemId));
+    for (const row of page) {
+      // Checked BEFORE the row is considered, so a row this walk did not look at
+      // is a row `examined` does not count — which is what completeness is
+      // computed from below.
+      if (nodes.length >= LANDSCAPE_NODES) break;
+      examined += 1;
+      const story = hydrated.get(row.itemId);
+      if (!story) continue;
+      byId.set(row.itemId, story);
+      nodes.push({ id: row.itemId, value: row.eventCount });
+      topicsById.set(row.itemId, story.topicIds);
+    }
+    if (nodes.length >= LANDSCAPE_NODES) break;
   }
+  // COMPLETENESS IS COMPUTED FROM WHAT HAPPENED, not from which break fired.
+  //
+  // Tracking it at the exits kept being wrong by one case at a time: a node cap
+  // reached inside a short batch, then a batch that ENDS exactly on the cap with
+  // candidates still behind it — that break never re-entered the check and left
+  // the flag false, so a bounded map reported itself complete and suppressed its
+  // own warning. Both are the same question, and it has a direct answer: every
+  // candidate this walk was offered was examined, and the read that offered them
+  // was not itself truncated.
+  const complete = examined === candidates.length && !truncated;
+
   const edges: ReebEdge[] = [];
-  for (let i = 0; i < recent.length; i += 1) {
-    for (let j = i + 1; j < recent.length; j += 1) {
-      const a = recent[i];
-      const b = recent[j];
+  for (let i = 0; i < nodes.length; i += 1) {
+    for (let j = i + 1; j < nodes.length; j += 1) {
+      const a = nodes[i];
+      const b = nodes[j];
       if (!a || !b) continue;
+      const left = topicsById.get(a.id) ?? [];
+      const right = topicsById.get(b.id) ?? [];
       // Two stories are topic-adjacent only through a REAL shared topic — the
       // sentinel must not create an engagement-landscape edge between unrelated
       // unclassified stories.
-      if (a.topicIds.some((t) => !isSentinelTopicId(t) && b.topicIds.includes(t))) {
-        edges.push({ a: a.storyId, b: b.storyId });
+      if (left.some((topic) => !isSentinelTopicId(topic) && right.includes(topic))) {
+        edges.push({ a: a.id, b: b.id });
       }
     }
   }
-  return { nodes, edges };
+  // The hydrated rows travel WITH the graph. A consumer that re-read them by id
+  // would issue a second query and reopen the window this one closed — a story
+  // can leave the public set between two reads, and the second reader would then
+  // have a node it cannot name. Every node here has a row, by construction.
+  return { nodes, edges, stories: byId, scan: { complete, examined } };
 }
 
 // ---------------------------------------------------------------------------

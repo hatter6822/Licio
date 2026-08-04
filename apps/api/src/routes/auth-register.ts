@@ -209,33 +209,39 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
             return c.json(err('registration_failed', 'Could not register passkey.'), 400);
 
           const teen = isMinorBand(pending.ageBand);
-          const user = await services.store.createUser({
-            handle: pending.handle,
-            displayName: pending.displayName,
-            email: null,
-            accountState: 'active',
-            locale: null,
-            ageBand: pending.ageBand,
-            privacySettings: teen ? teenFloorPrivacySettings() : defaultPrivacySettings(),
-            personalizationSettings: defaultPersonalizationSettings(),
-            roles: ['user'],
-          });
-          await services.store.addWebauthn({
-            credentialId: result.credential.credentialId,
-            userId: user.userId,
-            publicKey: result.credential.publicKey,
-            counter: result.credential.counter,
-            deviceType: result.credential.deviceType,
-            deviceName: device_name ?? null,
-            transports: result.credential.transports,
-            backedUp: result.credential.backedUp,
-            createdAt: new Date().toISOString(),
-            lastUsedAt: null,
-          });
-          await services.audit.append({
-            actorUserId: user.userId,
-            eventType: 'auth_method_add',
-            context: { auth_method: 'webauthn' },
+          // ONE UNIT: the account, the passkey that is its only way in, and the
+          // record of it. A failure between the first two left an account nobody
+          // — including its owner — could ever sign into.
+          const user = await services.transact(async (tx) => {
+            const created = await tx.store.createUser({
+              handle: pending.handle,
+              displayName: pending.displayName,
+              email: null,
+              accountState: 'active',
+              locale: null,
+              ageBand: pending.ageBand,
+              privacySettings: teen ? teenFloorPrivacySettings() : defaultPrivacySettings(),
+              personalizationSettings: defaultPersonalizationSettings(),
+              roles: ['user'],
+            });
+            await tx.store.addWebauthn({
+              credentialId: result.credential.credentialId,
+              userId: created.userId,
+              publicKey: result.credential.publicKey,
+              counter: result.credential.counter,
+              deviceType: result.credential.deviceType,
+              deviceName: device_name ?? null,
+              transports: result.credential.transports,
+              backedUp: result.credential.backedUp,
+              createdAt: new Date().toISOString(),
+              lastUsedAt: null,
+            });
+            await tx.audit.append({
+              actorUserId: created.userId,
+              eventType: 'auth_method_add',
+              context: { auth_method: 'webauthn' },
+            });
+            return created;
           });
           const fin = await finalizeLogin(services, c, {
             userId: user.userId,
@@ -356,23 +362,35 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
               await services.store.setAuth(auth.userId, { pendingEmail: null });
               return c.json(err('email_taken', 'That email is no longer available.'), 409);
             }
-            await services.store.updateUser(auth.userId, { email: pending });
-            await services.store.setAuth(auth.userId, {
-              emailVerified: true,
-              emailVerifiedAt: now,
-              pendingEmail: null,
+            // Promoting the address, marking it verified and recording the new
+            // sign-in method are one fact — and the first two apart leave an
+            // account whose email is set while `emailVerified` says otherwise.
+            await services.transact(async (tx) => {
+              await tx.store.updateUser(auth.userId, { email: pending });
+              await tx.store.setAuth(auth.userId, {
+                emailVerified: true,
+                emailVerifiedAt: now,
+                pendingEmail: null,
+              });
+              await tx.audit.append({
+                actorUserId: auth.userId,
+                eventType: 'auth_method_add',
+                context: { auth_method: 'email_otp' },
+              });
             });
           } else {
-            await services.store.setAuth(auth.userId, {
-              emailVerified: true,
-              emailVerifiedAt: now,
+            await services.transact(async (tx) => {
+              await tx.store.setAuth(auth.userId, {
+                emailVerified: true,
+                emailVerifiedAt: now,
+              });
+              await tx.audit.append({
+                actorUserId: auth.userId,
+                eventType: 'auth_method_add',
+                context: { auth_method: 'email_otp' },
+              });
             });
           }
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'auth_method_add',
-            context: { auth_method: 'email_otp' },
-          });
           // Privilege change ⇒ rotate the session id (WS-D.1.3e).
           const token = readSessionToken(c.req.header('cookie'));
           const rotated = token ? await rotateSession(services.sessions, token) : null;
@@ -487,14 +505,16 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           // Only an email factor becomes verified this way; a passkey/wallet
           // account already holds a verified credential, so this is a no-op for it.
           if (user.email && !(await services.store.getAuth(auth.userId))?.emailVerified) {
-            await services.store.setAuth(auth.userId, {
-              emailVerified: true,
-              emailVerifiedAt: new Date().toISOString(),
-            });
-            await services.audit.append({
-              actorUserId: auth.userId,
-              eventType: 'auth_method_add',
-              context: { auth_method: 'email_otp', reason: 'dev_verify' },
+            await services.transact(async (tx) => {
+              await tx.store.setAuth(auth.userId, {
+                emailVerified: true,
+                emailVerifiedAt: new Date().toISOString(),
+              });
+              await tx.audit.append({
+                actorUserId: auth.userId,
+                eventType: 'auth_method_add',
+                context: { auth_method: 'email_otp', reason: 'dev_verify' },
+              });
             });
             // Privilege change ⇒ rotate the session id (mirrors /email/verify).
             const token = readSessionToken(c.req.header('cookie'));

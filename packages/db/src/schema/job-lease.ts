@@ -5,14 +5,15 @@
 // atomic INSERT … ON CONFLICT DO UPDATE … WHERE locked_until <= now RETURNING,
 // so exactly one of N concurrent claimants wins a window.  No FK edges: leases
 // reference jobs by name, never user data.
-import { pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, text } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 
 export const jobLeases = pgTable('job_leases', {
   jobName: text('job_name').primaryKey(),
-  lockedUntil: timestamp('locked_until', { withTimezone: true }).notNull(),
+  lockedUntil: instant('locked_until').notNull(),
   // A coarse instance label (host:pid) for operational visibility only.
   holder: text('holder').notNull(),
-  acquiredAt: timestamp('acquired_at', { withTimezone: true }).notNull().defaultNow(),
+  acquiredAt: instant('acquired_at').notNull().defaultNow(),
 });
 
 export type JobLeaseRow = typeof jobLeases.$inferSelect;

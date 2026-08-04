@@ -57,7 +57,12 @@ export function corsMiddleware(): MiddlewareHandler {
       c.res.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
       c.res.headers.set(
         'Access-Control-Allow-Headers',
-        'Content-Type, Authorization, X-Request-ID, X-CSRF-Token',
+        // `X-Licio-Bootstrap-Token` is here because it is NOT safelisted: the
+        // §21.2 capability moved out of the query string (a URL is logged), and
+        // a non-safelisted header triggers a preflight — so omitting it from
+        // this list would make the browser block every capability-bearing
+        // bootstrap read in the cross-origin deployment, before the route saw it.
+        'Content-Type, Authorization, X-Request-ID, X-CSRF-Token, X-Licio-Bootstrap-Token',
       );
       c.res.headers.set('Access-Control-Expose-Headers', 'X-Request-ID');
       c.res.headers.set('Access-Control-Max-Age', '86400');

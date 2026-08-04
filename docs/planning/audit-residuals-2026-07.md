@@ -674,3 +674,137 @@ ratification path already does exactly that and is the model to copy.
 - **[LOW]** `apps/web/public/sw-push.js:30` — Workbox's generated ungated SKIP_WAITING listener nullifies the private-bundle service-worker activation gate
 - **[LOW]** `apps/web/src/components/ugc/UgcBody.tsx:62` — Middle-click (auxclick) on a UGC/citation link navigates to a blocklisted drainer domain without the §18.5 interstitial
 
+### Audited writes — a change and its record commit together (`check:audited-writes`)
+
+The gate added 2026-08-03 asks every route handler the question
+`ModerationTransactor` already answers for WS-J: a durable state change and the
+audit row that accounts for it must be ONE unit, because act-then-audit leaves
+an irreversible change with no record and audit-then-act records a change that
+did not happen (a compensating write is itself best-effort, so it is not a third
+option).  The bridge-request endpoint is what made the cost concrete: an audit
+failure answered 500 with a live request behind it, the map then withheld the
+target, and every retry answered `already_open`.
+
+**CLOSED — the 29 handlers that predated the gate are converted, and the gate
+has no allowlist.**  It briefly did, holding all 29 with a per-domain schedule
+written here.  That was the wrong shape twice over: a rule with an exemption
+list reads to the next author as optional, and a schedule is not a guarantee —
+so the exemption went away with the debt rather than outliving it.  The domain
+seams that closed it, each a per-domain unit whose production binding is one
+`db.transaction`:
+
+| Domain | Files | Handlers | Seam |
+|---|---|---|---|
+| WS-D identity | `auth.ts`, `auth-mfa.ts`, `auth-register.ts`, `auth-credentials.ts`, `privacy.ts` | 17 | `IdentityServices.transact` over `IdentityTx { store, audit }`. The highest count and the highest stakes (an MFA/credential change with no record), and the handlers pair SEVERAL store writes — so the unit fixed their mutual atomicity too, which is why binding only the audit would have advertised a guarantee they did not have. Redis-backed side effects (session revoke, `markMfaVerified`) run INSIDE the unit after the append, so a failure aborts the record |
+| WS-N compliance | `compliance.ts` | 5 | `ComplianceTxStores` widened to carry `declarations`, `kyc` and `identityAudit` alongside its own hash-chained trail |
+| WS-F ingestion | `ingestion-admin.ts` | 4 | `IngestionServices.transact` over sources, syndications, takedowns, stories, embeddings + the WS-D audit |
+| WS-Q rooms | `rooms.ts` | 2 | `ForumServices.transact` over `ForumTx { rooms, identityAudit }` |
+| WS-G forum | `forum.ts` | 1 | The same forum unit, extended to preference state |
+| WS-H invariants | `invariants-admin.ts` | 1 | `promotionServiceOver(store)` — the promotion service now takes its store per call, so the write binds to the unit's handle (the bridge endpoint in the same file was already inside `invariants.transact`) |
+
+The seam itself is domain-agnostic: `apps/api/src/lib/in-memory-unit-of-work.ts`
+(atomicity + isolation for the in-memory twins, re-entrancy via AsyncLocalStorage)
+plus `in-memory-rollback.ts` for the per-store undo, with each production
+transactor a single `db.transaction` in `apps/api/src/index.ts`.  WS-J's
+`ModerationTransactor` remains the worked example the rest were built to match.
+
+What still keeps this closed is `scripts/check-audited-writes.test.ts`'s last
+case, which runs the gate over the LIVE route tree — with no allowlist, a
+regression has nowhere to be written down.
+
+The gate itself grew two legs after defects walked past it.
+
+**The question is asked of the WRITE, not of the append.**  Asking only "is the
+audit inside a unit?" is blind to the commonest shape: the audit IS inside a
+unit the handler opens, and a durable write ran BEFORE it (`POST /rooms`
+inserting the room outside the transaction that recorded it; the takedown action
+hiding the story before the unit that recorded the enforcement).  Calibrating
+that against the tree corrected four things the gate had been wrong about —
+`identityAudit.append` invisible to a case-sensitive pattern, `runChainedUnit`
+unrecognised as a unit, Hono's `.delete('/path', …)` counted as a write, and
+ephemeral Redis stores counted too.  Each of those made it either silently blind
+to a domain or noisily wrong about correct code, and the second is worse: a gate
+that cries wolf is a gate people learn to skip.
+
+**The write allowlist failed OPEN, and eight handlers were behind it.**  Writes
+were matched by a VERB list, so a store method nobody had thought of read as a
+read and the handler read as clean — the gate reported success over the exact
+defect it advertises, in `/mfci/cases/:caseId/resolve` (`mfciCases.resolve`,
+`mfciRiskStates.set`) and in six `/config` endpoints.  Reads are named now and
+everything else on a service is a write, so an unrecognised verb is guarded from
+the moment it exists.  Writes are identified by RECEIVER — a member call whose
+root binding came from a `get*Services()`/`resolve*()` factory or a unit callback
+— with a name list kept for BARE calls only, because a route file hands services
+to projections and emitters far more often than to a raw writer and failing
+closed there alarms on correct code.
+
+Closing what it found needed one seam rather than eight edits: every workstream's
+`/config` endpoint writes the same `pwatt_config` table, so `IdentityTx.config`
+(built over the identity transaction in production) covers five of them, and the
+two domains owning their own config-store instance use their own transactors.
+
+**A bare helper is judged by READING it.**  The bare-call arm kept a name list
+after the inversion above, and a list cannot cover a vocabulary it does not own:
+`engageKillSwitch`/`releaseKillSwitch` persist the ranking kill switch and
+matched nothing.  The gate now follows the import, treats the callee's first
+parameter as a service binding, and asks whether its body writes through it.
+
+Two corrections in getting there are the part worth keeping.  The first
+implementation resolved `../ranking/killswitch.js` by dropping a leading `..`
+with nothing to pop — producing a path that does not exist — so every import
+failed to resolve, the writer set was empty, and the gate reported a CLEAN PASS
+over code it had never opened.  A resolver that silently resolves nothing is the
+sharpest form of a green-and-wrong gate, and the check that caught it was
+counting the files it had actually read (33 → 165).  The second was scope:
+following helpers recursively turned two pure projections into "writers" on one
+unrecognised verb three calls down, so resolution stops at the directly imported
+declaration and the limit is documented rather than hidden.
+
+**The unit one call away.**  `/mfa/totp/verify` spent a single-use recovery code with a `setAuth` and
+then called `finishMfa`, whose own unit recorded the verification — two innocent
+halves (a handler with a write and no append, a helper with an append properly
+inside a unit) with the defect in the seam, so an append failure burned the code
+while granting nothing.  A same-file helper that audits inside its own unit is
+now attributed to its CALLER; the sanctioned fix is to hand the write into that
+unit as a callback (`insideCallbackTo` recognises it), and `consume*` counts as
+the durable write it is.  Attribution stops at the file — a helper imported from
+another module is still invisible, which is the next leg if one is ever needed.
+
+### The in-memory unit can undo everything it hands out (`unit-of-work-rollback.test.ts`)
+
+The in-memory units take their undo as `[...stores].filter(s => typeof
+s.beginRollback === 'function')`, which converts a missing guarantee into
+silence.  `IngestionServices.transact` shipped with five stores on its tx and
+NONE of them declaring `beginRollback`, so the filter kept an empty list, every
+`transact` resolved, and every test over it passed while the atomicity it
+advertises did not exist.  WS-H's list was missing the identity audit for the
+same reason — audit-then-act reintroduced by a rollback list rather than by the
+code above it.
+
+Both are fixed, and the filter is now checked rather than trusted: the suite
+walks each domain's transaction surface and fails NAMING any store the unit
+cannot undo.  A store added to a tx without an undo fails there instead of in
+production.
+
+### Cursor grammar — a malformed cursor must not restart pagination
+
+`decodeKeysetCursor` and `parseDirectoryCursor` both fail SOFT (an unreadable
+cursor becomes "no cursor"), which is right for a decoder — a mangled link must
+never 500 an unauthenticated route — and wrong as the whole answer: the caller
+cannot tell "the next page" from "I could not read your cursor, so here is the
+FIRST page again", and a client that APPENDS pages then re-appends page one and
+receives the same `next_cursor`, duplicating rows on every scroll, indefinitely.
+That is what `?cursor=garbage` did to the §4.2 directory list.
+
+The boundary now validates the grammar it will later parse — `keysetCursorSchema`
+(the `(timestamp, uuid)` base64url form) and `directoryCursorSchema` (the
+private-room `<iso>|<uuid>` form), each defined next to the parser it mirrors, so
+the two cannot drift. Applied to the 5 route params whose service uses the
+matching decoder (`/private-rooms/directory`, `/private-rooms/mine`, and the
+three moderation-console queues).
+
+**10 cursor params still take `z.string().min(1).max(512)`** — the forum thread
+and comment pages, the room thread page, the signal ledger, the mute/block/notice
+lists — each with its own decoder, and each needing that decoder's grammar
+expressed as a schema before it can be tightened. Same defect, one surface at a
+time; converting them blind would 400 cursors that are currently valid.

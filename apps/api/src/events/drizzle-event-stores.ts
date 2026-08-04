@@ -27,9 +27,9 @@ import type { PrivacyClassification, RetentionTier } from '@licio/shared';
 import {
   and,
   asc,
-  count,
   desc,
   eq,
+  gt,
   gte,
   inArray,
   isNotNull,
@@ -585,6 +585,32 @@ export class DrizzleAggregationWindowStore implements AggregationWindowStore {
     return row ? this.#toRecord(row) : null;
   }
 
+  async listActiveInWindow(
+    windowStart: string,
+    windowSize: AggregationWindowSize,
+    limit: number,
+  ): Promise<Array<{ itemId: string; eventCount: number }>> {
+    // ONE query, and the bound applies to what actually drew attention — see
+    // the interface note: bounding by recency first excludes an active older
+    // story before it is considered.
+    const rows = await this.#db
+      .select({
+        itemId: aggregationWindows.itemId,
+        eventCount: aggregationWindows.eventCount,
+      })
+      .from(aggregationWindows)
+      .where(
+        and(
+          eq(aggregationWindows.windowStart, new Date(windowStart)),
+          eq(aggregationWindows.windowSize, windowSize),
+          gt(aggregationWindows.eventCount, 0),
+        ),
+      )
+      .orderBy(desc(aggregationWindows.eventCount), asc(aggregationWindows.itemId))
+      .limit(limit);
+    return rows.map((row) => ({ itemId: row.itemId, eventCount: row.eventCount }));
+  }
+
   async listForItemBefore(
     itemId: string,
     windowSize: AggregationWindowSize,
@@ -757,13 +783,19 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
-  async countByTypeSince(
+  async pageByTypeSince(
     invariantType: string,
     sinceIso: string,
+    limit: number,
     untilIso?: string,
-  ): Promise<number> {
-    const [row] = await this.#db
-      .select({ n: count() })
+  ): Promise<{ rows: InvariantOutputRecord[]; total: number }> {
+    // ONE statement, so ONE snapshot. `count(*) OVER ()` is evaluated over the
+    // full matching set BEFORE the LIMIT, so it is the denominator of exactly
+    // the set this page was taken from — which a second statement could not
+    // promise, because READ COMMITTED gives it a snapshot of its own and a row
+    // that commits in between lands in the count but not the page.
+    const rows = await this.#db
+      .select({ row: invariantOutputs, total: sql<number>`count(*) over ()` })
       .from(invariantOutputs)
       .where(
         and(
@@ -771,8 +803,15 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
           gte(invariantOutputs.createdAt, new Date(sinceIso)),
           ...(untilIso === undefined ? [] : [lte(invariantOutputs.createdAt, new Date(untilIso))]),
         ),
-      );
-    return row?.n ?? 0;
+      )
+      .orderBy(desc(invariantOutputs.createdAt))
+      .limit(Math.max(0, limit));
+    return {
+      rows: rows.map((r) => this.#toRecord(r.row)),
+      // No rows ⇒ nothing matched ⇒ the denominator is zero. (The window
+      // function has no row to ride back on, which is the same answer.)
+      total: Number(rows[0]?.total ?? 0),
+    };
   }
 
   async latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null> {

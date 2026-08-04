@@ -21,10 +21,10 @@ import {
   pgEnum,
   pgTable,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { contributions } from './contribution.js';
 import { rooms } from './room.js';
 import { stories } from './story.js';
@@ -119,22 +119,18 @@ export const debateArenas = pgTable(
     positions: jsonb('positions').$type<DebatePositionsAtRest>().notNull(),
     /** The outer edit deadline (open + 23h); edits/withdrawal/concession are
      *  rejected after this instant even in a continuously active debate. */
-    editDeadlineAt: timestamp('edit_deadline_at', { withTimezone: true }).notNull(),
+    editDeadlineAt: instant('edit_deadline_at').notNull(),
     /** When the debate enters the AI resolution queue: open + 24h scheduled,
      *  pulled EARLIER to the lock instant on the both-sides-idle path. */
-    resolveDueAt: timestamp('resolve_due_at', { withTimezone: true }).notNull(),
+    resolveDueAt: instant('resolve_due_at').notNull(),
     /** The instant the material was locked in; null while still `open`. */
-    lockedAt: timestamp('locked_at', { withTimezone: true }),
+    lockedAt: instant('locked_at'),
     /** The locked snapshot of both sides' underlying content. */
     lockedContent: jsonb('locked_content').$type<DebateLockedContentAtRest>(),
     /** Each side's last edit (underlying content or rebuttal).  Once BOTH are
      *  older than the inactivity window, the arena locks + queues early. */
-    incumbentLastActiveAt: timestamp('incumbent_last_active_at', {
-      withTimezone: true,
-    }).notNull(),
-    challengerLastActiveAt: timestamp('challenger_last_active_at', {
-      withTimezone: true,
-    }).notNull(),
+    incumbentLastActiveAt: instant('incumbent_last_active_at').notNull(),
+    challengerLastActiveAt: instant('challenger_last_active_at').notNull(),
     verdict: debateVerdictEnum('verdict'),
     winner: debateWinnerEnum('winner'),
     decidedBy: debateDeciderEnum('decided_by'),
@@ -144,16 +140,16 @@ export const debateArenas = pgTable(
     confidence: doublePrecision('confidence'),
     /** The immutable AIOutputRecord id backing the verdict (audit trail). */
     aiOutputId: text('ai_output_id'),
-    verdictAt: timestamp('verdict_at', { withTimezone: true }),
+    verdictAt: instant('verdict_at'),
     /** verdict + 24h; a steward override is rejected after this instant. */
-    overrideDeadlineAt: timestamp('override_deadline_at', { withTimezone: true }),
+    overrideDeadlineAt: instant('override_deadline_at'),
     overriddenByUserId: uuid('overridden_by_user_id').references(() => users.userId, {
       onDelete: 'set null',
     }),
     overrideReason: text('override_reason'),
-    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: instant('resolved_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     // EXPLICITLY NAMED foreign keys (see the columns above): the derived names

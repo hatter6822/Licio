@@ -85,13 +85,17 @@ export function createEventsAdminRoutes(
           return c.json(deny('invalid_config', problem), 422);
         }
         const events = resolveEvents();
-        await events.configStore.set(key, value as Record<string, unknown>);
-        // Who changed which knob, for the transparency record (WS-E.2.3c
-        // "profile changes are logged for audit") — values live in the store.
-        await resolveIdentity().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'pwatt_config_change',
-          context: { setting: key },
+        // The knob and the record of who turned it are ONE unit (WS-E.2.3c
+        // "profile changes are logged for audit"): a scoring profile that
+        // changed with nothing accounting for it is exactly what that clause
+        // exists to prevent. Values live in the store; the row names the actor.
+        await resolveIdentity().transact(async (tx) => {
+          await (tx.config ?? events.configStore).set(key, value as Record<string, unknown>);
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'pwatt_config_change',
+            context: { setting: key },
+          });
         });
         events.log('pwatt.config.changed', { key });
         return c.json({ key, ok: true });

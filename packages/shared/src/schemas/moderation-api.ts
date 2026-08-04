@@ -71,6 +71,25 @@ export const reportCaseStatusSchema = z.enum(REPORT_CASE_STATUSES);
 export type ReportCaseStatus = z.infer<typeof reportCaseStatusSchema>;
 
 /**
+ * The statuses that mean a case is still OPEN — every one that is not
+ * `resolved`.
+ *
+ * Named once because the answer has to be the same everywhere it is asked: the
+ * queue's default filter, the MFCI-2 enforcement hold, the subject-pivot check
+ * and the conditional resolve all decide "is this case still live?", and four
+ * inline spellings of one list is four places to forget a status the day a
+ * fifth is added.  Derived from `REPORT_CASE_STATUSES` rather than re-listed,
+ * so a new status is OPEN unless it is explicitly the terminal one.
+ */
+export function isOpenCaseStatus(
+  status: ReportCaseStatus,
+): status is Exclude<ReportCaseStatus, 'resolved'> {
+  return status !== 'resolved';
+}
+export const OPEN_CASE_STATUSES: readonly ReportCaseStatus[] =
+  REPORT_CASE_STATUSES.filter(isOpenCaseStatus);
+
+/**
  * `POST /v1/reports` request.  `reason_code` is taxonomy-bound (WS-A.1.2);
  * `local_operation_id` is the client-supplied idempotency key (it also lets the
  * offline queue replay a report safely — a re-submit returns the original

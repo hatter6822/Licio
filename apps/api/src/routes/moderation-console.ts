@@ -45,7 +45,7 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import { getIdentityServices } from '../identity/services.js';
-import { decodeKeysetCursor, isCursorUuid } from '../lib/keyset-cursor.js';
+import { decodeKeysetCursor, isCursorUuid, keysetCursorSchema } from '../lib/keyset-cursor.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { applyAction, revertAction } from '../moderation/actions.js';
@@ -604,7 +604,7 @@ export function createModerationConsoleRoutes() {
       // case's enforcement delay (clear ⇒ lift; confirm ⇒ dismiss the case).
       .get(
         '/incidents',
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        zValidator('query', z.object({ cursor: keysetCursorSchema.optional() })),
         async (c) => {
           const actor = mustActor(c);
           const queueDenial = denyQueue(actor, 'integrity-queue');
@@ -659,7 +659,7 @@ export function createModerationConsoleRoutes() {
         zValidator(
           'query',
           z.object({
-            cursor: z.string().min(1).max(512).optional(),
+            cursor: keysetCursorSchema.optional(),
             limit: z.coerce.number().int().min(1).max(100).optional(),
           }),
         ),
@@ -681,7 +681,7 @@ export function createModerationConsoleRoutes() {
           'query',
           z.object({
             contribution_id: uuidSchema.optional(),
-            cursor: z.string().min(1).max(512).optional(),
+            cursor: keysetCursorSchema.optional(),
             limit: z.coerce.number().int().min(1).max(200).optional(),
           }),
         ),
@@ -755,7 +755,7 @@ export function createModerationConsoleRoutes() {
           z.object({
             status: z.string().optional(),
             limit: z.coerce.number().int().min(1).max(200).optional(),
-            cursor: z.string().min(1).max(512).optional(),
+            cursor: keysetCursorSchema.optional(),
           }),
         ),
         async (c) => {
@@ -960,19 +960,25 @@ export function createModerationConsoleRoutes() {
           );
         }
         const changedKeys = Object.keys(patch);
-        for (const [key, value] of Object.entries(patch)) {
-          await storeModerationConfigValue(mod.configStore, key, value);
-        }
-        await mod.reloadConfig();
-        // Audit the change (keys only — values may include the malware-domain
-        // denylist; the keys touched are the accountability record).
-        await writeAudit(mod, {
-          actorUserId: actor.userId,
-          actorRole: actor.stewardRoles[0] ?? null,
-          action: 'config_update',
-          targetType: 'config',
-          notes: `keys: ${changedKeys.join(', ')}`,
+        // The keys and the record of who touched them are ONE unit — these are
+        // the denylists and thresholds that decide what the platform blocks, so
+        // a live change nothing accounts for is the same defect as an
+        // unrecorded enforcement. The cache reload follows the commit.
+        await mod.transactor.run(async (tx) => {
+          for (const [key, value] of Object.entries(patch)) {
+            await storeModerationConfigValue(tx.config, key, value);
+          }
+          // Keys only — values may include the malware-domain denylist; the keys
+          // touched are the accountability record.
+          await tx.audit({
+            actorUserId: actor.userId,
+            actorRole: actor.stewardRoles[0] ?? null,
+            action: 'config_update',
+            targetType: 'config',
+            notes: `keys: ${changedKeys.join(', ')}`,
+          });
         });
+        await mod.reloadConfig();
         return c.json(mod.config() as unknown as Record<string, unknown>);
       })
   );

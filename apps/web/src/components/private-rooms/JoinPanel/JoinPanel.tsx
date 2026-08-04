@@ -15,9 +15,13 @@
 // The JOINER half stands alone (no `session` — the joiner is not yet a member);
 // the ADMIT half drives an existing `session`.
 
-import { useId, useState } from 'react';
+import type { InviteSecret } from '@licio/private-p2p';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { ApiClientError } from '../../../lib/api.js';
+import { fetchPrivateRoomBootstrap } from '../../../lib/private-rooms-api.js';
 import {
+  manifestRoomPublicKey,
   PrivateRoomSession,
   parseJoinGrant,
   serializeJoinGrant,
@@ -85,21 +89,61 @@ function JoinerSection({
   const [displayName, setDisplayName] = useState('');
   const [recipientKey, setRecipientKey] = useState<string | null>(null);
   const [sealedInvite, setSealedInvite] = useState('');
-  const [requestJson, setRequestJson] = useState<string | null>(null);
+  /** The join request, KEYED to the invite it was built from — same reason as
+   *  the directory verdict below: the crypto is async, so a slow `complete` can
+   *  resolve after the field has moved on, and a request for the previous room
+   *  beside a replacement link leads to completing the wrong join. */
+  const [request, setRequest] = useState<{
+    fragment: string;
+    json: string;
+    /** The room the invite this request was built from names. */
+    roomPublicKey: string;
+  } | null>(null);
   const [grantJson, setGrantJson] = useState('');
   const [joined, setJoined] = useState(false);
+  /**
+   * What Licio's record says about the room this invite claims to be for —
+   * KEYED to the exact fragment it was computed from.
+   *
+   * A bare value went stale twice over: editing the field left the previous
+   * room's reassuring verdict standing beside a new link, and a slow lookup for
+   * the old invite could land after the field had already changed. Either way a
+   * user reads evidence about one invite as evidence about another, which is
+   * precisely the mistake this check exists to prevent.
+   */
+  const [recordCheck, setRecordCheck] = useState<{
+    fragment: string;
+    lookup: DirectoryLookup;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The pending preparation: holds the joiner's keys + the `complete`/`completeJoin` steps.
   const [pending, setPending] = useState<Awaited<
     ReturnType<typeof PrivateRoomSession.prepareJoinRequest>
   > | null>(null);
+  /**
+   * Is this panel still on screen?
+   *
+   * A join is several seconds of crypto and storage work, and the user can close
+   * the room (or the whole view) in the middle of it. Every branch below then
+   * sets state on a component that is gone — harmless-looking, and in a jsdom
+   * teardown it is a hard `ReferenceError: window is not defined` that fails a
+   * whole test run from a component nobody was looking at. The work is allowed
+   * to finish; only the reporting is dropped.
+   */
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   async function startPrepare(): Promise<void> {
     if (displayName.trim().length === 0 || busy) return;
     setBusy(true);
     setError(null);
-    setRequestJson(null);
+    setRequest(null);
     try {
       const prep = await PrivateRoomSession.prepareJoinRequest({
         proposedDisplayName: displayName.trim(),
@@ -119,8 +163,30 @@ function JoinerSection({
     setError(null);
     try {
       const fragment = extractInviteFragment(sealedInvite.trim());
-      const { request } = await pending.complete(fragment);
-      setRequestJson(JSON.stringify(request));
+      const { invite, request: built } = await pending.complete(fragment);
+      // The invite's ROOM travels with the request: a grant pasted later has to
+      // answer THIS invite, and only the invite knows which room that is.
+      setRequest({
+        fragment,
+        json: JSON.stringify(built),
+        roomPublicKey: invite.room_public_key,
+      });
+      // Resolve Licio's record for the room, using the §21.2 capability the
+      // invite carries — the reason it rides the SEALED invite rather than the
+      // post-admission grant. See `lookUpDirectory` for what this does and does
+      // not establish; either way it is a REPORT, never a gate.
+      //
+      // NOT AWAITED HERE, which is what makes that true. Awaiting it held `busy`
+      // for as long as the request took, and a stalled directory read then
+      // disabled the grant controls indefinitely — a check described as advisory
+      // preventing a join it has no authority over. The join request is already
+      // built and shown; the verdict lands beside it when it arrives, and it is
+      // still keyed to this fragment so a late answer cannot describe a
+      // different invite.
+      void lookUpDirectory(invite).then(
+        (lookup) => setRecordCheck({ fragment, lookup }),
+        () => setRecordCheck({ fragment, lookup: { kind: 'unavailable' } }),
+      );
     } catch {
       setError(
         t(
@@ -133,6 +199,12 @@ function JoinerSection({
     }
   }
 
+  /** What the field holds right now — the key both async results must match. */
+  const currentFragment = extractInviteFragment(sealedInvite.trim());
+  /** The request, only while it still describes that fragment. */
+  const requestJson =
+    request !== null && request.fragment === currentFragment ? request.json : null;
+
   async function finishJoin(): Promise<void> {
     if (!pending || grantJson.trim().length === 0 || busy) return;
     setBusy(true);
@@ -143,13 +215,39 @@ function JoinerSection({
         setError(t('privateRoom.join.badGrant', 'That join grant is not valid.'));
         return;
       }
+      // THE GRANT MUST ANSWER THE INVITE ON SCREEN.
+      //
+      // One preparation reuses one KeyPackage across every invite it opens, so
+      // a grant for room A verifies perfectly against a request built for room
+      // B — and `completeJoin` would take it, joining A while the panel shows
+      // B's invite. Clearing the field when the invite changes only helps when
+      // the grant is already there; A's grant arriving afterwards is the case
+      // that is left. The invite names its room, the grant's manifest names
+      // its room, and they have to be the same room.
+      const expected =
+        request !== null && request.fragment === currentFragment
+          ? request.roomPublicKey
+          : undefined;
+      if (expected !== undefined && manifestRoomPublicKey(grant.manifest) !== expected) {
+        setError(
+          t(
+            'privateRoom.join.grantRoomMismatch',
+            'That grant is for a different room than the invite on screen. Paste the grant that answers this invite.',
+          ),
+        );
+        return;
+      }
       const room = await pending.completeJoin(grant);
+      // The room IS joined and persisted either way; only the announcement is
+      // conditional, because there is nobody left to announce it to.
+      if (!mounted.current) return;
       setJoined(true);
       onJoined?.(room.roomId);
     } catch {
+      if (!mounted.current) return;
       setError(t('privateRoom.join.finishError', 'Could not finish joining the room.'));
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   }
 
@@ -169,7 +267,25 @@ function JoinerSection({
         <Input
           label={t('privateRoom.join.displayName', 'Your display name')}
           value={displayName}
-          onChange={(e) => setDisplayName(e.target.value)}
+          onChange={(e) => {
+            setDisplayName(e.target.value);
+            // THE PREPARATION CAPTURED THE OLD NAME.
+            //
+            // `prepareJoinRequest` bakes the display name into the keys it
+            // generates, so editing the field afterwards left the panel showing
+            // "Bob" while the request it built still said "Alice" — a name the
+            // joiner never chose, presented to the room as theirs. Everything
+            // derived from that preparation goes with it, the same way the
+            // invite field already invalidates what it produced.
+            if (pending === null && recipientKey === null) return;
+            setPending(null);
+            setRecipientKey(null);
+            setRequest(null);
+            setRecordCheck(null);
+            setGrantJson('');
+            setError(null);
+          }}
+          disabled={busy}
           className="flex-1"
         />
         <Button
@@ -196,7 +312,29 @@ function JoinerSection({
           <TextArea
             label={t('privateRoom.join.sealedInvite', 'Paste the invite link from the admin')}
             value={sealedInvite}
-            onChange={(e) => setSealedInvite(e.target.value)}
+            onChange={(e) => {
+              setSealedInvite(e.target.value);
+              // A new link invalidates BOTH results. The request blob is
+              // derived from the old invite and the verdict describes the old
+              // room; leaving either beside a changed link is how stale
+              // evidence gets read as a check of what is on screen.
+              setRequest(null);
+              setRecordCheck(null);
+              // The GRANT too. It answers the previous invite, and `completeJoin`
+              // accepts whichever valid grant is pasted — the pending
+              // preparation reuses one key package across both — so a stale
+              // grant beside a replacement link joins room A while the screen
+              // shows invite B.
+              setGrantJson('');
+              setError(null);
+            }}
+            // LOCKED for the whole of a completion, exactly as the admit half
+            // is. The room-key comparison happens BEFORE the await, so editing
+            // during `completeJoin` left the in-flight call to persist room A
+            // and navigate into it while the screen showed invite B — and
+            // discarding the result afterwards would not help, because the room
+            // is already stored locally by then.
+            disabled={busy}
             rows={2}
           />
           <Button
@@ -216,6 +354,21 @@ function JoinerSection({
         </p>
       ) : null}
 
+      {/* …and shown only while it still describes the link in the field, so a
+          lookup that resolves after the input changed cannot surface. */}
+      {recordCheck !== null && recordCheck.fragment === currentFragment ? (
+        <p
+          className={
+            recordCheck.lookup.kind === 'unresolved'
+              ? 'text-error-on-soft text-sm'
+              : 'text-ink-muted text-sm'
+          }
+          role={recordCheck.lookup.kind === 'unresolved' ? 'alert' : 'status'}
+        >
+          {directoryMessage(t, recordCheck.lookup)}
+        </p>
+      ) : null}
+
       {requestJson !== null ? (
         <TextArea
           label={t('privateRoom.join.requestLabel', 'Your join request (send to the admin)')}
@@ -231,6 +384,7 @@ function JoinerSection({
             label={t('privateRoom.join.grantLabel', 'Paste the grant the admin sent back')}
             value={grantJson}
             onChange={(e) => setGrantJson(e.target.value)}
+            disabled={busy}
             rows={3}
           />
           <Button
@@ -266,23 +420,69 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
 
   const canAdmit = inviteJson.trim().length > 0 && requestJson.trim().length > 0 && !busy;
 
+  /**
+   * A GRANT BELONGS TO THE REQUEST THAT PRODUCED IT — and so does every other
+   * outcome of an admission.
+   *
+   * The grant was free-floating state that only ever got REPLACED, so after
+   * admitting device A the panel kept showing A's grant under "send this back to
+   * the new device" while the admin worked on device B. A rejected or failed B —
+   * `verdict.ok === false`, a parse miss, a throw — writes no new grant, so the
+   * label pointed at B and the value was A's: the admin sends an unusable grant
+   * and B's join never completes, with nothing on screen saying so.
+   *
+   * Clearing on input change fixed the display but not the RACE behind it. The
+   * admission is several async crypto steps and the fields stay editable
+   * throughout, so A's in-flight attempt could resolve after the admin had typed
+   * B's records — and its success branch writes A's grant AND blanks both fields,
+   * destroying B's pasted input to show a grant for a different device.
+   *
+   * So an attempt is KEYED, the way the joiner half above keys its request and
+   * its directory verdict to the invite fragment they came from: bumping
+   * `attempt` supersedes whatever is in flight, and a superseded result is
+   * dropped rather than rendered.
+   */
+  const attempt = useRef(0);
+
+  function beginNewAdmission(): void {
+    attempt.current += 1;
+    setGrantJson(null);
+    setStatus(null);
+  }
+
   async function admit(): Promise<void> {
     if (!canAdmit) return;
     setBusy(true);
     setError(null);
-    setStatus(null);
+    beginNewAdmission();
+    const mine = attempt.current;
+    /** Has the admin moved on since this attempt started? */
+    const superseded = (): boolean => attempt.current !== mine;
     try {
       const invite = await PrivateRoomSession.parseInvite(inviteJson.trim());
+      if (superseded()) return;
       if (invite === null) {
         setError(t('privateRoom.admit.badInvite', 'That invite record is not valid.'));
         return;
       }
       const request = await PrivateRoomSession.parseJoinRequest(requestJson.trim());
+      if (superseded()) return;
       if (request === null) {
         setError(t('privateRoom.admit.badRequest', 'That join request is not valid.'));
         return;
       }
       const { verdict, grant } = await session.admitJoinRequest(invite, request);
+      // PAST THIS LINE THE OUTCOME IS ALWAYS RENDERED — there is no superseding
+      // check here, deliberately.
+      //
+      // `admitJoinRequest` has committed `member.add`, advanced the epoch,
+      // persisted the session and spent one use of the invite. The grant it
+      // returns carries the MLS Welcome for THAT commit and cannot be produced
+      // again: dropping it leaves a roster entry and a consumed invite whose
+      // device can never finish joining, and the room has no way to re-issue it.
+      // Superseding is only ever safe BEFORE the admission — which is why the
+      // two checks above stand, and why the inputs are disabled while this runs
+      // so the case cannot arise at all.
       if (verdict.ok) {
         setStatus(
           t('privateRoom.admit.ok', 'Device admitted as {role}.', { role: verdict.grantedRole }),
@@ -296,6 +496,7 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
         setError(rejectionMessage(t, verdict.reason));
       }
     } catch {
+      if (superseded()) return;
       setError(t('privateRoom.admit.error', 'Could not admit the device.'));
     } finally {
       setBusy(false);
@@ -317,13 +518,24 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
       <TextArea
         label={t('privateRoom.admit.inviteLabel', 'Invite record')}
         value={inviteJson}
-        onChange={(e) => setInviteJson(e.target.value)}
+        onChange={(e) => {
+          setInviteJson(e.target.value);
+          beginNewAdmission();
+        }}
+        // Locked WHILE an admission runs: the grant that comes back cannot be
+        // reissued, so the admin must not be able to move on from an attempt
+        // whose result they still need.
+        disabled={busy}
         rows={2}
       />
       <TextArea
         label={t('privateRoom.admit.requestLabel', 'Join request')}
         value={requestJson}
-        onChange={(e) => setRequestJson(e.target.value)}
+        onChange={(e) => {
+          setRequestJson(e.target.value);
+          beginNewAdmission();
+        }}
+        disabled={busy}
         rows={3}
       />
 
@@ -356,6 +568,99 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
       ) : null}
     </section>
   );
+}
+
+/**
+ * The one sentence a lookup outcome is worth, chosen by CASE rather than by a
+ * chain of ternaries — four outcomes is where that chain stops being readable,
+ * and only one of them may sound like a warning.
+ */
+function directoryMessage(t: ReturnType<typeof useT>, lookup: DirectoryLookup): string {
+  switch (lookup.kind) {
+    case 'unresolved':
+      return t(
+        'privateRoom.join.recordUnresolved',
+        'Warning: this invite points at a Licio directory record that does not resolve. Check with whoever sent it before joining.',
+      );
+    case 'unavailable':
+      return t(
+        'privateRoom.join.recordUnavailable',
+        'Licio’s record for this room could not be checked right now — that is about the connection, not the invite. You can still continue.',
+      );
+    case 'none':
+      return t(
+        'privateRoom.join.recordNone',
+        'Licio holds no record of this room — expected if it was created without one. Nothing else about the invite is affected.',
+      );
+    case 'resolved':
+      // NOT "this room's record" — nothing here can establish that yet.
+      //
+      // The invite names a record and carries the token that opens it, and both
+      // fields are chosen by whoever built the invite. An inviter who belongs to
+      // room A and administers room B can put A's handle into B's invite, and
+      // the two keys available before joining are not comparable: the record
+      // carries the founder DEVICE signing key, the invite carries the room's
+      // MANIFEST key. The tie is the manifest commitment, which arrives with the
+      // grant — so the honest report is what resolved, and that the panel checks
+      // it against the room once joined (`verifyDirectoryRecord`).
+      return lookup.name !== null
+        ? t(
+            'privateRoom.join.recordListed',
+            'The invite names a Licio record, and it resolves — published as “{name}”. That name is not yet evidence about the room you are joining: it is checked against the room itself once you are in.',
+            { name: lookup.name },
+          )
+        : t(
+            'privateRoom.join.recordUnlisted',
+            'The invite names a Licio record, and it resolves. It publishes no name, and it is checked against the room itself once you are in.',
+          );
+  }
+}
+
+/** What Licio's directory says about the room an invite is for. */
+type DirectoryLookup =
+  | { kind: 'resolved'; name: string | null }
+  | { kind: 'unresolved' }
+  | { kind: 'unavailable' }
+  | { kind: 'none' };
+
+/**
+ * Resolve the invite's §21 directory record with the capability it carries.
+ *
+ * What a RESOLVE establishes: the record exists and the token in this invite is
+ * the one that opens it — a token derived from the room's epoch-0 rendezvous
+ * key, so whoever built the invite had, or was given, something only the room
+ * holds. It also shows the invitee the public name before they commit, which is
+ * the point of `listed`.
+ *
+ * What it does NOT establish, and the copy must not imply: that the record and
+ * the invite describe the same room by cryptographic identity. They carry
+ * DIFFERENT keys — the stub's `room_public_key` is the founder device's Ed25519
+ * signing key, the invite's is the manifest's HPKE invite key — so comparing
+ * them would fail on every honest invite, which is exactly the kind of check
+ * that trains people to click through warnings.
+ *
+ * A room with no record at all is ordinary — `detached`, or a registration that
+ * did not succeed — and reads as "none".
+ *
+ * Only a 404 is evidence AGAINST the invite, and it is decisive: §21.2 makes an
+ * unknown room, a wrong token and a malformed id one answer, so a 404 here means
+ * "no record you can reach with this capability" and nothing else. Every other
+ * failure — offline, a 5xx, a proxy — is evidence about the network, and
+ * reporting it as "this invite points at a record that does not exist" would put
+ * a security warning in front of someone whose only mistake was a bad
+ * connection. That is how people learn to click through warnings.
+ */
+async function lookUpDirectory(invite: InviteSecret): Promise<DirectoryLookup> {
+  const roomServerId = invite.room_stub_ref;
+  const token = invite.bootstrap_blind_id;
+  if (roomServerId === undefined || token === undefined) return { kind: 'none' };
+  try {
+    const record = await fetchPrivateRoomBootstrap(roomServerId, token);
+    return { kind: 'resolved', name: record.display_name };
+  } catch (error) {
+    const status = error instanceof ApiClientError ? error.status : undefined;
+    return status === 404 ? { kind: 'unresolved' } : { kind: 'unavailable' };
+  }
 }
 
 /** Accept either a full invite URL (`…#invite=<sealed>`) or a bare sealed string,

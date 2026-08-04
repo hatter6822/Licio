@@ -6,6 +6,9 @@
 // without threading them through every handler; tests swap in a fresh in-memory
 // bundle per case.
 
+import { getEventPipelineServices } from '../events/services.js';
+import { InMemoryPwattConfigStore, type PwattConfigStore } from '../events/stores.js';
+import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { type AuditStore, InMemoryAuditStore } from './audit.js';
 import type { AuthMethodInventory } from './auth-methods.js';
 import { type EphemeralStore, InMemoryEphemeralStore } from './ephemeral-store.js';
@@ -163,9 +166,66 @@ export class RecordingMailer implements Mailer {
   }
 }
 
+/**
+ * The stores one identity UNIT writes through, bound to a single handle.
+ *
+ * A WS-D handler rarely changes one thing: disabling email sign-in writes the
+ * user row AND the auth row and appends the record of it, and those three are
+ * one fact about one action. Sequential writes make every failure a different
+ * half-applied account — an email cleared with `emailVerified` still true, or a
+ * credential removed with nothing in the trail to say who did it.
+ */
+export interface IdentityTx {
+  readonly store: IdentityStore;
+  /** The audit append, bound to the SAME handle as the writes above. */
+  readonly audit: AuditStore;
+  /**
+   * The §19.3 attention purge, bound to THIS handle.
+   *
+   * Erasing attention history is the one identity action whose durable change
+   * lives in a different workstream's stores (WS-E events, aggregates, ledger,
+   * behaviour). Calling the ordinary hook from inside the unit only LOOKS
+   * transactional: it writes through separately-composed stores, so a purge
+   * that succeeded followed by a commit that failed destroyed the user's data
+   * irreversibly, rolled the `attention_delete` record back, and answered 500 —
+   * an erasure that happened, is denied, and has no record.
+   *
+   * The WS-E Drizzle stores all take an executor, so the production root binds
+   * them to the identity transaction and the two commit or fail together.
+   * Optional because a root that cannot bind them (a future split database)
+   * must say so by absence rather than by pretending.
+   */
+  readonly purgeAttention?: (userId: string, mode: 'delete' | 'reset') => Promise<number>;
+  /**
+   * The runtime-CONFIG store, on this handle.
+   *
+   * Every workstream's `/config` endpoint is the same two statements — set the
+   * value, append the record of who set it — and every one of them ran the two
+   * apart, so a failed append left a live configuration change with nothing
+   * accounting for it. They all write the SAME `pwatt_config` table through the
+   * same `PwattConfigStore` interface, so one binding closes all of them: in
+   * production it is built over the identity transaction, and in memory it is
+   * the WS-E store those handlers already use.
+   *
+   * Domains with their own config-store INSTANCE (WS-N compliance, WS-J
+   * moderation) use their own transactor instead — writing their keys through
+   * this handle would, in memory, write to a different map than they read from.
+   */
+  readonly config?: PwattConfigStore;
+}
+
 export interface IdentityServices {
   config: IdentityConfig;
   store: IdentityStore;
+  /**
+   * Commit an identity change WITH its record — and with its own other writes.
+   *
+   * The same seam WS-J and WS-H carry (`ModerationTransactor`,
+   * `InvariantPlatformServices.transact`) over the shared
+   * `lib/in-memory-unit-of-work.ts`: one `db.transaction` in production, an
+   * atomic + serialised fold in the in-memory twin.
+   */
+  transact<T>(work: (tx: IdentityTx) => Promise<T>): Promise<T>;
   sessions: SessionStore;
   /** WebAuthn challenges + SIWE nonces. */
   challenges: EphemeralStore;
@@ -218,6 +278,22 @@ export interface IdentityServices {
    *  — production deletion TOMBSTONES the users row, so FK cascades never
    *  fire there. */
   purgeClientState?: (userId: string) => Promise<void>;
+  /** WS-S §21.4 private-room DIRECTORY purge on hard deletion (default no-op).
+   *  A stub carries its creator's account reference, public display metadata
+   *  and timestamps; deletion tombstones the users row, so the FK `set null`
+   *  never fires and the record would otherwise outlive the account as exactly
+   *  the durable "this account created a private room at time T" trace that
+   *  `remove()` exists to erase. Removes the shell with the stub; member
+   *  devices keep the room, because the server never held it. */
+  purgePrivateRoomStubs?: (userId: string) => Promise<void>;
+  /** WS-S §21 private-room DIRECTORY export (GDPR Art. 15), the READ mirror of
+   *  `purgePrivateRoomStubs`: the same durable rows the purge removes reach the
+   *  archive as `private_room_directory`.  Deletion and disclosure are one
+   *  obligation seen from two sides — a record the purge can find is a record
+   *  the export must declare.  Room CONTENT is absent because the server never
+   *  held any; what is here is the bootstrap POINTER the account created
+   *  (default absent ⇒ an empty list). */
+  exportPrivateRoomStubs?: (userId: string) => Promise<unknown[]>;
   /** WS-C/WS-T client-state DSAR export (GDPR Art. 15): the SAME durable
    *  per-user rows purgeClientState removes — settings sync, notification
    *  preferences, the reply-notification inbox — included in the export
@@ -296,18 +372,57 @@ export function identityConfigFromEnv(env: {
 
 /** Build a fresh, fully in-memory service bundle (tests/CI; prod swaps adapters). */
 export function createInMemoryIdentityServices(config: IdentityConfig): IdentityServices {
-  return {
+  const store = new InMemoryIdentityStore();
+  const audit = new InMemoryAuditStore();
+  // The stores are read from `services` at RUN time: the production boot swaps
+  // the Drizzle adapters in afterwards, and a unit that captured the in-memory
+  // ones would keep writing where nothing else reads.
+  const unit = new InMemoryUnitOfWork<IdentityTx>(
+    {
+      get store(): IdentityStore {
+        return services.store;
+      },
+      get audit(): AuditStore {
+        return services.audit;
+      },
+      // In-memory: the same hook, run inside the unit so the ORDER holds (the
+      // record is appended first, and a failing purge aborts it). It is NOT the
+      // full guarantee — the WS-E in-memory stores register no rollback, so a
+      // purge that succeeded before a later failure stays done here. The
+      // rollback is the PRODUCTION binding's, where the WS-E stores are built
+      // over the identity transaction's own executor; this twin deliberately
+      // does not pretend to more than it has.
+      purgeAttention: (userId, mode) =>
+        services.purgeAttention?.(userId, mode) ?? Promise.resolve(0),
+      // In memory this IS the store those handlers hold, so the twin is atomic
+      // over it (registered in the rollback list below).
+      get config(): PwattConfigStore {
+        return getEventPipelineServices().configStore;
+      },
+    },
+    () => {
+      const config = getEventPipelineServices().configStore;
+      return [
+        ...(services.store instanceof InMemoryIdentityStore ? [services.store] : []),
+        ...(services.audit instanceof InMemoryAuditStore ? [services.audit] : []),
+        ...(config instanceof InMemoryPwattConfigStore ? [config] : []),
+      ];
+    },
+  );
+  const services: IdentityServices = {
     config,
-    store: new InMemoryIdentityStore(),
+    store,
+    transact: (work) => unit.run(work),
     sessions: new InMemorySessionStore(),
     challenges: new InMemoryEphemeralStore(),
     otp: new InMemoryEphemeralStore(),
     rateLimit: new AuthRateLimiter(new InMemoryAuthRateLimitStore()),
-    audit: new InMemoryAuditStore(),
+    audit,
     mailer: new RecordingMailer(),
     secretBox: createLocalSecretBox(config.masterSecret),
     objectStore: new InMemoryObjectStore(createLocalSecretBox(config.masterSecret)),
   };
+  return services;
 }
 
 let _services: IdentityServices | undefined;

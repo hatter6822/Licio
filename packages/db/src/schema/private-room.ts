@@ -18,17 +18,8 @@
 // shell id, and the rendezvous record is DELIBERATELY un-linkable to any room
 // (the server cannot map a blind id to a room/account/CID — §15.3.1).
 import { sql } from 'drizzle-orm';
-import {
-  check,
-  index,
-  jsonb,
-  pgEnum,
-  pgTable,
-  text,
-  timestamp,
-  uniqueIndex,
-  uuid,
-} from 'drizzle-orm/pg-core';
+import { check, index, jsonb, pgEnum, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { roomDirectoryModeEnum, rooms } from './room.js';
 import { users } from './user.js';
 
@@ -78,21 +69,78 @@ export const privateRoomStubs = pgTable(
       .notNull()
       .default([]),
 
-    /** The re-signed §8.2 stub (public fields only) + its detached signature. */
+    /**
+     * The re-signed §8.2 stub (public fields only) + its detached signature.
+     *
+     * "Public fields only" is now structural rather than aspirational: the one
+     * secret this blob used to carry — the §21.2 bootstrap capability — lives in
+     * its own column below.  A jsonb blob is projected wholesale or not at all,
+     * so anything inside it is disclosed everywhere it is disclosed anywhere.
+     */
     signedStub: jsonb('signed_stub').$type<Record<string, unknown>>().notNull(),
     stubSignature: text('stub_signature').notNull(),
+
+    /**
+     * §21.2 — the invite-derived capability that gates an `unlisted` bootstrap
+     * read.  NEVER projected: it is compared, in constant time, against the
+     * `X-Licio-Bootstrap-Token` HEADER a reader presents, and appears in no
+     * response type.  A header rather than a query parameter because a URL is
+     * written down in proxy logs, browser history and the client's own dev
+     * console, and this value does not rotate.
+     *
+     * NOT NULL because a stub without one is unresolvable for its members the
+     * moment it is delisted — the §21.4 guarantee that delisting keeps the
+     * record reachable is only as strong as every stub having a capability.
+     */
+    bootstrapBlindId: text('bootstrap_blind_id').notNull(),
 
     /** The Licio account that created the stub (for §27.2 rate limiting only). */
     createdByAccountId: uuid('created_by_account_id').references(() => users.userId, {
       onDelete: 'set null',
     }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     /** At most one stub per P2P room shell — enforced STRUCTURALLY (unique),
      *  not just by convention. */
     uniqueIndex('private_room_stubs_room_uq').on(t.roomServerId),
+    /**
+     * ONE record per ROOM.
+     *
+     * `room_public_key` is the room's founder signing key — the room's own
+     * identity, and what the record is verified against. The record is not an
+     * account's possession: its `room_server_id` is the handle every invite
+     * carries and the value the §4.2 directory publishes, so a second record
+     * for the same room lists it twice under two ids with two bootstrap
+     * capabilities, and a member who resolves the wrong one reaches a shell
+     * nobody else is using.
+     *
+     * Keying this on `(account, room)` — as it briefly was — answered a
+     * narrower question and let a founder DEVICE signed into a second account
+     * register the same room again with no race at all.
+     *
+     * It is also the TOCTOU backstop registration needs: a check cannot fix a
+     * check, and two tabs both read "nothing there" and both insert. The
+     * service refuses another account's room (`room_already_registered`) and
+     * ADOPTS the caller's own row on conflict, which is what makes a retry
+     * idempotent rather than merely refused.
+     */
+    uniqueIndex('private_room_stubs_room_key_uq').on(t.roomPublicKey),
+    /**
+     * The §4.2 public directory's keyset, in the order it reads.
+     *
+     * The endpoint is UNAUTHENTICATED and budgeted at 300/min, and `LIMIT` does
+     * not bound the work: without this the planner filters and sorts every
+     * listed row per request. PARTIAL on `directory_mode = 'listed'`, because
+     * that is the only mode the directory can serve and an unlisted stub has no
+     * business occupying the index.
+     */
+    index('private_room_stubs_directory_idx')
+      .on(t.createdAt.desc(), t.stubId.desc())
+      .where(sql`${t.directoryMode} = 'listed'`),
+    /** The owner lookup behind the DSAR export and the create-recovery read. */
+    index('private_room_stubs_account_idx').on(t.createdByAccountId, t.createdAt.desc()),
     /** `detached` rooms store no stub (§8.2). */
     check('private_room_stubs_not_detached', sql`${t.directoryMode} <> 'detached'`),
     /** Display metadata exists only for `listed` rooms (unlisted leaks no name). */
@@ -126,8 +174,8 @@ export const privateRendezvousRecords = pgTable(
     /** Sealed under `rendezvous_key`; the server never decodes it. */
     encryptedAnnouncement: text('encrypted_announcement').notNull(),
     /** Short TTL (5–30 min); expired rows are never returned + are swept. */
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: instant('expires_at').notNull(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     /** Poll-by-room-blind-id; the only query shape the rendezvous service needs. */

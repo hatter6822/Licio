@@ -6,14 +6,17 @@
 // fail-closed runtime config, the contribution rate limiter, the safety
 // classifier seam, metrics, and the deterministic demo seed (development
 // only — production never seeds fixtures).
+
 import { createHash } from 'node:crypto';
 import type { ContributionType, IntegritySignalDetectedEvent } from '@licio/shared';
 import { InMemorySlidingWindowStore, type SlidingWindowStore } from '../events/ingest-limiter.js';
 import type { EventPipelineServices } from '../events/services.js';
+import { type AuditStore, InMemoryAuditStore } from '../identity/audit.js';
 import { getIdentityServices } from '../identity/services.js';
 import { SEARCH_COMMENT_SNIPPET_LENGTH, type SearchDocument } from '../ingestion/search.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
+import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import type { ChallengePolicyOverride } from './challenge-policy.js';
 import { type CommentBroadcaster, InMemoryCommentBroadcaster } from './comment-broadcaster.js';
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
@@ -121,9 +124,20 @@ export interface RoomAgentModerator {
   } | null>;
 }
 
+/** The stores one FORUM unit writes through, bound to a single handle. */
+export interface ForumTx {
+  readonly rooms: RoomStore;
+  /** The WS-D identity trail, on that handle — a room-steward or membership
+   *  change is a fact a user reads on their own security page, so it commits
+   *  with the change rather than after it. */
+  readonly identityAudit: AuditStore;
+}
+
 export interface ForumServices {
   contributions: ContributionStore;
   rooms: RoomStore;
+  /** Commit a room-lifecycle change WITH the identity record of it. */
+  transact<T>(work: (tx: ForumTx) => Promise<T>): Promise<T>;
   lenses: LensStore;
   uploads: UploadStore;
   contributionLimiter: ContributionRateLimiter;
@@ -213,9 +227,28 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
 
   const ingestion = options.ingestion;
 
+  const rooms = new InMemoryRoomStore(now);
+  // Stores read at RUN time, so the production boot's swap is honoured.
+  const unit = new InMemoryUnitOfWork<ForumTx>(
+    {
+      get rooms(): RoomStore {
+        return services.rooms;
+      },
+      get identityAudit(): AuditStore {
+        return getIdentityServices().audit;
+      },
+    },
+    () => [
+      ...(services.rooms instanceof InMemoryRoomStore ? [services.rooms] : []),
+      ...(getIdentityServices().audit instanceof InMemoryAuditStore
+        ? [getIdentityServices().audit as unknown as InMemoryAuditStore]
+        : []),
+    ],
+  );
   const services: ForumServices = {
     contributions: new InMemoryContributionStore(now),
-    rooms: new InMemoryRoomStore(now),
+    rooms,
+    transact: (work) => unit.run(work),
     lenses: new InMemoryLensStore(now),
     uploads: new InMemoryUploadStore(now),
     contributionLimiter: new ContributionRateLimiter(

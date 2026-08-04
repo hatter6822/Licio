@@ -1,0 +1,335 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-S.1.2b — the client for the PRIVATE_SPEC §21.1–§21.4 directory-stub API.
+//
+// This lives in `lib/`, NOT in `private-p2p/`, on purpose. The private plane's
+// own modules ride a bare injected `fetch` (see `private-p2p/rendezvous-client.ts`)
+// so the code-split crypto chunk never pulls the API client in and blows its
+// bundle budget. Stub writes, though, are ORDINARY authenticated mutations —
+// they need the session cookie and the serialized single-use CSRF token that
+// `apiFetch` provides — so they belong on this side of the split, called from a
+// component rather than from inside the lazy chunk.
+//
+// What crosses this boundary is deliberately thin: commitments the room already
+// publishes, a rendezvous policy, and (only if the room chose to be listed) a
+// public name. No content, no private CID, no operation head, no member list —
+// the server has no column for any of them.
+import { z } from 'zod';
+import { API_BASE, apiFetch, parseResponse } from './api.js';
+
+/** §4.2 — how discoverable the room's EXISTENCE is. `detached` is not offered
+ *  here: such a room stores no stub at all, so there is nothing to create. */
+export const DIRECTORY_MODES = ['listed', 'unlisted'] as const;
+export type DirectoryMode = (typeof DIRECTORY_MODES)[number];
+
+const bootstrapHintSchema = z.object({
+  kind: z.enum(['licio_blind', 'member_relay', 'manual']),
+  value: z.string(),
+});
+
+/** The §21.1 create response. */
+export const createStubResponseSchema = z.object({
+  room_server_id: z.string(),
+  stub_id: z.string(),
+  bootstrap_endpoints: z.array(z.string()),
+  created_at: z.string(),
+});
+export type CreateStubResponse = z.infer<typeof createStubResponseSchema>;
+
+/** The §21.2 bootstrap projection. Display fields are null unless `listed`. */
+export const bootstrapStubSchema = z.object({
+  room_server_id: z.string(),
+  directory_mode: z.enum(DIRECTORY_MODES),
+  display_name: z.string().nullable(),
+  display_description: z.string().nullable(),
+  display_avatar_public_cid: z.string().nullable(),
+  room_public_key: z.string(),
+  manifest_key_commitment: z.string(),
+  latest_manifest_commitment: z.string().nullable(),
+  rendezvous_policy: z.string(),
+  bootstrap_hints: z.array(bootstrapHintSchema),
+  bootstrap_endpoints: z.array(z.string()),
+  /**
+   * The room-signed body and its signature — NULL as a PAIR when withheld.
+   *
+   * A record written before the capability moved to its own column keeps that
+   * body byte-for-byte (the server cannot re-sign), and such a body still
+   * contains the capability — so it is served only to a reader who presented
+   * one, and omitted otherwise. Requiring them non-null made every open read of
+   * a preserved record throw on a successful 200.
+   */
+  signed_stub: z.record(z.string(), z.unknown()).nullable(),
+  stub_signature: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+export type BootstrapStub = z.infer<typeof bootstrapStubSchema>;
+
+/** §4.2 — one public directory row. Display metadata only: the commitments and
+ *  the signed stub (which carries the bootstrap capability) stay behind
+ *  `GET /bootstrap`, so browsing never hands out a token. */
+export const directoryEntrySchema = z.object({
+  room_server_id: z.string(),
+  display_name: z.string().nullable(),
+  display_description: z.string().nullable(),
+  display_avatar_public_cid: z.string().nullable(),
+  created_at: z.string(),
+});
+export type DirectoryEntry = z.infer<typeof directoryEntrySchema>;
+
+export const directoryPageSchema = z.object({
+  entries: z.array(directoryEntrySchema),
+  next_cursor: z.string().nullable(),
+});
+export type DirectoryPage = z.infer<typeof directoryPageSchema>;
+
+const deleteStubResponseSchema = z.object({
+  removed: z.literal(true),
+  removed_what: z.string(),
+  message: z.string(),
+});
+
+export interface CreateStubRequest {
+  readonly directoryMode: DirectoryMode;
+  /** `listed` rooms only — the server REFUSES these on an `unlisted` room
+   *  rather than silently dropping them. */
+  readonly displayName?: string;
+  readonly displayDescription?: string;
+  readonly displayAvatarPublicCid?: string;
+  readonly rendezvousPolicy: 'licio_blind' | 'member_rendezvous' | 'manual_only';
+  readonly bootstrapHints?: ReadonlyArray<z.infer<typeof bootstrapHintSchema>>;
+  /** The room-signed stub body: PUBLIC commitments only. The server derives the
+   *  `room_public_key`/`manifest_key_commitment` columns from it, so they are
+   *  not sent separately — two copies of one commitment can disagree. */
+  readonly signedStub: Record<string, unknown>;
+  readonly stubSignature: string;
+  /** Ed25519 by the room key over `(room key, commitment, account)` — never stored. */
+  readonly registrationProof: string;
+  /** §21.2 — the capability, sent beside the signed body rather than inside it.
+   *  The server stores it in a column it never projects. */
+  readonly bootstrapBlindId: string;
+}
+
+/** §21.1 — register the directory stub for a room this device just created. */
+export async function createPrivateRoomStub(
+  request: CreateStubRequest,
+): Promise<CreateStubResponse> {
+  const response = await apiFetch(`${API_BASE}/v1/private-rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      directory_mode: request.directoryMode,
+      ...(request.displayName !== undefined ? { display_name: request.displayName } : {}),
+      ...(request.displayDescription !== undefined
+        ? { display_description: request.displayDescription }
+        : {}),
+      ...(request.displayAvatarPublicCid !== undefined
+        ? { display_avatar_public_cid: request.displayAvatarPublicCid }
+        : {}),
+      rendezvous_policy: request.rendezvousPolicy,
+      ...(request.bootstrapHints !== undefined ? { bootstrap_hints: request.bootstrapHints } : {}),
+      signed_stub: request.signedStub,
+      stub_signature: request.stubSignature,
+      // Proof of CURRENT possession, bound to the signed-in account: the stub
+      // signature is static and public, so replaying it proves only that the
+      // replayer saw a record.
+      registration_proof: request.registrationProof,
+      bootstrap_blind_id: request.bootstrapBlindId,
+    }),
+  });
+  return await parseResponse(response, createStubResponseSchema);
+}
+
+/**
+ * §21.2 — read a room's bootstrap record.
+ *
+ * `token` is the invite-derived blind id, required for an `unlisted` room. A
+ * wrong token, a missing one, and an unknown room all answer with the same 404,
+ * so a failure here says only "no record you can reach", never "that room
+ * exists but you lack the token".
+ */
+export async function fetchPrivateRoomBootstrap(
+  roomServerId: string,
+  token?: string,
+): Promise<BootstrapStub> {
+  // The capability rides a HEADER, never the URL. `apiFetch` logs the URL of
+  // every request in a dev build, and a URL is written down in proxy logs and
+  // browser history besides — for a token that does not rotate, one logged line
+  // keeps opening an `unlisted` record long after the invite exchange, and after
+  // a delist.
+  const response = await apiFetch(
+    `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}/bootstrap`,
+    token === undefined ? undefined : { headers: { 'x-licio-bootstrap-token': token } },
+  );
+  return await parseResponse(response, bootstrapStubSchema);
+}
+
+export interface UpdateStubRequest {
+  readonly displayName?: string | null;
+  readonly displayDescription?: string | null;
+  readonly displayAvatarPublicCid?: string | null;
+  readonly rendezvousPolicy?: 'licio_blind' | 'member_rendezvous' | 'manual_only';
+  readonly bootstrapHints?: ReadonlyArray<z.infer<typeof bootstrapHintSchema>>;
+  readonly latestManifestCommitment?: string | null;
+  readonly signedStub?: Record<string, unknown>;
+  readonly stubSignature?: string;
+}
+
+/** §21.3 — patch the mutable stub fields (creator only, server-enforced). */
+export async function updatePrivateRoomStub(
+  roomServerId: string,
+  request: UpdateStubRequest,
+): Promise<BootstrapStub> {
+  const response = await apiFetch(
+    `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...(request.displayName !== undefined ? { display_name: request.displayName } : {}),
+        ...(request.displayDescription !== undefined
+          ? { display_description: request.displayDescription }
+          : {}),
+        ...(request.displayAvatarPublicCid !== undefined
+          ? { display_avatar_public_cid: request.displayAvatarPublicCid }
+          : {}),
+        ...(request.rendezvousPolicy !== undefined
+          ? { rendezvous_policy: request.rendezvousPolicy }
+          : {}),
+        ...(request.bootstrapHints !== undefined
+          ? { bootstrap_hints: request.bootstrapHints }
+          : {}),
+        ...(request.latestManifestCommitment !== undefined
+          ? { latest_manifest_commitment: request.latestManifestCommitment }
+          : {}),
+        ...(request.signedStub !== undefined ? { signed_stub: request.signedStub } : {}),
+        ...(request.stubSignature !== undefined ? { stub_signature: request.stubSignature } : {}),
+      }),
+    },
+  );
+  return await parseResponse(response, bootstrapStubSchema);
+}
+
+/**
+ * §4.2 — a page of the public directory of `listed` rooms.
+ *
+ * Only rooms whose creator explicitly chose `listed` appear. Being in the
+ * directory is not a way IN: a P2P room is invite-only, so what this buys a
+ * reader is knowing the room exists and whom to ask — which is exactly what
+ * `listed` was chosen for.
+ */
+export async function listPrivateRoomDirectory(options?: {
+  readonly limit?: number;
+  readonly cursor?: string;
+}): Promise<DirectoryPage> {
+  const params = new URLSearchParams();
+  if (options?.limit !== undefined) params.set('limit', String(options.limit));
+  if (options?.cursor !== undefined) params.set('cursor', options.cursor);
+  const query = params.size > 0 ? `?${params.toString()}` : '';
+  const response = await apiFetch(`${API_BASE}/v1/private-rooms/directory${query}`);
+  return await parseResponse(response, directoryPageSchema);
+}
+
+const myStubSchema = z.object({
+  room_server_id: z.string(),
+  stub_id: z.string(),
+  directory_mode: z.enum(DIRECTORY_MODES),
+  room_public_key: z.string(),
+  // NULLABLE as a pair: a migrated v1 body carries the §21.2 capability inside
+  // it, so `/mine` — a polled endpoint that must carry no capability — withholds
+  // the body and its signature together for those rows.
+  signed_stub: z.record(z.string(), z.unknown()).nullable(),
+});
+export type MyStub = z.infer<typeof myStubSchema>;
+
+const myStubsSchema = z.object({
+  stubs: z.array(myStubSchema),
+  next_cursor: z.string().nullable(),
+});
+
+/**
+ * §21.1 — ONE directory record this account created, by room id or by the
+ * room's own signing key.
+ *
+ * The recovery read. A create whose POST commits but whose RESPONSE is lost
+ * leaves a server record the client never learned the id of; without a way to
+ * ask, that record is unreachable forever — publicly enumerable, if it was
+ * listed. `roomPublicKey` is how a device identifies its own record in exactly
+ * that case: the key is the room's, it is in the record, and the client has it
+ * locally.
+ */
+export async function findMyPrivateRoomStub(
+  target: { readonly roomServerId: string } | { readonly roomPublicKey: string },
+): Promise<MyStub | null> {
+  // ONE request, because the question is about ONE room.
+  //
+  // This walked every page once, since both callers ask a yes/no question about
+  // a specific room — and that was wrong twice: it spends a request per page
+  // against a per-account budget, so an account with enough stubs can never
+  // finish the walk, and a truncated walk answers "no" where the honest answer
+  // is "unknown".
+  const query =
+    'roomServerId' in target
+      ? `room=${encodeURIComponent(target.roomServerId)}`
+      : `room_public_key=${encodeURIComponent(target.roomPublicKey)}`;
+  const response = await apiFetch(`${API_BASE}/v1/private-rooms/mine?${query}`);
+  return (await parseResponse(response, myStubsSchema)).stubs[0] ?? null;
+}
+
+/**
+ * The §11.4 STAFF delist's answer: a confirmation, not a record.
+ *
+ * After the demotion staff hold no capability for the record, so the endpoint
+ * returns what happened rather than the bootstrap projection the owner path
+ * returns — and parsing one as the other threw AFTER the demotion had committed
+ * and been audited, so the console reported failure over a completed action.
+ */
+const staffDelistResponseSchema = z.object({
+  room_server_id: z.string(),
+  delisted: z.literal(true),
+});
+
+/** §11.4/§21.4 — platform staff stop a room advertising a public name. */
+export async function staffDelistPrivateRoom(
+  roomServerId: string,
+  /** The case this answers, so the demotion RESOLVES it in the same unit — a
+   *  remedy that leaves its case open puts it straight back in the queue. */
+  caseId?: string,
+): Promise<{ room_server_id: string; delisted: true }> {
+  const response = await apiFetch(
+    `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}/delist`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(caseId === undefined ? {} : { case_id: caseId }),
+    },
+  );
+  return await parseResponse(response, staffDelistResponseSchema);
+}
+
+/** §21.4 — the OWNER stops advertising their own room; it stays resolvable for
+ *  members, and the full record comes back because they still hold it. */
+export async function delistPrivateRoomStub(roomServerId: string): Promise<BootstrapStub> {
+  const response = await apiFetch(
+    `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}/delist`,
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+  );
+  return await parseResponse(response, bootstrapStubSchema);
+}
+
+/**
+ * §21.4 — remove Licio's directory record.
+ *
+ * This does NOT delete the room. Member devices keep every byte, because the
+ * server never held any; the response's `message` is the wording the UI must
+ * use rather than "delete private room for everyone".
+ */
+export async function deletePrivateRoomStub(
+  roomServerId: string,
+): Promise<{ removed: true; removed_what: string; message: string }> {
+  const response = await apiFetch(
+    `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}`,
+    { method: 'DELETE' },
+  );
+  return await parseResponse(response, deleteStubResponseSchema);
+}

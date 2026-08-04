@@ -1,0 +1,925 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-S.1.2 / §21.1–§21.4 — the directory-stub service.
+//
+// What the server is here: a courier for a signed, member-authored bootstrap
+// record.  What it is NOT: an authority over the room.  It verifies no room
+// signature (it holds no room key — PRIV-API-RENDEZVOUS-1), decides no
+// membership, and learns nothing about the room's contents.  The §11.4 rule
+// holds verbatim — no platform role can read, add members to, moderate, recover,
+// or unlock a P2P room; the only thing staff can do here is DELIST a listed
+// directory record.
+//
+// Three server-side bounds the design requires regardless of client input:
+//
+//   • Display metadata is `listed`-ONLY.  An `unlisted` room that shipped a
+//     name would defeat its own mode, so the service refuses the request rather
+//     than silently dropping the field — a silent drop would leave the client
+//     believing a name it can see locally is also what the directory serves.
+//   • `unlisted` bootstrap requires the §21.2 invite-derived blind token, and a
+//     token mismatch is INDISTINGUISHABLE from an unknown room (the §15.3.1
+//     no-existence-oracle property, applied to the directory).
+//   • The §8.1 forbidden key classes are refused inside `signed_stub`, the one
+//     free-form field a column allowlist cannot see into.
+import { createDbClient } from '@licio/db';
+import { z } from 'zod';
+import { createLogger } from '../lib/logger.js';
+import { pgNoticeLogLevel } from '../lib/pg-notices.js';
+import { DrizzlePrivateRoomStubStore } from './drizzle-store.js';
+import {
+  forbiddenSignedStubKeys,
+  InMemoryPrivateRoomStubStore,
+  type PrivateRoomCreateStubRequest,
+  type PrivateRoomStubStore,
+  type PrivateRoomStubUpdateRequest,
+  RoomAlreadyRegisteredError,
+  type StoredPrivateRoomStub,
+} from './stores.js';
+import { verifyDirectoryStubSignature, verifyRegistrationProof } from './stub-signature.js';
+
+/** The rendezvous endpoints a bootstrapping peer needs (§21.1 response). */
+export const BOOTSTRAP_ENDPOINTS: readonly string[] = [
+  '/v1/private-rendezvous/announce',
+  '/v1/private-rendezvous/poll',
+  '/v1/private-rendezvous/signal',
+  '/v1/private-rendezvous/signal/poll',
+];
+
+/** Why a stub operation was refused.  `not_found` is deliberately reused for a
+ *  bad bootstrap token (no existence oracle). */
+export type StubFailure =
+  | 'not_found'
+  | 'forbidden'
+  /** The signed body does not verify under the room key it names — so the
+   *  caller does not hold that room. */
+  | 'signature_invalid'
+  /** Another ACCOUNT already registered a directory record for this room.
+   *  One room, one record — see `create`. */
+  | 'room_already_registered'
+  | 'display_requires_listed'
+  | 'forbidden_stub_field'
+  | 'identity_change'
+  | 'unlisted_requires_token';
+
+export type StubResult<T> = { ok: true; value: T } | { ok: false; reason: StubFailure };
+
+/** The §21.1 create response. */
+export interface CreateStubResponse {
+  readonly room_server_id: string;
+  readonly stub_id: string;
+  readonly bootstrap_endpoints: readonly string[];
+  readonly created_at: string;
+}
+
+/** The §21.2 bootstrap projection.  Display fields appear only for a `listed`
+ *  room; everything else is a commitment or a bootstrap policy. */
+export interface BootstrapResponse {
+  readonly room_server_id: string;
+  readonly directory_mode: 'listed' | 'unlisted';
+  readonly display_name: string | null;
+  readonly display_description: string | null;
+  readonly display_avatar_public_cid: string | null;
+  readonly room_public_key: string;
+  readonly manifest_key_commitment: string;
+  readonly latest_manifest_commitment: string | null;
+  readonly rendezvous_policy: string;
+  readonly bootstrap_hints: readonly { kind: string; value: string }[];
+  readonly bootstrap_endpoints: readonly string[];
+  /**
+   * The room-signed body — NULL unless the caller presented the capability.
+   *
+   * It contains `bootstrap_blind_id`, the token that gates every `unlisted`
+   * read, and a `listed` room's bootstrap read is open. So the open projection
+   * used to hand the capability to anyone who asked, for every listed room —
+   * and with the §4.2 directory enumerating listed room ids, that is a harvest
+   * of tokens that keep working after the creator delists.  Delisting is
+   * supposed to stop the room advertising itself while staying resolvable for
+   * MEMBERS; a harvested token makes it resolvable for everyone forever.
+   *
+   * Withholding it costs an open reader nothing they could act on: the body is
+   * verified against `room_public_key`, which the body itself carries, so the
+   * signature only means something to someone who already knows the room's key
+   * independently — a member, who holds the token.
+   */
+  readonly signed_stub: Record<string, unknown> | null;
+  readonly stub_signature: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+/**
+ * Constant-time string comparison for the §21.2 bootstrap token.
+ *
+ * A length-then-`===` compare leaks the shared prefix through timing, which for
+ * a capability check is the difference between guessing a token and deriving it
+ * byte by byte.  Both operands are bounded base64url by the wire schema, so the
+ * fixed-length XOR fold below is exact.
+ */
+function constantTimeEquals(a: string, b: string): boolean {
+  const max = Math.max(a.length, b.length);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < max; i += 1) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+/**
+ * §4.2 — one row of the public room directory.
+ *
+ * DELIBERATELY not the §21.2 bootstrap projection. A browse surface needs the
+ * display metadata a `listed` room chose to publish and nothing else: the
+ * commitments, hints, and above all the `signed_stub` (which carries the
+ * `bootstrap_blind_id` capability) stay behind `GET /bootstrap`. Listing them
+ * here would hand every anonymous reader the token that gates unlisted records,
+ * for every room that ever gets delisted.
+ */
+export interface DirectoryEntry {
+  readonly room_server_id: string;
+  readonly display_name: string | null;
+  readonly display_description: string | null;
+  readonly display_avatar_public_cid: string | null;
+  readonly created_at: string;
+}
+
+/** A page of the §4.2 directory. `next_cursor` is null at the end. */
+export interface DirectoryPage {
+  readonly entries: readonly DirectoryEntry[];
+  readonly next_cursor: string | null;
+}
+
+/** How many stubs one owner-scoped read fetches at a time. */
+export const ACCOUNT_STUB_PAGE = 50;
+
+/** The largest page the directory will serve, and its default. */
+export const DIRECTORY_MAX_LIMIT = 50;
+export const DIRECTORY_DEFAULT_LIMIT = 20;
+
+/** One DSAR row: what the server holds about a stub this account created. */
+export interface AccountStubExport {
+  readonly room_server_id: string;
+  readonly stub_id: string;
+  readonly directory_mode: 'listed' | 'unlisted';
+  readonly display_name: string | null;
+  readonly display_description: string | null;
+  readonly display_avatar_public_cid: string | null;
+  readonly room_public_key: string;
+  readonly manifest_key_commitment: string;
+  readonly latest_manifest_commitment: string | null;
+  readonly rendezvous_policy: string;
+  readonly bootstrap_hints: readonly { kind: string; value: string }[];
+  readonly signed_stub: Record<string, unknown>;
+  readonly stub_signature: string;
+  /**
+   * The §21.2 capability.
+   *
+   * Never projected to a READER — but this is the account's own archive, and
+   * Art. 15 asks what is held about them, not what a stranger may see. The
+   * purge deletes this field with the row, so an export that omitted it would
+   * break the symmetry the export exists to keep. It is also the field that
+   * makes the archive actionable: with it the account can resolve, and remove,
+   * a record it has otherwise lost the handle to.
+   */
+  readonly bootstrap_blind_id: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+/**
+ * The `/mine` projection: the owner's record MINUS the capability.
+ *
+ * `signed_stub`/`stub_signature` are NULLABLE here, as a pair: a migrated v1
+ * body carries the capability inside it, so this projection withholds the body
+ * itself for those rows rather than handing the token back through the field
+ * next to the column it was moved out of. (A signature over a body the caller
+ * cannot see verifies nothing, so the pair travels together or not at all.)
+ */
+export type OwnedStubRow = Omit<
+  AccountStubExport,
+  'bootstrap_blind_id' | 'signed_stub' | 'stub_signature'
+> & {
+  readonly signed_stub: Record<string, unknown> | null;
+  readonly stub_signature: string | null;
+};
+
+/** Aggregate-only counters — no room, account, or token identity (§27.2). */
+export interface PrivateRoomStubMetrics {
+  created: number;
+  bootstrapReads: number;
+  bootstrapRefusals: number;
+  updated: number;
+  delisted: number;
+  removed: number;
+}
+
+export class PrivateRoomStubService {
+  readonly #metrics: PrivateRoomStubMetrics = {
+    created: 0,
+    bootstrapReads: 0,
+    bootstrapRefusals: 0,
+    updated: 0,
+    delisted: 0,
+    removed: 0,
+  };
+
+  constructor(
+    private readonly store: PrivateRoomStubStore,
+    private readonly newId: () => string = () => crypto.randomUUID(),
+  ) {}
+
+  /** §21.1 — mint the P2P room shell + its directory stub. */
+  async create(
+    request: PrivateRoomCreateStubRequest,
+    accountId: string,
+  ): Promise<StubResult<CreateStubResponse>> {
+    const hasDisplay =
+      request.display_name !== undefined ||
+      request.display_description !== undefined ||
+      request.display_avatar_public_cid !== undefined;
+    if (request.directory_mode !== 'listed' && hasDisplay) {
+      return { ok: false, reason: 'display_requires_listed' };
+    }
+    if (forbiddenSignedStubKeys(request.signed_stub).length > 0) {
+      return { ok: false, reason: 'forbidden_stub_field' };
+    }
+    // EVERY stub carries a bootstrap capability, not just one created
+    // `unlisted` — a listed room can be delisted tomorrow and must stay
+    // resolvable for its members when it is (§21.4). That is no longer a check
+    // here: `bootstrap_blind_id` is a required field of the request and a
+    // NOT NULL column, so a stub without one cannot be constructed. The same
+    // goes for the commitments, which are derived from the signed body rather
+    // than sent beside it.
+
+    // POSSESSION FIRST — before the room's key is claimed as a unique row.
+    //
+    // A founder public key is not a secret: it rides every invite and appears in
+    // every published record. Once "one record per room" made that key the
+    // uniqueness key, an unverified create let anyone who had seen one take the
+    // row under their own account with any 64-byte string as the signature — and
+    // the founder is then permanently refused their own room, with only the
+    // squatter able to remove the forgery.
+    //
+    // The signature is the only evidence of possession available here (the
+    // server holds no room key, by construction), so it is checked before
+    // anything is claimed. A body the server cannot re-encode — a legacy v1
+    // shape — cannot be verified and so cannot be registered; those rows exist
+    // only because the capability migration preserved them.
+    if (!(await verifyDirectoryStubSignature(request.signed_stub, request.stub_signature))) {
+      return { ok: false, reason: 'signature_invalid' };
+    }
+    // …AND a proof of CURRENT possession, bound to this account.
+    //
+    // The stub signature is static and PUBLIC — a `listed` record serves the
+    // pair to anyone, an unlisted one to any invitee — so replaying it proves
+    // only that the replayer has seen a record. After the owner removes theirs,
+    // that would be enough to take the room-key uniqueness under another
+    // account, publish arbitrary display metadata, and lock the room's own
+    // creator out permanently.
+    //
+    // The proof covers the account the SERVER resolved from the session, so it
+    // cannot be signed for someone else's, and it is discarded rather than
+    // stored: nothing about the creator's account reaches the public body.
+    if (
+      !(await verifyRegistrationProof(request.signed_stub, request.registration_proof, accountId))
+    ) {
+      return { ok: false, reason: 'signature_invalid' };
+    }
+
+    // ONE RECORD PER ROOM, not per account.
+    //
+    // The record IS the room's public handle: its `room_server_id` is what
+    // invites carry and what the §4.2 directory lists. A second record for the
+    // same room publishes the room twice, under two ids, with two bootstrap
+    // capabilities — and a member who resolves the wrong one reaches a shell no
+    // other member is using. The room key is the room's identity, so it is the
+    // key this uniqueness is on.
+    //
+    // The same account re-registering ADOPTS (that is what makes a retry, or a
+    // second tab, idempotent). A different account is refused: it is not that
+    // the caller lacks a right, it is that the room already has its record —
+    // and only the account holding it can delist or remove it (§21.3/§21.4).
+    // The store DECIDES this — it adopts the caller's own record and raises
+    // `RoomAlreadyRegisteredError` for another account's, atomically with the
+    // insert. This read only lets the common case answer without attempting a
+    // write; the race is settled below, where both concurrent callers end up.
+    const forRoom = await this.store.findByRoomKey(request.signed_stub.room_public_key);
+    if (forRoom !== null && forRoom.createdByAccountId !== accountId) {
+      return { ok: false, reason: 'room_already_registered' };
+    }
+
+    let stub: StoredPrivateRoomStub;
+    try {
+      stub = await this.store.create({
+        stubId: this.newId(),
+        roomServerId: this.newId(),
+        directoryMode: request.directory_mode,
+        displayName: request.display_name ?? null,
+        displayDescription: request.display_description ?? null,
+        displayAvatarPublicCid: request.display_avatar_public_cid ?? null,
+        rendezvousPolicy: request.rendezvous_policy,
+        bootstrapHints: request.bootstrap_hints ?? [],
+        signedStub: request.signed_stub,
+        stubSignature: request.stub_signature,
+        bootstrapBlindId: request.bootstrap_blind_id,
+        createdByAccountId: accountId,
+      });
+    } catch (error) {
+      if (error instanceof RoomAlreadyRegisteredError) {
+        return { ok: false, reason: 'room_already_registered' };
+      }
+      throw error;
+    }
+    this.#metrics.created += 1;
+    return {
+      ok: true,
+      value: {
+        room_server_id: stub.roomServerId,
+        stub_id: stub.stubId,
+        bootstrap_endpoints: BOOTSTRAP_ENDPOINTS,
+        created_at: stub.createdAt,
+      },
+    };
+  }
+
+  /**
+   * §21.2 — read a bootstrap record.  `listed` is open; `unlisted` requires the
+   * invite-derived blind token, and a wrong or missing token yields the SAME
+   * `not_found` an unknown room does, so the endpoint is not an oracle for
+   * which room ids exist.
+   */
+  async bootstrap(
+    roomServerId: string,
+    token: string | undefined,
+  ): Promise<StubResult<BootstrapResponse>> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (!stub) {
+      this.#metrics.bootstrapRefusals += 1;
+      return { ok: false, reason: 'not_found' };
+    }
+    const capable = token !== undefined && constantTimeEquals(stub.bootstrapBlindId, token);
+    // A token that is SUPPLIED and wrong is a 404 in BOTH modes. Serving the
+    // open projection instead would let a caller probe tokens by watching which
+    // shape comes back, and it would answer differently for a listed room than
+    // an unlisted one — the oracle §15.3.1 forbids, reintroduced through the
+    // response body rather than the status code.
+    if (token !== undefined && !capable) {
+      this.#metrics.bootstrapRefusals += 1;
+      return { ok: false, reason: 'not_found' };
+    }
+    if (stub.directoryMode === 'unlisted' && !capable) {
+      this.#metrics.bootstrapRefusals += 1;
+      return { ok: false, reason: 'not_found' };
+    }
+    this.#metrics.bootstrapReads += 1;
+    // The signed body carries the capability, so it goes only to a caller who
+    // already holds it (see `BootstrapResponse.signed_stub`).
+    return { ok: true, value: this.#project(stub, capable) };
+  }
+
+  /**
+   * What a caller who does not own this record is told.
+   *
+   * `forbidden` and `not_found` are different answers, and for an UNLISTED
+   * record the difference is an existence oracle: bootstrap makes an unlisted
+   * room indistinguishable from an unknown one without the blind token
+   * (§15.3.1), and a mutation route answering `forbidden` hands the same fact
+   * back for free. A LISTED record's existence is public by its creator's own
+   * choice, so `forbidden` is the honest answer there.
+   *
+   * It lives here, once, because it was got right for the staff arm of `delist`
+   * and wrong on the ordinary non-owner branch of all three — the same rule
+   * re-derived at each call site is the shape that produced that.
+   */
+  static #refuseNonOwner(stub: StoredPrivateRoomStub): { ok: false; reason: StubFailure } {
+    return { ok: false, reason: stub.directoryMode === 'listed' ? 'forbidden' : 'not_found' };
+  }
+
+  /** §21.3 — patch the mutable stub fields (creator only). */
+  async update(
+    roomServerId: string,
+    request: PrivateRoomStubUpdateRequest,
+    accountId: string,
+  ): Promise<StubResult<BootstrapResponse>> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (!stub) return { ok: false, reason: 'not_found' };
+    if (stub.createdByAccountId !== accountId) {
+      return PrivateRoomStubService.#refuseNonOwner(stub);
+    }
+    const setsDisplay =
+      (request.display_name !== undefined && request.display_name !== null) ||
+      (request.display_description !== undefined && request.display_description !== null) ||
+      (request.display_avatar_public_cid !== undefined &&
+        request.display_avatar_public_cid !== null);
+    if (stub.directoryMode !== 'listed' && setsDisplay) {
+      return { ok: false, reason: 'display_requires_listed' };
+    }
+    if (request.signed_stub !== undefined && forbiddenSignedStubKeys(request.signed_stub).length) {
+      return { ok: false, reason: 'forbidden_stub_field' };
+    }
+    // A PATCH can no longer drop the capability or desynchronise the
+    // commitments: the capability is not in the body it replaces, and the
+    // columns are re-derived from the body the store is handed.
+    //
+    // What it must ALSO not do is change WHO the record is signed by.
+    // `room_public_key` is how a member decides the directory entry was authored
+    // by their room rather than by the server storing it, and it is the founder
+    // device's key — but any member device can build a signed body, and it signs
+    // with ITS OWN key. So an ordinary commitment refresh from a joined device
+    // would silently re-identify the record, and every member who verifies would
+    // conclude their room's entry was forged. The mutable fields §21.3 lists do
+    // not include identity; this makes that structural rather than implied.
+    if (
+      request.signed_stub !== undefined &&
+      request.signed_stub.room_public_key !== stub.roomPublicKey
+    ) {
+      return { ok: false, reason: 'identity_change' };
+    }
+    // …and the REPLACEMENT must verify, exactly as the original had to.
+    //
+    // `create` proves possession before claiming the room's key; a PATCH that
+    // did not left the same key attached to a body nobody signed — every member
+    // then rejects the record at bootstrap, and the room's own creator is the
+    // one who broke it. The schema checks the signature's SIZE, which is not the
+    // same question.
+    if (
+      request.signed_stub !== undefined &&
+      request.stub_signature !== undefined &&
+      !(await verifyDirectoryStubSignature(request.signed_stub, request.stub_signature))
+    ) {
+      return { ok: false, reason: 'signature_invalid' };
+    }
+    const next = await this.store.update(
+      roomServerId,
+      {
+        ...(request.display_name !== undefined ? { displayName: request.display_name } : {}),
+        ...(request.display_description !== undefined
+          ? { displayDescription: request.display_description }
+          : {}),
+        ...(request.display_avatar_public_cid !== undefined
+          ? { displayAvatarPublicCid: request.display_avatar_public_cid }
+          : {}),
+        ...(request.rendezvous_policy !== undefined
+          ? { rendezvousPolicy: request.rendezvous_policy }
+          : {}),
+        ...(request.bootstrap_hints !== undefined
+          ? { bootstrapHints: request.bootstrap_hints }
+          : {}),
+        ...(request.latest_manifest_commitment !== undefined
+          ? { latestManifestCommitment: request.latest_manifest_commitment }
+          : {}),
+        ...(request.signed_stub !== undefined ? { signedStub: request.signed_stub } : {}),
+        ...(request.stub_signature !== undefined ? { stubSignature: request.stub_signature } : {}),
+      },
+      // Carry the mode check INTO the write when the patch publishes display
+      // metadata: the check above and this statement are different moments, and
+      // a delist between them is a legal race.
+      { requireListed: setsDisplay },
+    );
+    // `not_found` covers both "gone" and "no longer listed", which is the right
+    // answer for the racing case too: the record the caller described no longer
+    // exists in the state they described it in.
+    if (!next) return { ok: false, reason: 'not_found' };
+    this.#metrics.updated += 1;
+    return { ok: true, value: this.#project(next, true) };
+  }
+
+  /**
+   * §21.4 — the OWNER demotes their own record: `listed → unlisted`, display
+   * fields dropped.
+   *
+   * Owner-only, and idempotent for them. The STAFF arm is not here: §11.4's
+   * single platform power over a P2P room has to commit with its audit record,
+   * so it runs inside the moderation unit through `delistListed` instead.
+   * Keeping a second, unaudited path in this service would be a way to exercise
+   * that power without the record, reachable by the next caller who passed a
+   * flag.
+   */
+  async delist(roomServerId: string, accountId: string): Promise<StubResult<BootstrapResponse>> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (!stub) return { ok: false, reason: 'not_found' };
+    if (stub.createdByAccountId !== accountId) {
+      return PrivateRoomStubService.#refuseNonOwner(stub);
+    }
+    const next = await this.store.delist(roomServerId);
+    if (!next) return { ok: false, reason: 'not_found' };
+    this.#metrics.delisted += 1;
+    return { ok: true, value: this.#project(next, true) };
+  }
+
+  /**
+   * §21.4 — remove the directory record.  This deletes LICIO'S BOOTSTRAP RECORD
+   * and nothing else: member devices keep every byte of the room, because the
+   * server never held any.  The route's copy says exactly that.
+   */
+  async remove(roomServerId: string, accountId: string): Promise<StubResult<{ removed: true }>> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (!stub) return { ok: false, reason: 'not_found' };
+    if (stub.createdByAccountId !== accountId) {
+      return PrivateRoomStubService.#refuseNonOwner(stub);
+    }
+    const removed = await this.store.remove(roomServerId);
+    if (!removed) return { ok: false, reason: 'not_found' };
+    this.#metrics.removed += 1;
+    return { ok: true, value: { removed: true } };
+  }
+
+  /**
+   * §21.4 — remove every directory record an account created (hard deletion).
+   *
+   * Called by the WS-D purge, not by a route: there is no user-facing "delete
+   * all my stubs" action. Returns how many were removed.
+   */
+  async purgeForAccount(accountId: string): Promise<number> {
+    const removed = await this.store.purgeForAccount(accountId);
+    this.#metrics.removed += removed;
+    return removed;
+  }
+
+  /**
+   * §4.2 — a page of the public directory of `listed` rooms.
+   *
+   * The cursor is `<createdAt>|<stubId>`, opaque to the client and rejected
+   * fail-closed: a malformed cursor starts from the beginning rather than
+   * throwing, because a browse surface must not 500 on a mangled link.
+   */
+  async listDirectory(options: {
+    readonly limit?: number;
+    readonly cursor?: string;
+  }): Promise<DirectoryPage> {
+    const limit = Math.min(
+      Math.max(1, Math.trunc(options.limit ?? DIRECTORY_DEFAULT_LIMIT)),
+      DIRECTORY_MAX_LIMIT,
+    );
+    const cursor = parseDirectoryCursor(options.cursor);
+    // One row past the page decides whether there is a next cursor, without a
+    // second COUNT query that could disagree with the page it describes.
+    const rows = await this.store.listListed({
+      limit: limit + 1,
+      ...(cursor ? { cursor } : {}),
+    });
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      entries: page.map((stub) => ({
+        room_server_id: stub.roomServerId,
+        display_name: stub.displayName,
+        display_description: stub.displayDescription,
+        display_avatar_public_cid: stub.displayAvatarPublicCid,
+        created_at: stub.createdAt,
+      })),
+      next_cursor: rows.length > limit && last ? `${last.createdAt}|${last.stubId}` : null,
+    };
+  }
+
+  /**
+   * Art. 15 — every directory record this account created.
+   *
+   * The mirror of `purgeForAccount`: the export discloses exactly the rows the
+   * purge removes. It is the account's OWN data, so the full stub is included —
+   * including `signed_stub`, which the account's own device authored.
+   */
+  async exportForAccount(accountId: string): Promise<AccountStubExport[]> {
+    // COMPLETE, by iterating bounded pages — an Art. 15 archive that truncates
+    // is not an archive, and a single unpaged read of an unbounded set is the
+    // amplification path `/mine` pages away from.
+    const stubs: StoredPrivateRoomStub[] = [];
+    let cursor: { createdAt: string; stubId: string } | undefined;
+    for (;;) {
+      const page = await this.store.listForAccount(accountId, {
+        limit: ACCOUNT_STUB_PAGE,
+        ...(cursor ? { cursor } : {}),
+      });
+      stubs.push(...page);
+      const last = page.at(-1);
+      if (page.length < ACCOUNT_STUB_PAGE || !last) break;
+      cursor = { createdAt: last.createdAt, stubId: last.stubId };
+    }
+    return stubs.map((stub) => this.#exportRow(stub));
+  }
+
+  /** The owner projection, shared by the export and the paged `/mine` read. */
+  #exportRow(stub: StoredPrivateRoomStub): AccountStubExport {
+    return {
+      room_server_id: stub.roomServerId,
+      stub_id: stub.stubId,
+      directory_mode: stub.directoryMode,
+      display_name: stub.displayName,
+      display_description: stub.displayDescription,
+      display_avatar_public_cid: stub.displayAvatarPublicCid,
+      room_public_key: stub.roomPublicKey,
+      manifest_key_commitment: stub.manifestKeyCommitment,
+      latest_manifest_commitment: stub.latestManifestCommitment,
+      rendezvous_policy: stub.rendezvousPolicy,
+      bootstrap_hints: stub.bootstrapHints.map((h) => ({ kind: h.kind, value: h.value })),
+      signed_stub: stub.signedStub,
+      stub_signature: stub.stubSignature,
+      bootstrap_blind_id: stub.bootstrapBlindId,
+      created_at: stub.createdAt,
+      updated_at: stub.updatedAt,
+    };
+  }
+
+  /**
+   * One PAGE of the stubs this account created — the `/mine` read.
+   *
+   * Paged for the reason the export is not: `/mine` is a client-polled endpoint
+   * and an account's stub count has no lifetime bound, so serving the whole set
+   * per request is a response-amplification path. The export iterates these
+   * pages to completion instead.
+   */
+  /**
+   * Does this account own the record for `roomServerId` / `roomPublicKey`?
+   *
+   * A TARGETED read, because the two questions its callers actually ask are
+   * about one room: "do I own this record" and "is my orphaned registration out
+   * there". Answering either by walking pages is wrong twice over — it costs a
+   * request per page against a per-account budget, so an account with enough
+   * stubs can never finish the walk, and the answer for a deep record would be
+   * "no" rather than "unknown".
+   */
+  async findOwnedStub(
+    accountId: string,
+    target: { readonly roomServerId?: string; readonly roomPublicKey?: string },
+  ): Promise<OwnedStubRow | null> {
+    const stub = await this.store.findForAccount(accountId, target);
+    return stub === null ? null : this.#lookupRow(stub);
+  }
+
+  /**
+   * The `/mine` row: the owner's record WITHOUT the capability.
+   *
+   * `/mine` answers "do I own this / is my orphan out there", and both callers
+   * need only the id — so the token does not travel on a polled endpoint, where
+   * a cache or a log is one misconfiguration away. The Art. 15 export keeps it,
+   * because an archive of what is held about you that omits a field the purge
+   * deletes is not an archive.
+   */
+  #lookupRow(stub: StoredPrivateRoomStub): OwnedStubRow {
+    const { bootstrap_blind_id: _withheld, ...rest } = this.#exportRow(stub);
+    // …AND the legacy body, which is where the capability lives on a migrated
+    // v1 record.
+    //
+    // Dropping the column alone withheld nothing for those rows: the token was
+    // written INSIDE `signed_stub` before it had a column of its own, and the
+    // migration deliberately left the body byte-for-byte as it was signed (the
+    // server holds no room key, so it cannot re-sign). Projecting it here put
+    // the stable capability straight back onto the polled endpoint the column
+    // was moved out of.
+    //
+    // The open bootstrap read already refuses a legacy body to a caller who did
+    // not present the token; this is the same rule for the same reason. The
+    // Art. 15 export is the deliberate exception — an archive that omits what
+    // is held about you is not an archive.
+    return isLegacySignedStub(stub.signedStub)
+      ? { ...rest, signed_stub: null, stub_signature: null }
+      : rest;
+  }
+
+  async listForAccountPage(
+    accountId: string,
+    options: { readonly limit?: number; readonly cursor?: string } = {},
+  ): Promise<{ stubs: OwnedStubRow[]; next_cursor: string | null }> {
+    const limit = Math.min(
+      Math.max(1, Math.trunc(options.limit ?? ACCOUNT_STUB_PAGE)),
+      ACCOUNT_STUB_PAGE,
+    );
+    const cursor = parseDirectoryCursor(options.cursor);
+    const rows = await this.store.listForAccount(accountId, {
+      limit: limit + 1,
+      ...(cursor ? { cursor } : {}),
+    });
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      stubs: page.map((stub) => this.#lookupRow(stub)),
+      next_cursor: rows.length > limit && last ? `${last.createdAt}|${last.stubId}` : null,
+    };
+  }
+
+  /**
+   * The account that created this record, or null.
+   *
+   * The delist route asks BEFORE choosing an arm: an owner who also holds
+   * `admin` is delisting their own room, which exercises no platform power and
+   * needs no record — and the staff arm answers with a different response shape
+   * than the owner client expects.
+   */
+  async ownerOf(roomServerId: string): Promise<string | null> {
+    return await this.store.ownerOf(roomServerId);
+  }
+
+  /**
+   * What a publicly listed room PUBLISHES, right now — for a report-time capture.
+   *
+   * A report about a listing has to preserve what was reported: the room's own
+   * members can edit the name and description afterwards (§21.3), and a console
+   * asking staff to delist a room without showing what was complained about is
+   * asking them to act on nothing. Null for an unlisted or unknown room, which
+   * publish nothing to capture.
+   */
+  async listingSnapshot(roomServerId: string): Promise<{
+    display_name: string | null;
+    display_description: string | null;
+    /** When the record last changed.
+     *
+     *  Carried WITH the text because §21.3 lets members edit it: a consumer
+     *  recording this as "the listing as reported" can only make that claim if
+     *  the row has not changed since the report it belongs to, and this is what
+     *  lets it check rather than assume. */
+    updated_at: string;
+  } | null> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    if (stub?.directoryMode !== 'listed') return null;
+    return {
+      display_name: stub.displayName,
+      display_description: stub.displayDescription,
+      updated_at: stub.updatedAt,
+    };
+  }
+
+  /**
+   * Is this room's directory record publicly LISTED?
+   *
+   * The one question another surface may ask about a private room without a
+   * capability, because a listed record publishes a name to anyone browsing —
+   * so the answer reveals nothing that is not already public. It exists for the
+   * report intake: staff delisting an abusive public name is the remedy §11.4
+   * specifies, and rejecting every p2p target left that remedy with no way in.
+   *
+   * False for `unlisted` and for an unknown id ALIKE, which is what keeps it
+   * from becoming the existence oracle the bootstrap read refuses to be.
+   */
+  async isPubliclyListed(roomServerId: string): Promise<boolean> {
+    const stub = await this.store.getByRoomId(roomServerId);
+    return stub?.directoryMode === 'listed';
+  }
+
+  /**
+   * The §21.4 demotion a MODERATION UNIT performs — conditional on the record
+   * still being listed, and carrying no ownership check.
+   *
+   * Authorization happened at the route (platform admin + per-session MFA); what
+   * this adds is the atomicity: it is called from inside the moderation
+   * transaction, so the audit append and the demotion commit together or not at
+   * all. Null when nothing matched, which is the raced case — the owner delisted
+   * first, so there was no listing for staff to remove.
+   */
+  async delistListed(roomServerId: string): Promise<BootstrapResponse | null> {
+    const next = await this.store.delist(roomServerId, { requireListed: true });
+    if (!next) return null;
+    this.#metrics.delisted += 1;
+    return this.#project(next, true);
+  }
+
+  /** A snapshot of the aggregate-only counters (no room identity). */
+  metrics(): PrivateRoomStubMetrics {
+    return { ...this.#metrics };
+  }
+
+  /**
+   * Project a stub to the wire.
+   *
+   * There is no "how much may this caller see" parameter, and that is the
+   * point: the record's ONE secret is a column this method does not read, so
+   * every projection is safe by construction rather than by the caller passing
+   * the right flag. A gate here would have to be got right again by whoever
+   * writes the next endpoint.
+   */
+  /**
+   * @param capable the caller presented the §21.2 token.
+   *
+   * It matters for ONE case: a LEGACY (v1) body, written before the capability
+   * moved to its own column, still contains that capability — and the migration
+   * preserves those bodies byte-for-byte because the server cannot re-sign them.
+   * So a v1 body goes only to a caller who already holds the token, and is
+   * omitted from the open `listed` read that was the harvest. A v2 body carries
+   * no secret and is served to everyone, which is why the parameter is not a
+   * general visibility switch.
+   */
+  #project(stub: StoredPrivateRoomStub, capable: boolean): BootstrapResponse {
+    const withBody = capable || !isLegacySignedStub(stub.signedStub);
+    return {
+      room_server_id: stub.roomServerId,
+      directory_mode: stub.directoryMode,
+      display_name: stub.displayName,
+      display_description: stub.displayDescription,
+      display_avatar_public_cid: stub.displayAvatarPublicCid,
+      room_public_key: stub.roomPublicKey,
+      manifest_key_commitment: stub.manifestKeyCommitment,
+      latest_manifest_commitment: stub.latestManifestCommitment,
+      rendezvous_policy: stub.rendezvousPolicy,
+      bootstrap_hints: stub.bootstrapHints.map((h) => ({ kind: h.kind, value: h.value })),
+      bootstrap_endpoints: BOOTSTRAP_ENDPOINTS,
+      signed_stub: withBody ? stub.signedStub : null,
+      stub_signature: withBody ? stub.stubSignature : null,
+      created_at: stub.createdAt,
+      updated_at: stub.updatedAt,
+    };
+  }
+}
+
+/**
+ * A body written BEFORE the capability moved into its own column — so a body
+ * that still contains the token.
+ *
+ * One predicate, because two projections must answer it the same way: the open
+ * bootstrap read withholds such a body from a caller without the token, and the
+ * owner's `/mine` row withholds it from every caller, since that endpoint is
+ * polled and its whole point is to carry no capability.
+ */
+function isLegacySignedStub(body: Record<string, unknown>): boolean {
+  return body['schema'] !== 'licio.private.directory_stub.v2';
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Split `<iso>|<stubId>`; anything else is treated as no cursor at all. */
+/**
+ * A directory/`/mine` cursor the server can actually READ, checked at the route
+ * boundary.
+ *
+ * `parseDirectoryCursor` fails soft — a mangled link must not 500 an
+ * unauthenticated route — and that is right for the parser and wrong as the
+ * whole answer: the caller cannot tell "the next page" from "I could not read
+ * your cursor, so here is the FIRST page again". The directory client appends
+ * pages, so it re-appended page one and re-received the same `next_cursor`,
+ * duplicating rows on every scroll, indefinitely.
+ *
+ * The grammar is the parser's own, so the two cannot drift: a value this schema
+ * accepts is one `parseDirectoryCursor` returns a cursor for.
+ */
+export const directoryCursorSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((cursor) => parseDirectoryCursor(cursor) !== undefined, {
+    message: 'malformed cursor — pass the `next_cursor` from the previous page, or omit it',
+  });
+
+function parseDirectoryCursor(
+  cursor: string | undefined,
+): { createdAt: string; stubId: string } | undefined {
+  if (cursor === undefined) return undefined;
+  const at = cursor.indexOf('|');
+  if (at <= 0) return undefined;
+  const createdAt = cursor.slice(0, at);
+  const stubId = cursor.slice(at + 1);
+  // The id half must be a UUID, not merely non-empty: the Drizzle adapter
+  // compares it against a `uuid` column, so `…|not-a-uuid` makes Postgres reject
+  // the statement — turning a mangled link on an UNAUTHENTICATED route into a
+  // 500. Fail-closed to "no cursor", like every other malformed shape here.
+  if (!UUID_RE.test(stubId) || Number.isNaN(Date.parse(createdAt))) return undefined;
+  return { createdAt, stubId };
+}
+
+function buildStore(): PrivateRoomStubStore {
+  const dbUrl = process.env['DATABASE_URL'];
+  if (!dbUrl) return new InMemoryPrivateRoomStubStore();
+  // `onNotice` for the same reason every other store passes one: the db wrapper
+  // always installs its own handler, so omitting the sink DISCARDS every notice
+  // from this store rather than falling back to postgres.js's console default.
+  const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
+  return new DrizzlePrivateRoomStubStore(
+    createDbClient(dbUrl, {
+      onNotice: (notice) =>
+        logger[pgNoticeLogLevel(notice.severity)](
+          { pgNotice: notice },
+          'postgres notice (private room stubs)',
+        ),
+    }),
+  );
+}
+
+let service: PrivateRoomStubService | undefined;
+let builtStore: PrivateRoomStubStore | undefined;
+
+/** The process-wide stub service (created lazily; Postgres when configured). */
+export function getPrivateRoomStubService(): PrivateRoomStubService {
+  if (!service) {
+    builtStore = buildStore();
+    service = new PrivateRoomStubService(builtStore);
+  }
+  return service;
+}
+
+/**
+ * The in-memory stub store this process is using, when it is using one.
+ *
+ * Exposed so the composition root can put it inside the moderation unit's
+ * ROLLBACK boundary: §21.4's staff demotion runs in that unit, and a unit that
+ * cannot restore this store would leave a demotion standing when its audit
+ * throws — the failure the unit exists to prevent, present only where there is
+ * no transaction to do the job. Null under Postgres, where there is one.
+ */
+export function inMemoryStubStore(): InMemoryPrivateRoomStubStore | null {
+  getPrivateRoomStubService();
+  return builtStore instanceof InMemoryPrivateRoomStubStore ? builtStore : null;
+}
+
+/** Replace the singleton (tests / an explicit binding). */
+export function setPrivateRoomStubService(next: PrivateRoomStubService): void {
+  service = next;
+  // The cached store belonged to the REPLACED service; keeping it would hand
+  // the rollback boundary a store nothing writes to.
+  builtStore = undefined;
+}
