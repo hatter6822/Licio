@@ -251,6 +251,50 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     expect(await store.get('another')).toBeNull();
   });
 
+  it('RedisSessionStore: rotate() retries a version conflict rather than reporting absence', async () => {
+    // `null` has to mean "no such session" and nothing else. The enroll and
+    // disable paths treat a null rotation as "no cookie to rotate" and answer
+    // success, so a rotation that gave up on CONTENTION would leave a bearer
+    // token unrotated across a privilege change — the thing rotating defends
+    // against.
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
+    const userId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const a = await createSession(store, {
+      userId,
+      authMethod: 'webauthn',
+      credentialRef: 'c',
+      deviceLabel: 'dev',
+      rememberMe: false,
+    });
+
+    // THE CONFLICT, BY CONSTRUCTION.  An own property shadows the prototype
+    // method, so the `this.get` inside `rotate` resolves to this one — the first
+    // read hands back a version one BEHIND the stored row, which is exactly what
+    // a concurrent writer leaves behind, and the script's check refuses it.
+    // (A proxy around the store does not work here: `rotate` calls `this.get` on
+    // the instance, so a bound wrapper is never consulted and the test passes
+    // whatever the code does.)
+    const realGet = store.get.bind(store);
+    let staleReads = 1;
+    const shadowed: Pick<RedisSessionStore, 'get'> = store;
+    shadowed.get = async (hash: string) => {
+      const live = await realGet(hash);
+      if (live !== null && staleReads > 0) {
+        staleReads -= 1;
+        return { ...live, version: live.version - 1 };
+      }
+      return live;
+    };
+
+    const moved = await store.rotate(a.tokenHash, 'newhash-conflict-test');
+    // The first attempt loses the version check; the retry reads honestly and
+    // wins. Without the retry this is `null` and the caller silently skips the
+    // rotation.
+    expect(moved).not.toBeNull();
+    expect(await realGet(a.tokenHash)).toBeNull();
+    expect(await realGet('newhash-conflict-test')).not.toBeNull();
+  });
+
   it('RedisSessionStore: take() hands the session to exactly ONE caller', async () => {
     // A rotation is a hand-off, and `take` is what makes it one. Only a real
     // Redis proves it: GETDEL is a single command, whereas the GET+DEL pair it

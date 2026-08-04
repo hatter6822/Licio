@@ -15,7 +15,7 @@ import {
 } from '@licio/shared';
 import { type Context, Hono } from 'hono';
 import { constantTimeEqual } from '../identity/crypto.js';
-import type { IdentityServices, IdentityTx } from '../identity/services.js';
+import type { IdentityServices } from '../identity/services.js';
 import {
   buildSessionCookie,
   markMfaVerified,
@@ -37,49 +37,6 @@ import { err } from './auth-support.js';
 const MFA_MAX_ATTEMPTS = 5;
 const MFA_ATTEMPT_WINDOW_MS = 5 * 60_000;
 const MFA_STEP_MEMORY_MS = 90_000; // remember the used step for ~3 windows
-
-/**
- * How long a spent recovery code can still FINISH the verification it was spent
- * for.
- *
- * A continuation describes an operation in flight, and in flight has a duration:
- * the user is retrying the request they just made, or signing in again after the
- * one that failed. Fifteen minutes covers that generously.
- *
- * Unbounded it would be a slow leak instead. The continuation is cleared on
- * success, but that clear is a separate write from the grant it settles — so a
- * verification that succeeded and then failed to settle leaves a pending row
- * forever, and once the sessions its grant created have expired, the spent code
- * becomes usable a second time.
- */
-const RESUMABLE_VERIFICATION_WINDOW_MS = 15 * 60_000;
-
-/**
- * May a DIFFERENT session take this continuation over?
- *
- * Only when the session it names is GONE.  That session is the one thing that
- * can answer both questions the takeover has to get right — did the grant land,
- * and is anyone else already finishing it — because a claim REBINDS the row to
- * the claimant, so an in-flight completion is a live named session.
- *
- * An earlier cut also allowed takeover from a session that was alive but not
- * yet verified, on the reasoning that unverified means the grant had not
- * landed.  It does, but it is not the only thing it can mean: it is equally
- * what a claimant looks like in the instant between claiming and granting.  So
- * A could claim, B could see A alive-and-unverified and rebind to itself, and
- * both would then verify their own sessions from one single-use code.  It also
- * bought nothing: while that session is alive its holder can finish the
- * verification from it directly (the same-session arm), which is the case the
- * resume path was written for.
- *
- * This deliberately does NOT ask whether the USER holds a verified session
- * anywhere.  That cut read as evidence when it was not — a verified session on
- * a device the holder cannot reach says nothing about this grant, and it
- * permanently blocked a continuation their last code had paid for.
- */
-async function isAbandoned(services: IdentityServices, sessionHash: string): Promise<boolean> {
-  return (await services.sessions.get(sessionHash)) === null;
-}
 
 const attemptsKey = (userId: string) => `mfaattempts:${userId}`;
 const usedStepKey = (userId: string) => `mfastep:${userId}`;
@@ -228,7 +185,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
               MFA_STEP_MEMORY_MS,
             );
             try {
-              await finishMfa(services, auth.userId, auth.tokenHash, c);
+              await finishTotpVerification(services, auth.userId, auth.tokenHash, c);
             } catch (error) {
               // The TOTP path spends nothing, so a vanished session is simply a
               // sign-in-again — never a success reported for a grant that did
@@ -257,141 +214,65 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
             constantTimeEqual(presentedHash, h),
           );
           if (matched !== undefined) {
-            let spent: { remaining: number } | null;
-            try {
-              spent = await finishMfa(
-                services,
+            // THE COMMIT IS THE GRANT.  `consumeRecoveryCode` spends the code
+            // and records the session it verifies in ONE statement, and
+            // `sessionHasRecoveryGrant` reads that back — so a session is
+            // MFA-verified the moment this transaction commits, whether or not
+            // anything else succeeds afterwards.
+            //
+            // That is why there is no continuation here any more, and no resume
+            // path, window, settle, claim or takeover rule.  All of it existed
+            // to reconcile a Postgres spend with a Redis grant that could fail
+            // independently, and every ordering of those two writes has a window
+            // in it: grant-then-record loses the record, record-then-grant loses
+            // the grant.  With one durable fact there is nothing to reconcile.
+            const spent = await services.transact(async (tx) => {
+              const consumed = await tx.store.consumeRecoveryCode(
                 auth.userId,
+                matched,
                 auth.tokenHash,
-                c,
-                (tx) => tx.store.consumeRecoveryCode(auth.userId, matched, auth.tokenHash),
-                // SETTLED before the rotation that would otherwise hide it: the
-                // grant landed, so there is nothing left to resume, and the row
-                // is cleared while the session it names is still alive.
-                () =>
-                  services.store.clearResumableVerification(auth.userId, matched, auth.tokenHash),
               );
-            } catch (error) {
-              // The code IS spent and recorded, and its continuation is pending:
-              // the next session this user opens finishes it (see the resume
-              // block below). Reporting success here would be a lie, and
-              // reporting an unrecoverable failure would be the lockout.
-              if (error instanceof SessionVanishedError) {
-                return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
-              }
-              throw error;
-            }
+              if (consumed === null) return null;
+              await tx.audit.append({
+                actorUserId: auth.userId,
+                eventType: 'mfa_verify',
+                context: {},
+              });
+              return consumed;
+            });
             // Lost the race — another request spent this code between the read
             // and the write. Nothing was consumed and nothing was recorded.
             if (spent === null) return c.json(err('invalid_code', 'Invalid code.'), 400);
+
+            // The session flag and the rotation are an OPTIMISATION over the
+            // grant above, not the grant itself, so neither can fail the
+            // request.  The flag saves the derived lookup on later requests; the
+            // rotation is the privilege-change fixation defence.
+            //
+            // ORDER MATTERS ONLY HERE: rotate a session that carries the flag,
+            // never one that does not.  Rotating an unflagged session would move
+            // the holder to a token the durable grant does not name, and THAT
+            // would be the lockout — the one case this ordering has to exclude.
+            try {
+              if (await markMfaVerified(services.sessions, auth.tokenHash)) {
+                const token = readSessionToken(c.req.header('cookie'));
+                const rotated = token ? await rotateSession(services.sessions, token) : null;
+                if (rotated) {
+                  c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
+                    append: true,
+                  });
+                }
+              }
+              await services.otp.delete(attemptsKey(auth.userId));
+            } catch {
+              // The session store is unavailable. The grant is already durable,
+              // so this session is verified from its next request onward — the
+              // code is not lost and the account is not locked.
+            }
             return c.json({
               status: 'mfa_verified' as const,
               recovery_used: true,
               recovery_remaining: spent.remaining,
-            });
-          }
-
-          // …OR A VERIFICATION TO RESUME.
-          //
-          // The consumption commits before the Redis grant (a privilege must
-          // not be granted ahead of the record of it), which leaves one case the
-          // ordering cannot fix: the unit commits and the grant then fails. On
-          // any code but the last that costs a retry with another one; on the
-          // LAST it costs the account, permanently, for a fault on our side.
-          //
-          // So a code already spent FOR THIS SESSION resumes its own
-          // verification rather than being called invalid. Single-use is
-          // untouched: the code grants MFA to exactly one session, the session
-          // hash says which, and a holder presenting it from anywhere else still
-          // gets nothing. No second consumption and no second `mfa_verify` row —
-          // this is the same verification finishing, not a new one.
-          //
-          // SETTLING IS NOT THE ONLY THING HOLDING THIS SHUT, because settling
-          // is a second write and it can fail. `finishMfa` grants in Redis and
-          // ROTATES — which deletes the session the continuation names — and
-          // only then does the caller clear the row. If that clear fails, the
-          // continuation is left naming a session that no longer exists, which
-          // is exactly what "the grant never landed" looks like, and the code
-          // would verify a second session.
-          //
-          // So the settle now runs BEFORE the rotation (`grantVerification`),
-          // which is what makes the continuation's own session the evidence: a
-          // settle that fails leaves the row naming a session that is alive AND
-          // VERIFIED, and the takeover arm below refuses exactly that.
-          //
-          // It asks about the NAMED session and not about the user. Asking "does
-          // this user hold any verified session" was the first cut, and it was
-          // too coarse in the ordinary multi-device case: a verified session on
-          // a phone the holder cannot reach is no evidence about THIS grant, and
-          // it permanently blocked the continuation their last code had paid
-          // for.
-          const resumable = await services.store.findResumableVerification(
-            auth.userId,
-            presentedHash,
-            new Date(Date.now() - RESUMABLE_VERIFICATION_WINDOW_MS).toISOString(),
-          );
-          // WHO MAY FINISH IT: this session, or — if the session it was spent
-          // for no longer exists — any session of the same user.
-          //
-          // The strict rule alone stranded the very case it was written for.
-          // `markMfaVerified` returns silently when the session is gone, so a
-          // session that expired or was revoked between the middleware check and
-          // the post-commit grant left the code spent, the continuation bound to
-          // a dead token hash, and (on the last code) no way back at all.
-          //
-          // The fallback costs nothing: the holder already proved possession of
-          // a recovery code and this session already cleared primary auth, which
-          // is exactly the bar an UNSPENT code would have met. And it opens only
-          // once the original session is unusable, so while that session lives
-          // the code still grants MFA to precisely one.
-          // TAKING IT OVER IS A COMPARE-AND-SET, not a decision made from a read.
-          //
-          // Two primary-authenticated sessions can both find the original gone
-          // and both conclude they may finish it — and a code that is single-use
-          // by construction would grant steward assurance to both. The rebind
-          // settles which; the loser is told the code is invalid, which for it
-          // now is.
-          const claimed =
-            resumable === null
-              ? false
-              : resumable.verificationSessionHash === auth.tokenHash ||
-                // ABANDONED — the session it was spent for is GONE.  A claim
-                // rebinds the row to the claimant, so a live named session is
-                // either the holder (who can finish it themselves) or another
-                // request already finishing it; see `isAbandoned`.
-                ((await isAbandoned(services, resumable.verificationSessionHash)) &&
-                  (await services.store.claimResumableVerification(
-                    auth.userId,
-                    presentedHash,
-                    resumable.verificationSessionHash,
-                    auth.tokenHash,
-                  )));
-          if (resumable !== null && claimed) {
-            try {
-              // The SAME ordering as a fresh consumption — grant, settle, rotate
-              // — and the settle is conditional on THIS session still owning the
-              // continuation, so a request that lost it between the claim and
-              // here cannot report a completion it does not own.
-              await grantVerification(services, auth.userId, auth.tokenHash, c, () =>
-                services.store.clearResumableVerification(
-                  auth.userId,
-                  presentedHash,
-                  auth.tokenHash,
-                ),
-              );
-            } catch (error) {
-              // The session went away underneath us, or another request is
-              // already finishing this continuation — say so rather than
-              // answering `mfa_verified` for a grant this request did not make.
-              if (error instanceof SessionVanishedError) {
-                return c.json(err('session_expired', 'Sign in again to finish verifying.'), 401);
-              }
-              throw error;
-            }
-            return c.json({
-              status: 'mfa_verified' as const,
-              recovery_used: true,
-              recovery_remaining: resumable.remaining,
             });
           }
 
@@ -453,10 +334,10 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
   );
 }
 
-/** The session disappeared between the middleware's check and the post-commit
- *  grant (expired, or revoked from elsewhere). The verification is recorded and
- *  its factor spent, but no session was verified — so the caller is told to sign
- *  in again, and the pending continuation lets the next session finish it. */
+/** The session disappeared between the middleware's check and the grant
+ *  (expired, or revoked from elsewhere).  Only the TOTP path raises it: TOTP
+ *  spends nothing, so signing in again costs the holder a fresh code and
+ *  nothing else. */
 class SessionVanishedError extends Error {
   constructor() {
     super('the session no longer exists');
@@ -464,119 +345,41 @@ class SessionVanishedError extends Error {
   }
 }
 
-/** The presented recovery code was spent by another request between the read
- *  and the conditional write. Thrown INSIDE the unit so the verification rolls
- *  back whole rather than half-applying. */
-class RecoveryCodeAlreadySpentError extends Error {
-  constructor() {
-    super('the recovery code is no longer active');
-    this.name = 'RecoveryCodeAlreadySpentError';
-  }
-}
-
 /**
- * Mark the session MFA-verified, reset the attempt counter, audit success, and
- * rotate the session id on the privilege change — mirroring /confirm and every
- * other privilege transition (a new mfa_verified session id defeats fixation).
- * `markMfaVerified` runs BEFORE the rotation so the rotated record — which
- * `rotateSession` copies from the stored one — carries `mfa_verified=true`.
+ * Record a TOTP verification and grant it to the session.
+ *
+ * ONLY the TOTP path needs this shape.  A TOTP step spends nothing durable, so
+ * a failed grant costs the holder one retry with the next code — there is
+ * nothing to lose and nothing to reconcile.  The recovery-code path used to
+ * share it, and that sharing was the mistake: it made a spend whose loss is
+ * unrecoverable look like one whose loss is free, and every round of trying to
+ * order the Postgres spend against the Redis grant was an attempt to paper over
+ * the difference.  A recovery code now grants itself, durably, in the
+ * transaction that spends it.
+ *
+ * The audit row still commits first: a privilege must not be granted ahead of
+ * the record of it.  Postgres accepting the callback and then failing to COMMIT
+ * would otherwise leave Redis holding a verified session with nothing recording
+ * that it ever cleared MFA.
  */
-async function finishMfa<T>(
+async function finishTotpVerification(
   services: IdentityServices,
   userId: string,
   tokenHash: string,
   c: Context<AuthEnv>,
-  /**
-   * The durable factor this verification SPENDS, run inside the same unit.
-   *
-   * A recovery code is consumed by clearing it; a TOTP step is not, so this is
-   * absent there. Returning `null` from it aborts the whole verification —
-   * a code another request spent first must not produce a verified session,
-   * and must not leave a record saying it did.
-   */
-  consume?: (tx: IdentityTx) => Promise<T | null>,
-  /** Settle the continuation this grant completes — run BEFORE the rotation,
-   *  and its `false` means another request is already completing it. */
-  settle?: () => Promise<boolean>,
-): Promise<T | null> {
-  // THE PRIVILEGE IS GRANTED AFTER THE COMMIT, and this ordering is the whole
-  // point of the function.
-  //
-  // The session flag lives in Redis and cannot join a Postgres transaction, so
-  // one of the two orderings has to be chosen deliberately. It used to sit
-  // INSIDE the unit, on the reasoning that a failed `markMfaVerified` would
-  // then abort the record — true, and it bought the smaller half. The other
-  // half is what a failure actually looks like: Postgres accepting the callback
-  // and then failing to COMMIT left Redis already holding a verified session
-  // while the consumption and the `mfa_verify` row both rolled back. The
-  // request answered 500, the recovery code stayed reusable, and the session
-  // held steward privileges with nothing recording that it ever cleared MFA.
-  //
-  // After the commit, the two failure modes are: nothing happens at all, or the
-  // factor is spent and RECORDED while the session stays unverified — costing
-  // the user a retry with another code, never granting authority no record
-  // accounts for. A privilege gate must fail closed on the privilege.
-  const spent = await services
-    .transact(async (tx) => {
-      const consumed = consume === undefined ? (undefined as T) : await consume(tx);
-      if (consumed === null) throw new RecoveryCodeAlreadySpentError();
-      await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
-      return consumed;
-    })
-    .catch((error: unknown) => {
-      // The unit rolled back: no consumption, no record, no verified session.
-      if (error instanceof RecoveryCodeAlreadySpentError) return null;
-      throw error;
-    });
-  if (spent === null) return null;
-  await grantVerification(services, userId, tokenHash, c, settle);
-  return spent;
-}
-
-/**
- * The post-commit half of a verification: GRANT, then SETTLE, then ROTATE.
- *
- * One ordering, shared by the fresh consumption above and the resume path in
- * the route, because the two had drifted and the drift was the bug.
- *
- * SETTLE BEFORE ROTATE.  The rotation deletes the session the continuation
- * names, so a settle that runs after it — and fails — leaves a pending row
- * pointing at a session that no longer exists, which is exactly what "the grant
- * never landed" looks like.  Settling first means a failure there leaves the
- * continuation naming a session that is alive AND verified, which no resume arm
- * will touch.  That is also why the takeover arm can ask about the NAMED
- * session rather than about the user: an unrelated verified session on another
- * device is no evidence about THIS grant, and treating it as such locked a
- * multi-device user out of the continuation their last code had paid for.
- *
- * AND THE SETTLE IS THE CLAIM.  It reports whether this caller cleared the row,
- * so exactly one of several concurrent completions proceeds to the rotation.
- * The same-session arm has no compare-and-set available — the continuation
- * already names the caller — so without this, two retries carrying one cookie
- * both granted and both rotated, and one single-use code left two live verified
- * sessions behind.
- */
-async function grantVerification(
-  services: IdentityServices,
-  userId: string,
-  tokenHash: string,
-  c: Context<AuthEnv>,
-  settle?: () => Promise<boolean>,
 ): Promise<void> {
-  // A grant that could not be applied must not be reported as one. The record
-  // and any consumption are already committed, so the caller answers honestly
-  // and the continuation is what makes the spent factor recoverable.
-  if (!(await markMfaVerified(services.sessions, tokenHash))) {
-    throw new SessionVanishedError();
-  }
-  if (settle !== undefined && !(await settle())) throw new SessionVanishedError();
+  await services.transact(async (tx) => {
+    await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
+  });
+  // A grant that could not be applied must not be reported as one.
+  if (!(await markMfaVerified(services.sessions, tokenHash))) throw new SessionVanishedError();
   await services.otp.delete(attemptsKey(userId));
   const token = readSessionToken(c.req.header('cookie'));
   if (token === undefined) return;
-  // `rotateSession` TAKES the old session, so a concurrent rotation of the same
-  // cookie yields null here rather than a second successor. Either way the
-  // session this request arrived on is gone, and answering `mfa_verified` with
-  // no usable cookie would be a success the caller cannot act on.
+  // `rotateSession` MOVES the session in one step, so a concurrent rotation of
+  // the same cookie yields null here rather than a second successor. Either way
+  // the session this request arrived on is gone, and answering `mfa_verified`
+  // with no usable cookie would be a success the caller cannot act on.
   const rotated = await rotateSession(services.sessions, token);
   if (rotated === null) throw new SessionVanishedError();
   c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {

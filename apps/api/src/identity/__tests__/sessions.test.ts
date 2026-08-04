@@ -86,10 +86,11 @@ describe('validateSession', () => {
     const t0 = 1_700_000_000_000;
     const created = await createSession(store, input(), t0);
     // Force an absolute cap in the past while leaving sliding expiry far ahead.
-    await store.put(created.tokenHash, {
+    const live = (await store.get(created.tokenHash)) as StoredSession;
+    await store.putIfVersion(created.tokenHash, live.version, {
+      ...live,
       record: { ...created.record, absolute_expires_at: new Date(t0 - 1).toISOString() },
       expiresAt: t0 + SESSION_POLICY.defaultTtlMs,
-      version: 0,
     });
     expect(await validateSession(store, created.token, t0)).toBeNull();
   });

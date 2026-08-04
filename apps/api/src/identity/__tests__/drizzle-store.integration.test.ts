@@ -22,10 +22,6 @@ import { DrizzleAuditStore, DrizzleIdentityStore, DrizzleJobLeaseStore } from '.
 import type { StoredUser } from '../store.js';
 
 const DB_URL = process.env['DATABASE_URL'];
-
-/** Any instant safely inside the resume window — these cases are about WHO may
- *  finish a continuation, not about when it lapses (which the expiry leg covers). */
-const RESUMABLE_SINCE = new Date(0).toISOString();
 const IT_DB = 'licio_drizzle_store_it';
 
 function userInput(
@@ -242,46 +238,32 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
     );
     expect(counts[0]).toMatchObject({ active: '2', used: '1' });
 
-    // …and a code spent THROUGH THE API can resume its own verification, from
-    // the session it was spent for and no other. This is what stops the last
-    // recovery code being lost to a Redis grant that failed after the
-    // consumption committed. (The code above was spent by raw SQL standing in
-    // for a concurrent winner, so it carries no session — which is exactly what
-    // `null` should say.)
-    expect(await store.findResumableVerification(userId, target, RESUMABLE_SINCE)).toBeNull();
+    // …and a code spent THROUGH THE API carries the GRANT it conferred: the
+    // session it verified is recorded in the same statement that spends it, so
+    // there is no second write to lose and nothing to reconcile afterwards.
+    // (The code above was spent by raw SQL standing in for a concurrent winner,
+    // so it names no session — which is exactly what "no grant" should say.)
+    expect(await store.sessionHasRecoveryGrant('session-hash-a')).toBe(false);
     const second = codes[1] as string;
     expect(await store.consumeRecoveryCode(userId, second, 'session-hash-b')).toEqual({
       remaining: 1,
     });
-    // The lookup reports WHICH session it was spent for; the route decides who
-    // may finish it (that session, or any of the user's once it is gone).
-    expect(await store.findResumableVerification(userId, second, RESUMABLE_SINCE)).toEqual({
-      remaining: 1,
-      verificationSessionHash: 'session-hash-b',
-    });
-    // An ACTIVE code has no verification to resume.
-    expect(
-      await store.findResumableVerification(userId, codes[2] as string, RESUMABLE_SINCE),
-    ).toBeNull();
+    expect(await store.sessionHasRecoveryGrant('session-hash-b')).toBe(true);
+    // A session nothing was spent for holds no grant.
+    expect(await store.sessionHasRecoveryGrant('session-hash-unrelated')).toBe(false);
 
-    // AND THE CONTINUATION EXPIRES.  A verification is resumable while it is
-    // still in flight; a pending row that outlived that window is a spent code
-    // whose settle failed, not an operation to finish.  Unbounded it would come
-    // back to life as a second use of a single-use code once the sessions its
-    // grant created had expired.
-    expect(
-      await store.findResumableVerification(
-        userId,
-        second,
-        new Date(Date.now() + 1000).toISOString(),
-      ),
-    ).toBeNull();
+    // ONE SESSION PER CODE, held by the database.  The partial unique index on
+    // `verification_session_hash` is the single-use property stated where it
+    // can be enforced, not merely checked in the route.
+    await expect(
+      store.consumeRecoveryCode(userId, codes[2] as string, 'session-hash-b'),
+    ).rejects.toThrow();
 
-    // A FACTOR RESET clears every pending continuation: re-enrolling ends the
-    // factor the continuation was about, and without this an old session could
-    // present its already-spent old code and be verified against the NEW one.
+    // A FACTOR RESET revokes every outstanding grant: re-enrolling ends the
+    // factor that issued them, so a session verified by a retired code stops
+    // deriving its standing from it.
     await store.setAuth(userId, { recoveryCodeHashes: [sha256Hex('fresh-1')] });
-    expect(await store.findResumableVerification(userId, second, RESUMABLE_SINCE)).toBeNull();
+    expect(await store.sessionHasRecoveryGrant('session-hash-b')).toBe(false);
 
     // An unknown code and an unknown user are both "not active", never a throw.
     expect(

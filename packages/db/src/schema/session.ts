@@ -11,7 +11,7 @@
 //     the former `ip_hash` column): only a coarse device descriptor is recorded.
 //   • `user_auth` has NO password column — the schema cannot store a password.
 import { sql } from 'drizzle-orm';
-import { boolean, index, pgEnum, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { boolean, index, pgEnum, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { bytea, instant } from './_custom.js';
 import { users } from './user.js';
 
@@ -72,19 +72,21 @@ export const mfaRecoveryCodes = pgTable(
       .references(() => users.userId, { onDelete: 'cascade' }),
     codeHash: bytea('code_hash').notNull(),
     usedAt: instant('used_at'),
-    /** The session this code was spent to verify — see migration 0128. Set with
-     *  `used_at`, so a retry from that same session can resume a verification
-     *  whose Redis grant failed after the consumption committed. */
+    /** The session this code VERIFIED — the MFA grant itself, not a note about
+     *  one (migration 0130). Written in the same statement as `used_at`, so the
+     *  spend and the grant are one fact and there is no second write to lose. */
     verificationSessionHash: text('verification_session_hash'),
     createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('mfa_recovery_user_idx').on(t.userId),
-    /** The resume lookup (migration 0128): a code spent for a session whose
-     *  verification did not finish. Partial, because only a pending row is ever
-     *  looked up this way. */
-    index('mfa_recovery_pending_idx')
-      .on(t.userId, t.codeHash)
+    /** "Which grant, if any, names this session" (migration 0130) — the read
+     *  the auth middleware makes for a session whose own record does not carry
+     *  the flag. Partial, because only a spent row ever holds a hash; UNIQUE,
+     *  because a session is verified by at most one code, which is the
+     *  single-use property held where the database can enforce it. */
+    uniqueIndex('mfa_recovery_grant_session_idx')
+      .on(t.verificationSessionHash)
       .where(sql`${t.verificationSessionHash} IS NOT NULL`),
   ],
 );

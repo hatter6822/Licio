@@ -13,8 +13,8 @@ import {
   type IdentityServices,
   setIdentityServices,
 } from '../identity/services.js';
-import { createSession, type StoredSession } from '../identity/sessions.js';
-import { base32Decode, hashRecoveryCode, totp } from '../identity/totp.js';
+import { createSession } from '../identity/sessions.js';
+import { base32Decode, totp } from '../identity/totp.js';
 import { signupCaptcha } from './pow-test-helpers.js';
 
 const CONFIG: IdentityConfig = {
@@ -290,112 +290,17 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
   });
 
-  it('RESUMES a verification whose grant failed, so the last code is not lost', async () => {
-    // The consumption commits before the Redis grant, which is the right order
-    // — a privilege must not be granted ahead of the record of it. What that
-    // leaves is the unit committing and the grant then failing: on any code but
-    // the last, a retry with another one; on the LAST, the account, permanently,
-    // for a fault on our side. So the spent code resumes its own verification.
-    const { app, sid } = await signup('mfaresume');
-    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
-      method: 'POST',
-      headers: headers(sid),
-    });
-    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
-    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
-      method: 'POST',
-      headers: headers(sid),
-      body: JSON.stringify({ code: totp(secret) }),
-    });
-    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
-      .recovery_codes[0] as string;
-    // A session that has NOT cleared MFA (the confirm rotated the other one).
-    const userId = (
-      await services.sessions.get(sha256Hex(cookie(confirm, '__Host-sid').split('=')[1] as string))
-    )?.record.user_id as string;
-    const { token: sid3 } = await createSession(services.sessions, {
-      userId,
-      authMethod: 'email_otp',
-      deviceLabel: 'test',
-      rememberMe: false,
-    });
-
-    // The grant fails after the unit commits.
-    // `markMfaVerified` is a free function over the store's `put`, so the fault
-    // is injected there — the first write of the verified flag fails.
-    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
-    // resurrect a session a concurrent rotation deleted nor revert one changed
-    // since it read — so that is where the fault goes.
-    const realPut = services.sessions.putIfVersion.bind(services.sessions);
-    let failed = false;
-    services.sessions.putIfVersion = async (
-      tokenHash: string,
-      expectedVersion: number,
-      record: StoredSession,
-    ) => {
-      if (!failed && record.record.mfa_verified === true) {
-        failed = true;
-        throw new Error('session store unavailable');
-      }
-      return realPut(tokenHash, expectedVersion, record);
-    };
-    const attempt = await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${sid3}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    services.sessions.putIfVersion = realPut;
-    expect(attempt.status).toBeGreaterThanOrEqual(500);
-    expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
-
-    // The SAME code, from the SAME session, completes it.
-    const retry = await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${sid3}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    expect(retry.status).toBe(200);
-    // The completion rotates the session id on the privilege change, exactly as
-    // an ordinary verification does, so the verified session is the rotated one.
-    expect(await sessionMfaVerified(cookie(retry, '__Host-sid'))).toBe(true);
-
-    // …and from ANY OTHER session it is still spent: the code grants MFA to
-    // exactly one session, which is what single-use means here.
-    const { token: sid4 } = await createSession(services.sessions, {
-      userId,
-      authMethod: 'email_otp',
-      deviceLabel: 'other',
-      rememberMe: false,
-    });
-    const elsewhere = await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${sid4}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    expect(elsewhere.status).toBe(400);
-
-    // …and not from the ROTATED session either: completing rotates the id on the
-    // privilege change, so the stored hash stops matching the moment the grant
-    // lands. The resume window is only ever between the commit that spent the
-    // code and the completion it was spent for.
-    const afterRotation = await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(cookie(retry, '__Host-sid')),
-      body: JSON.stringify({ code: recovery }),
-    });
-    expect(afterRotation.status).toBe(400);
-  });
-
-  it('does not resurrect a continuation whose SETTLE failed after the grant landed', async () => {
-    // The window the settle was supposed to close, with the settle failing.
+  it('KEEPS the grant when the session store write fails — the commit is the grant', async () => {
+    // The case five review rounds were spent on, and the reason the design
+    // changed rather than the ordering. `consumeRecoveryCode` spends the code
+    // and records the session it verifies in ONE statement, so the Redis flag is
+    // an optimisation: losing it costs a lookup, not the account.
     //
-    // `finishMfa` commits the consumption, grants in Redis, and ROTATES — which
-    // deletes the session the continuation names — and only then does the route
-    // clear the row.  If that clear fails, the continuation is left pointing at
-    // a session that no longer exists, which is indistinguishable from "the
-    // grant never landed": another primary-authenticated session adopts it and
-    // a single-use recovery code verifies a second session.
-    const { app, sid } = await signup('mfasettle');
+    // What used to happen here: the code was spent, the grant was not applied,
+    // and the request answered 500 — on the LAST code, permanently, for a fault
+    // on our side. That is what the continuation, the resume path, the window,
+    // the settle, the claim and the takeover rule all existed to paper over.
+    const { app, sid } = await signup('mfagrant');
     const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
       method: 'POST',
       headers: headers(sid),
@@ -411,76 +316,6 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     const userId = (
       await services.sessions.get(sha256Hex(cookie(confirm, '__Host-sid').split('=')[1] as string))
     )?.record.user_id as string;
-    const { token: sidA } = await createSession(services.sessions, {
-      userId,
-      authMethod: 'email_otp',
-      deviceLabel: 'first',
-      rememberMe: false,
-    });
-
-    // The verification SUCCEEDS; only the settle that follows it fails.
-    const realClear = services.store.clearResumableVerification.bind(services.store);
-    services.store.clearResumableVerification = async () => {
-      throw new Error('database unavailable');
-    };
-    const verified = await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${sidA}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    services.store.clearResumableVerification = realClear;
-    // The request failed, but the grant is real: Redis holds a verified,
-    // rotated session and the continuation was never cleared.
-    expect(verified.status).toBeGreaterThanOrEqual(500);
-    expect(
-      (await services.sessions.listForUser(userId)).some((x) => x.stored.record.mfa_verified),
-      'the grant landed even though the settle did not',
-    ).toBe(true);
-
-    // A SECOND session now presents the same spent code.  The session the
-    // continuation names is gone (the rotation deleted it), so the takeover arm
-    // is wide open on every check except the one that matters: this user is
-    // already verified, and a spent code has no second grant to give.
-    const { token: sidB } = await createSession(services.sessions, {
-      userId,
-      authMethod: 'email_otp',
-      deviceLabel: 'second',
-      rememberMe: false,
-    });
-    const second = await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${sidB}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    expect(second.status).toBe(400);
-    expect(await sessionMfaVerified(`__Host-sid=${sidB}`)).toBe(false);
-  });
-
-  it('gives ONE successor when the same cookie retries a continuation twice at once', async () => {
-    // The same-session arm has no compare-and-set to pass through — the
-    // continuation already names the caller — so two concurrent retries
-    // carrying one cookie both granted and both rotated. `rotateSession` read
-    // the old session before either delete landed, so each minted its OWN
-    // successor: one single-use recovery code, two live verified sessions.
-    // (A stolen cookie replayed alongside the genuine retry is the same shape.)
-    const { app, sid } = await signup('mfaconcurrent');
-    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
-      method: 'POST',
-      headers: headers(sid),
-    });
-    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
-    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
-      method: 'POST',
-      headers: headers(sid),
-      body: JSON.stringify({ code: totp(secret) }),
-    });
-    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
-      .recovery_codes[0] as string;
-    const enrolled = sha256Hex(cookie(confirm, '__Host-sid').split('=')[1] as string);
-    const userId = (await services.sessions.get(enrolled))?.record.user_id as string;
-    // Drop the enrolling session, which `confirm` legitimately left verified —
-    // the count below is about how many sessions THIS recovery code produced.
-    await services.sessions.delete(enrolled);
     const { token: live } = await createSession(services.sessions, {
       userId,
       authMethod: 'email_otp',
@@ -488,198 +323,64 @@ describe('TOTP MFA enroll → confirm → verify', () => {
       rememberMe: false,
     });
 
-    // Spend the code with the grant failing, leaving the continuation pending
-    // AND its session still alive — which is what makes both retries take the
-    // same-session arm.
-    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
-    // resurrect a session a concurrent rotation deleted nor revert one changed
-    // since it read — so that is where the fault goes.
+    // Every write to the session store fails for the duration of the request.
     const realPut = services.sessions.putIfVersion.bind(services.sessions);
-    let failed = false;
-    services.sessions.putIfVersion = async (
-      tokenHash: string,
-      expectedVersion: number,
-      record: StoredSession,
-    ) => {
-      if (!failed && record.record.mfa_verified === true) {
-        failed = true;
-        throw new Error('session store unavailable');
-      }
-      return realPut(tokenHash, expectedVersion, record);
+    services.sessions.putIfVersion = async () => {
+      throw new Error('session store unavailable');
     };
-    await app.request('/v1/auth/mfa/totp/verify', {
+    const used = await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
       headers: headers(`__Host-sid=${live}`),
       body: JSON.stringify({ code: recovery }),
     });
     services.sessions.putIfVersion = realPut;
-    expect(await sessionMfaVerified(`__Host-sid=${live}`)).toBe(false);
 
-    // Two retries, same cookie, at once.
-    const results = await Promise.all(
-      [0, 1].map(() =>
-        app.request('/v1/auth/mfa/totp/verify', {
-          method: 'POST',
-          headers: headers(`__Host-sid=${live}`),
-          body: JSON.stringify({ code: recovery }),
+    // The request SUCCEEDS, because the grant is already durable…
+    expect(used.status).toBe(200);
+    expect((await readJson<{ recovery_remaining: number }>(used)).recovery_remaining).toBe(9);
+    // …even though the session record never got the flag…
+    expect(await sessionMfaVerified(`__Host-sid=${live}`)).toBe(false);
+    // …and the durable grant names this session, which is what the auth
+    // middleware reads to give it MFA standing on its next request — with no
+    // retry, no re-presentation and nothing for the holder to do.
+    // (`auth-middleware.test.ts` proves the middleware half.)
+    expect(await services.store.sessionHasRecoveryGrant(sha256Hex(live))).toBe(true);
+  });
+
+  it('grants to exactly ONE session, however many present the code at once', async () => {
+    // Single use, held by the spend itself rather than by anything downstream:
+    // `consumeRecoveryCode` updates WHERE `used_at IS NULL`, so one caller wins
+    // and the rest are told the code is invalid — which by then it is. There is
+    // no resume path for a loser to take, which is what made the previous design
+    // able to hand out a second grant at all.
+    const { app, sid } = await signup('mfaonce');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const enrolled = sha256Hex(cookie(confirm, '__Host-sid').split('=')[1] as string);
+    const userId = (await services.sessions.get(enrolled))?.record.user_id as string;
+    // Drop the enrolling session, which `confirm` legitimately left verified.
+    await services.sessions.delete(enrolled);
+    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
+      .recovery_codes[0] as string;
+
+    const tokens = await Promise.all(
+      ['a', 'b', 'c'].map((label) =>
+        createSession(services.sessions, {
+          userId,
+          authMethod: 'email_otp',
+          deviceLabel: label,
+          rememberMe: false,
         }),
       ),
     );
-    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
-
-    // …and ONE verified session exists for this user, not two.
-    const verified = (await services.sessions.listForUser(userId)).filter(
-      (s) => s.stored.record.mfa_verified,
-    );
-    expect(verified).toHaveLength(1);
-  });
-
-  it('lets a MULTI-DEVICE holder finish a continuation their other session cannot', async () => {
-    // "Does this user hold any verified session" was too coarse to stand in for
-    // "did THIS grant land". A verified session on a device the holder cannot
-    // reach is no evidence about this continuation — and treating it as proof
-    // permanently blocked the very case the resume path exists for, on what may
-    // be the last recovery code.
-    const { app, sid } = await signup('mfamultidevice');
-    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
-      method: 'POST',
-      headers: headers(sid),
-    });
-    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
-    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
-      method: 'POST',
-      headers: headers(sid),
-      body: JSON.stringify({ code: totp(secret) }),
-    });
-    // The enrolling session stays VERIFIED and ALIVE — the unreachable phone.
-    const phone = cookie(confirm, '__Host-sid');
-    expect(await sessionMfaVerified(phone)).toBe(true);
-    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
-      .recovery_codes[0] as string;
-    const userId = (await services.sessions.get(sha256Hex(phone.split('=')[1] as string)))?.record
-      .user_id as string;
-    const { token: doomed } = await createSession(services.sessions, {
-      userId,
-      authMethod: 'email_otp',
-      deviceLabel: 'doomed',
-      rememberMe: false,
-    });
-
-    // Spend the code with the grant failing, then lose that session.
-    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
-    // resurrect a session a concurrent rotation deleted nor revert one changed
-    // since it read — so that is where the fault goes.
-    const realPut = services.sessions.putIfVersion.bind(services.sessions);
-    let failed = false;
-    services.sessions.putIfVersion = async (
-      tokenHash: string,
-      expectedVersion: number,
-      record: StoredSession,
-    ) => {
-      if (!failed && record.record.mfa_verified === true) {
-        failed = true;
-        throw new Error('session store unavailable');
-      }
-      return realPut(tokenHash, expectedVersion, record);
-    };
-    await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${doomed}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    services.sessions.putIfVersion = realPut;
-    await services.sessions.delete(sha256Hex(doomed));
-
-    // A newly authenticated laptop finishes it, even though the phone is
-    // verified and alive.
-    const { token: laptop } = await createSession(services.sessions, {
-      userId,
-      authMethod: 'email_otp',
-      deviceLabel: 'laptop',
-      rememberMe: false,
-    });
-    const finished = await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${laptop}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    expect(finished.status).toBe(200);
-    expect(await sessionMfaVerified(cookie(finished, '__Host-sid'))).toBe(true);
-  });
-
-  it('lets only ONE session adopt an abandoned continuation', async () => {
-    // Two primary-authenticated sessions can both find the original session gone
-    // and both conclude they may finish it — and a code that is single-use by
-    // construction would then grant steward assurance to both.
-    const { app, sid } = await signup('mfaadopt');
-    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
-      method: 'POST',
-      headers: headers(sid),
-    });
-    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
-    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
-      method: 'POST',
-      headers: headers(sid),
-      body: JSON.stringify({ code: totp(secret) }),
-    });
-    const sid2 = cookie(confirm, '__Host-sid');
-    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
-      .recovery_codes[0] as string;
-    const userId = (await services.sessions.get(sha256Hex(sid2.split('=')[1] as string)))?.record
-      .user_id as string;
-    const { token: doomed } = await createSession(services.sessions, {
-      userId,
-      authMethod: 'email_otp',
-      deviceLabel: 'doomed',
-      rememberMe: false,
-    });
-
-    // Spend the code with the grant failing, then destroy that session.
-    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
-    // resurrect a session a concurrent rotation deleted nor revert one changed
-    // since it read — so that is where the fault goes.
-    const realPut = services.sessions.putIfVersion.bind(services.sessions);
-    let failed = false;
-    services.sessions.putIfVersion = async (
-      tokenHash: string,
-      expectedVersion: number,
-      record: StoredSession,
-    ) => {
-      if (!failed && record.record.mfa_verified === true) {
-        failed = true;
-        throw new Error('session store unavailable');
-      }
-      return realPut(tokenHash, expectedVersion, record);
-    };
-    await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${doomed}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    services.sessions.putIfVersion = realPut;
-    await services.sessions.delete(sha256Hex(doomed));
-    // …and the enrolling session too, so this is genuinely the situation the
-    // takeover arm exists for: the user holds NO verified session, which is the
-    // lockout the resume path is there to prevent.  While one survives there is
-    // nothing to rescue, and a spent code is simply spent — which is what stops
-    // a continuation whose settle failed from granting a second time.
-    await services.sessions.delete(sha256Hex(sid2.split('=')[1] as string));
-
-    // Two fresh sessions race to adopt it.
-    const tokens = await Promise.all([
-      createSession(services.sessions, {
-        userId,
-        authMethod: 'email_otp',
-        deviceLabel: 'a',
-        rememberMe: false,
-      }),
-      createSession(services.sessions, {
-        userId,
-        authMethod: 'email_otp',
-        deviceLabel: 'b',
-        rememberMe: false,
-      }),
-    ]);
     const results = await Promise.all(
       tokens.map((t) =>
         app.request('/v1/auth/mfa/totp/verify', {
@@ -689,76 +390,17 @@ describe('TOTP MFA enroll → confirm → verify', () => {
         }),
       ),
     );
-    const verified = results.filter((r) => r.status === 200);
-    expect(verified).toHaveLength(1);
-  });
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
 
-  it('does NOT let a pending code survive a factor RESET', async () => {
-    // A continuation is about the factor it was issued for. Nothing bound it to
-    // an enrollment generation, so a second verified session could disable MFA
-    // and enrol a fresh secret with fresh codes — and the old session could then
-    // present its already-spent OLD code and be verified against the NEW factor.
-    const { app, sid } = await signup('mfareset');
-    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
-      method: 'POST',
-      headers: headers(sid),
-    });
-    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
-    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
-      method: 'POST',
-      headers: headers(sid),
-      body: JSON.stringify({ code: totp(secret) }),
-    });
-    const sid2 = cookie(confirm, '__Host-sid');
-    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
-      .recovery_codes[0] as string;
-    const userId = (await services.sessions.get(sha256Hex(sid2.split('=')[1] as string)))?.record
-      .user_id as string;
-    const { token: sid3 } = await createSession(services.sessions, {
-      userId,
-      authMethod: 'email_otp',
-      deviceLabel: 'test',
-      rememberMe: false,
-    });
-
-    // The grant fails after the unit commits: the code is spent and pending.
-    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
-    // resurrect a session a concurrent rotation deleted nor revert one changed
-    // since it read — so that is where the fault goes.
-    const realPut = services.sessions.putIfVersion.bind(services.sessions);
-    let failed = false;
-    services.sessions.putIfVersion = async (
-      tokenHash: string,
-      expectedVersion: number,
-      record: StoredSession,
-    ) => {
-      if (!failed && record.record.mfa_verified === true) {
-        failed = true;
-        throw new Error('session store unavailable');
-      }
-      return realPut(tokenHash, expectedVersion, record);
-    };
-    await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${sid3}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    services.sessions.putIfVersion = realPut;
-
-    // …then MFA is re-enrolled from elsewhere, which replaces the code set.
-    await services.store.setAuth(userId, {
-      mfaEnabled: true,
-      recoveryCodeHashes: [hashRecoveryCode('brand-new-code')],
-    });
-
-    // The old code is no longer a way in, spent or not.
-    const stale = await app.request('/v1/auth/mfa/totp/verify', {
-      method: 'POST',
-      headers: headers(`__Host-sid=${sid3}`),
-      body: JSON.stringify({ code: recovery }),
-    });
-    expect(stale.status).toBe(400);
-    expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
+    // …and exactly one session holds MFA, counting the durable grant as well as
+    // the flag — a second grant would show up here even if Redis never saw it.
+    let verified = 0;
+    for (const t of tokens) {
+      const flagged = (await services.sessions.get(sha256Hex(t.token)))?.record.mfa_verified;
+      const granted = await services.store.sessionHasRecoveryGrant(sha256Hex(t.token));
+      if (flagged === true || granted) verified += 1;
+    }
+    expect(verified).toBe(1);
   });
 
   it('records a REJECTED attempt as a failure, not as a verification', async () => {

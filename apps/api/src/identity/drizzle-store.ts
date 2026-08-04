@@ -40,7 +40,7 @@ import {
   type SecurityActivityEntry,
   type StewardRoleId,
 } from '@licio/shared';
-import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import {
   type AuditEntryInput,
   type AuditStore,
@@ -337,13 +337,11 @@ export class DrizzleIdentityStore implements IdentityStore {
         }
         // A FACTOR RESET INVALIDATES EVERY PENDING RESUME.
         //
-        // `verification_session_hash` marks a spent code whose grant did not
-        // land, so it can be completed later. Nothing bound it to an enrollment
-        // GENERATION: a second verified session could disable MFA and enrol a
-        // fresh secret with fresh codes, and the old session could then present
-        // its already-spent OLD code and be granted verification against the NEW
-        // factor. Replacing the code set is exactly the moment every outstanding
-        // continuation stops being about the factor it was issued for.
+        // `verification_session_hash` IS the MFA grant a spent code conferred.
+        // Nothing bound it to an enrollment GENERATION: a session verified by a
+        // code from the OLD factor went on deriving its standing after that
+        // factor was replaced. Replacing the code set is exactly the moment
+        // every outstanding grant stops being about the factor that issued it.
         await tx
           .update(mfaRecoveryCodes)
           .set({ verificationSessionHash: null })
@@ -383,9 +381,9 @@ export class DrizzleIdentityStore implements IdentityStore {
       // code is not valid, which it no longer is.
       const spent = await tx
         .update(mfaRecoveryCodes)
-        // The session rides the SAME statement as the consumption: a code spent
-        // with no note of what it was spent for is the lockout this column
-        // exists to prevent, and a second write could fail on its own.
+        // The GRANT rides the same statement as the consumption, which is what
+        // makes them one fact: a session is MFA-verified if a spent row names
+        // it, so there is no second write to fail and nothing to reconcile.
         .set({ usedAt: new Date(), verificationSessionHash })
         .where(
           and(
@@ -403,80 +401,16 @@ export class DrizzleIdentityStore implements IdentityStore {
     });
   }
 
-  async findResumableVerification(
-    userId: string,
-    codeHash: string,
-    usedSince: string,
-  ): Promise<{ remaining: number; verificationSessionHash: string } | null> {
-    if (!isUuid(userId)) return null;
+  async sessionHasRecoveryGrant(sessionHash: string): Promise<boolean> {
+    // THE GRANT, read back.  One indexed lookup, and only for a session whose
+    // own record does not already carry the flag — which is the failure case
+    // (the Redis write did not land) and nothing else.
     const rows = await this.#db
-      .select({ sessionHash: mfaRecoveryCodes.verificationSessionHash })
+      .select({ id: mfaRecoveryCodes.id })
       .from(mfaRecoveryCodes)
-      .where(
-        and(
-          eq(mfaRecoveryCodes.userId, userId),
-          eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
-          isNotNull(mfaRecoveryCodes.verificationSessionHash),
-          // Bounded to the window an interrupted verification could still be
-          // finished in.  A continuation that failed to settle would otherwise
-          // stay adoptable forever, and become a second use of a single-use
-          // code once the sessions its grant created had expired.
-          gte(mfaRecoveryCodes.usedAt, new Date(usedSince)),
-        ),
-      )
+      .where(eq(mfaRecoveryCodes.verificationSessionHash, sessionHash))
       .limit(1);
-    const sessionHash = rows[0]?.sessionHash;
-    if (sessionHash === undefined || sessionHash === null) return null;
-    const remaining = await this.#activeRecoveryCodes(this.#db, userId);
-    return { remaining: remaining.length, verificationSessionHash: sessionHash };
-  }
-
-  async claimResumableVerification(
-    userId: string,
-    codeHash: string,
-    expectedSessionHash: string,
-    nextSessionHash: string,
-  ): Promise<boolean> {
-    if (!isUuid(userId)) return false;
-    // The PRECONDITION IS THE WHERE CLAUSE: the row still names the session this
-    // caller saw. Two callers racing to adopt an abandoned continuation both
-    // pass the read that preceded this; exactly one passes the write.
-    const rebound = await this.#db
-      .update(mfaRecoveryCodes)
-      .set({ verificationSessionHash: nextSessionHash })
-      .where(
-        and(
-          eq(mfaRecoveryCodes.userId, userId),
-          eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
-          eq(mfaRecoveryCodes.verificationSessionHash, expectedSessionHash),
-        ),
-      )
-      .returning({ id: mfaRecoveryCodes.id });
-    return rebound.length > 0;
-  }
-
-  async clearResumableVerification(
-    userId: string,
-    codeHash: string,
-    expectedSessionHash: string,
-  ): Promise<boolean> {
-    if (!isUuid(userId)) return false;
-    // The PRECONDITION IS THE WHERE CLAUSE: only a row that still HAS a
-    // continuation is cleared, so of two concurrent completions exactly one
-    // reports true. Without that the same-session arm had no claim at all —
-    // both retries granted, both rotated, and one code produced two sessions.
-    const cleared = await this.#db
-      .update(mfaRecoveryCodes)
-      .set({ verificationSessionHash: null })
-      .where(
-        and(
-          eq(mfaRecoveryCodes.userId, userId),
-          eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
-          eq(mfaRecoveryCodes.verificationSessionHash, expectedSessionHash),
-        ),
-      )
-      .returning({ id: mfaRecoveryCodes.id });
-    return cleared.length > 0;
+    return rows.length > 0;
   }
 
   /** Active (unconsumed) recovery-code hashes, as hex strings. */

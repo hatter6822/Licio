@@ -48,8 +48,29 @@ export interface StoredSession {
   version: number;
 }
 
+/**
+ * THERE IS NO UNCONDITIONAL WRITE HERE, and that is the point.
+ *
+ * Every session mutation is a read-modify-write, and the whole class of defects
+ * this interface has produced came from one being performed with a plain write:
+ * a write that resurrected a session a rotation had deleted, a write that
+ * reverted a grant made since its read, a rotation assembled out of a read and
+ * two writes that could stop half way. Each was fixed by adding a condition to
+ * the caller — and the next caller did not have it.
+ *
+ * So the operations are the safe ones only. `create` mints a token that did not
+ * exist; `putIfVersion` writes a record the caller has read and nobody has
+ * touched since; `rotate` moves one in a single step; `delete` removes one. A
+ * caller cannot express "write this over whatever is there", because that is
+ * never the correct thing to do to a live session. No gate enforces this — the
+ * compiler does, which is stronger: the unsafe operation is not missing from an
+ * allowlist, it does not exist.
+ */
 export interface SessionStore {
-  put(tokenHash: string, stored: StoredSession): Promise<void>;
+  /** Write a session at a token hash that does not exist yet — the ONLY
+   *  unconditional write, and it is unconditional because there is nothing
+   *  there to lose. */
+  create(tokenHash: string, stored: StoredSession): Promise<void>;
   get(tokenHash: string): Promise<StoredSession | null>;
   delete(tokenHash: string): Promise<void>;
   /**
@@ -102,7 +123,7 @@ export class InMemorySessionStore implements SessionStore {
   readonly #byHash = new Map<string, StoredSession>();
   readonly #byUser = new Map<string, Set<string>>();
 
-  async put(tokenHash: string, stored: StoredSession): Promise<void> {
+  async create(tokenHash: string, stored: StoredSession): Promise<void> {
     this.#byHash.set(tokenHash, stored);
     const set = this.#byUser.get(stored.record.user_id) ?? new Set<string>();
     set.add(tokenHash);
@@ -216,7 +237,7 @@ export async function createSession(
     auth_assurance: { level: 'full', last_verified_at: iso(now) },
     absolute_expires_at: iso(absolute),
   });
-  await store.put(tokenHash, { record, expiresAt, version: 0 });
+  await store.create(tokenHash, { record, expiresAt, version: 0 });
   await enforceConcurrencyCap(store, input.userId, now);
   return { token, tokenHash, record, expiresAt, maxAgeSec: Math.ceil((expiresAt - now) / 1000) };
 }

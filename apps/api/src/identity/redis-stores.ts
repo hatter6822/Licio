@@ -139,7 +139,7 @@ export class RedisSessionStore implements SessionStore {
     return `${this.#prefix}user:${userId}`;
   }
 
-  async put(tokenHash: string, stored: StoredSession): Promise<void> {
+  async create(tokenHash: string, stored: StoredSession): Promise<void> {
     const ttlMs = String(Math.max(1, Math.ceil(stored.expiresAt - Date.now())));
     const userKey = this.#userKey(stored.record.user_id);
     // The per-user index carries MAX(member TTLs): writing a short-lived session
@@ -218,9 +218,29 @@ export class RedisSessionStore implements SessionStore {
   }
 
   async rotate(oldHash: string, newHash: string): Promise<StoredSession | null> {
-    // The record is read first only to learn WHICH user index to touch and what
-    // version to expect; the script re-checks that version, so a row that
-    // changed in between aborts the rotation rather than moving a stale copy.
+    // `null` MEANS ONE THING: there is no such session.
+    //
+    // The record is read first to learn which user index to touch and what
+    // version to expect, and the script re-checks that version so a row changed
+    // in between is not moved as a stale copy. But a losing version check is
+    // CONTENTION, not absence — and callers on the enroll and disable paths
+    // treat a null rotation as "no cookie to rotate" and answer success, so
+    // conflating the two left a bearer token unrotated across a privilege
+    // change, which is exactly what rotating defends against.
+    //
+    // So a conflict re-reads and tries again; only a genuinely missing session
+    // returns null. Bounded, because a caller that cannot win in a few attempts
+    // is contending with a writer far hotter than any real session.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const moved = await this.#tryRotate(oldHash, newHash);
+      if (moved !== 'conflict') return moved;
+    }
+    return null;
+  }
+
+  /** One attempt: the moved record, `null` when there is no such session, or
+   *  `'conflict'` when it changed underneath the read. */
+  async #tryRotate(oldHash: string, newHash: string): Promise<StoredSession | null | 'conflict'> {
     const current = await this.get(oldHash);
     if (current === null) return null;
     const moved = { ...current, version: current.version + 1 };
@@ -263,7 +283,9 @@ export class RedisSessionStore implements SessionStore {
       oldHash,
       newHash,
     );
-    return Number(rotated) === 1 ? moved : null;
+    if (Number(rotated) === 1) return moved;
+    // The row was there when we read it, so a refusal is a version conflict.
+    return (await this.get(oldHash)) === null ? null : 'conflict';
   }
 
   async take(tokenHash: string): Promise<StoredSession | null> {

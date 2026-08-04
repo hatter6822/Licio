@@ -152,79 +152,28 @@ export interface IdentityStore {
   consumeRecoveryCode(
     userId: string,
     codeHash: string,
-    /** The session this code is being spent to verify, so the verification can
-     *  be RESUMED if the (Redis) grant fails after this commits. Without it the
-     *  last recovery code is consumed by a fault on our side and the account is
-     *  locked out with no retry that can work. */
+    /** The session this code verifies.  Written in the SAME statement as the
+     *  consumption, which is what makes the spend and the grant one fact: a
+     *  session is MFA-verified if a spent row names it, so there is no second
+     *  write to fail and nothing to reconcile afterwards. */
     verificationSessionHash: string,
   ): Promise<{ remaining: number } | null>;
   /**
-   * A code already SPENT for this session, whose verification did not finish.
+   * Has this session been granted MFA by a spent recovery code?
    *
-   * The resume half of `consumeRecoveryCode`. Returns the session the code was
-   * spent for; the CALLER decides whether the presenter may finish it, because
-   * that question needs the session store and this one does not have it.
+   * THE GRANT ITSELF, read back — not a cache of it.  The session record's
+   * `mfa_verified` flag lives in Redis while the code is spent in Postgres, and
+   * for four rounds every attempt to keep those two in step was an ordering
+   * argument with a window in it: grant-then-record loses the record, and
+   * record-then-grant loses the grant.  A recovery code is the one factor where
+   * losing it is unrecoverable — it is finite, and the last one is the account.
    *
-   * Cleared whenever the recovery-code set is replaced (`setAuth`): a pending
-   * continuation is about the factor it was issued for, and re-enrolling ends
-   * that factor.
+   * So the durable row IS the grant, and the flag is only an optimisation for
+   * the sessions that already carry it.  Nothing has to be settled, resumed,
+   * claimed or taken over, because nothing can be half-done: either the
+   * transaction that spends the code committed, or it did not.
    */
-  findResumableVerification(
-    userId: string,
-    codeHash: string,
-    /** Ignore a continuation whose consumption is older than this instant.
-     *
-     *  A continuation describes a verification that is still IN FLIGHT, and
-     *  in-flight has a duration.  Unbounded, a row that failed to settle stays
-     *  adoptable indefinitely — so a code spent successfully, whose settle
-     *  happened to fail, becomes usable a second time days later once the
-     *  sessions it granted have expired.  Bounding it to the window an
-     *  interrupted verification could plausibly be resumed in leaves the
-     *  recovery path intact and closes the rest. */
-    usedSince: string,
-  ): Promise<{ remaining: number; verificationSessionHash: string } | null>;
-  /**
-   * SETTLE a continuation once its grant has landed — and CLAIM it while doing
-   * so.  Returns whether THIS caller was the one that cleared it.
-   *
-   * A pending row must mean "the grant never happened", or the two are
-   * indistinguishable, and a fallback that reads a finished verification as
-   * unfinished would make every spent code reusable.
-   *
-   * The boolean is what makes the completion single-winner, and it is needed
-   * because the same-session resume arm has no compare-and-set to pass through:
-   * the continuation already names the caller, so rebinding it to that same
-   * value discriminates nothing.  Two concurrent retries carrying one cookie
-   * therefore both granted and both rotated, and a single-use code produced two
-   * live verified sessions.  Clearing is a one-row transition, so exactly one
-   * of them removes it — the loser is told to sign in again, which by then is
-   * true, because the winner's rotation has replaced the session they hold.
-   */
-  clearResumableVerification(
-    userId: string,
-    codeHash: string,
-    /** Clear only while the row still names THIS session.  Ownership can change
-     *  between a claim and the completion it authorises, and a settle that
-     *  ignored that would let a request report a completion another session now
-     *  owns. */
-    expectedSessionHash: string,
-  ): Promise<boolean>;
-  /**
-   * COMPARE-AND-SET: take a continuation over, only while it still names
-   * `expectedSessionHash`.
-   *
-   * `false` ⇒ someone else took it first. Two primary-authenticated sessions can
-   * both find the original session gone and both decide they may finish it —
-   * and a code that is single-use by construction would then grant steward
-   * assurance to both. The rebind is the one statement that can settle which,
-   * and the loser is told the code is not valid, which for it is now true.
-   */
-  claimResumableVerification(
-    userId: string,
-    codeHash: string,
-    expectedSessionHash: string,
-    nextSessionHash: string,
-  ): Promise<boolean>;
+  sessionHasRecoveryGrant(sessionHash: string): Promise<boolean>;
   // --- WebAuthn credentials ---
   /** UPSERT by `credentialId` — counter/last-used updates re-add the credential. */
   addWebauthn(cred: StoredWebauthnCredential): Promise<void>;
@@ -271,13 +220,10 @@ export interface IdentityStore {
 export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
   readonly #users = new Map<string, StoredUser>();
   readonly #auth = new Map<string, StoredUserAuth>();
-  /** `${userId}:${codeHash}` → the session a spent code was spent to verify, and
-   *  WHEN it was spent.  The in-memory twin of
-   *  `mfa_recovery_codes.verification_session_hash` beside its `used_at`. */
-  readonly #pendingVerifications = new Map<
-    string,
-    { sessionHash: string; remaining: number; usedAt: string }
-  >();
+  /** `${userId}:${codeHash}` → the session that spend granted MFA to.  The
+   *  in-memory twin of `mfa_recovery_codes.verification_session_hash`, which is
+   *  the grant itself rather than a note about one. */
+  readonly #recoveryGrants = new Map<string, { sessionHash: string }>();
   readonly #webauthn = new Map<string, StoredWebauthnCredential>();
   readonly #walletAuth = new Map<string, StoredWalletAuthCredential>();
   readonly #exportJobs = new Map<string, StoredExportJob>();
@@ -296,7 +242,7 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     const undo = [
       mapRollback(this.#users),
       mapRollback(this.#auth),
-      mapRollback(this.#pendingVerifications),
+      mapRollback(this.#recoveryGrants),
       mapRollback(this.#webauthn),
       mapRollback(this.#walletAuth),
       mapRollback(this.#exportJobs),
@@ -387,13 +333,12 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     const updated = { ...auth, ...patch };
     this.#auth.set(userId, updated);
     // A FACTOR RESET INVALIDATES EVERY PENDING RESUME — see the Drizzle twin: a
-    // continuation is about the factor it was issued for, and replacing the code
-    // set ends that factor. Without this an old session could present its
-    // already-spent old code after a re-enrollment and be verified against the
-    // NEW one.
+    // grant is about the factor it was issued for, and replacing the code set
+    // ends that factor — so a session that a retired code had verified stops
+    // deriving its MFA standing from it.
     if (patch.recoveryCodeHashes !== undefined) {
-      for (const key of [...this.#pendingVerifications.keys()]) {
-        if (key.startsWith(`${userId}:`)) this.#pendingVerifications.delete(key);
+      for (const key of [...this.#recoveryGrants.keys()]) {
+        if (key.startsWith(`${userId}:`)) this.#recoveryGrants.delete(key);
       }
     }
     return updated;
@@ -412,55 +357,20 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     if (idx < 0) return null;
     const remaining = auth.recoveryCodeHashes.filter((_, i) => i !== idx);
     this.#auth.set(userId, { ...auth, recoveryCodeHashes: remaining });
-    this.#pendingVerifications.set(`${userId}:${codeHash}`, {
+    // The grant rides the SAME write as the consumption. A code spent with no
+    // note of what it verified was the lockout this column exists to prevent,
+    // and a second write could fail on its own.
+    this.#recoveryGrants.set(`${userId}:${codeHash}`, {
       sessionHash: verificationSessionHash,
-      remaining: remaining.length,
-      // The twin of `used_at`, set in the SAME write as the session hash — the
-      // resume window is measured from the consumption, not from the lookup.
-      usedAt: new Date().toISOString(),
     });
     return { remaining: remaining.length };
   }
 
-  async findResumableVerification(
-    userId: string,
-    codeHash: string,
-    usedSince: string,
-  ): Promise<{ remaining: number; verificationSessionHash: string } | null> {
-    const pending = this.#pendingVerifications.get(`${userId}:${codeHash}`);
-    if (pending === undefined) return null;
-    // Past the window a verification could still be in flight, the continuation
-    // is not a resumable operation — it is a spent code with an unsettled row.
-    if (pending.usedAt < usedSince) return null;
-    return { remaining: pending.remaining, verificationSessionHash: pending.sessionHash };
-  }
-
-  async clearResumableVerification(
-    userId: string,
-    codeHash: string,
-    expectedSessionHash: string,
-  ): Promise<boolean> {
-    // Test and delete with NO `await` between — the same single-winner
-    // guarantee the conditional DELETE gives on a single-threaded runtime.
-    const key = `${userId}:${codeHash}`;
-    const pending = this.#pendingVerifications.get(key);
-    if (pending === undefined || pending.sessionHash !== expectedSessionHash) return false;
-    return this.#pendingVerifications.delete(key);
-  }
-
-  async claimResumableVerification(
-    userId: string,
-    codeHash: string,
-    expectedSessionHash: string,
-    nextSessionHash: string,
-  ): Promise<boolean> {
-    // Test and write with NO `await` between — the same guarantee the
-    // conditional UPDATE gives on a single-threaded runtime.
-    const key = `${userId}:${codeHash}`;
-    const pending = this.#pendingVerifications.get(key);
-    if (pending === undefined || pending.sessionHash !== expectedSessionHash) return false;
-    this.#pendingVerifications.set(key, { ...pending, sessionHash: nextSessionHash });
-    return true;
+  async sessionHasRecoveryGrant(sessionHash: string): Promise<boolean> {
+    for (const grant of this.#recoveryGrants.values()) {
+      if (grant.sessionHash === sessionHash) return true;
+    }
+    return false;
   }
 
   // --- WebAuthn credentials ------------------------------------------------
