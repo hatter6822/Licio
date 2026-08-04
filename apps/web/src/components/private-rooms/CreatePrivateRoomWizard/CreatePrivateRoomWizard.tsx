@@ -239,7 +239,7 @@ export function CreatePrivateRoomWizard({
           setDirectoryWarning(
             t(
               'privateRoom.create.directoryFailed',
-              'The room was created on this device, but Licio could not save its directory record. Share an invite directly, or try listing it again later.',
+              'The room was created on this device, but Licio could not save its directory record. Share an invite directly, or register it from this room’s settings — including publicly, if that is what you chose.',
             ),
           );
           // RECONCILE against the server, but only when the request PLAUSIBLY

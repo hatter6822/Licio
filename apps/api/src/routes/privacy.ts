@@ -33,6 +33,7 @@ import {
 import { privateOwnershipOutcome } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, revokeAllForUser, validateSession } from '../identity/sessions.js';
+import { createLogger } from '../lib/logger.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { zValidator } from '../lib/validate.js';
 import {
@@ -45,6 +46,9 @@ import {
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60_000;
 const cancelTokenKey = (token: string) => `delcancel:${sha256Hex(token)}`;
 const u = { error: { code: 'unauthenticated', message: 'Authentication required' } } as const;
+
+/** Pino is the only server logging path (redaction lives there). */
+const privacyLogger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 
 export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentityServices) {
   return (
@@ -318,9 +322,19 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           // THREE writes plus a Redis revoke, one fact. The account state and
           // the deletion row apart is an account deactivated with no scheduled
           // purge (or a purge scheduled against a live account); the record
-          // missing is an Art. 17 request nothing accounts for. The session
-          // revoke cannot join the transaction, so it runs INSIDE the unit —
-          // its failure aborts the rest rather than half-deleting an account.
+          // missing is an Art. 17 request nothing accounts for.
+          //
+          // THE REVOKE FOLLOWS THE COMMIT, for the same reason the single-session
+          // revoke does: it is a Redis write that cannot join this transaction,
+          // and lexical nesting does not make it roll back. Inside the unit, a
+          // commit failure after a successful revoke left every session gone
+          // while the deactivation, the schedule and the record all rolled back
+          // — an action performed, denied, and unrecorded.
+          //
+          // After it, the ordering is safe in both directions: the account is
+          // already `deactivated`, which `authMiddleware` refuses, so a session
+          // that briefly outlives the commit can do nothing with itself. And
+          // revoking is idempotent, so the retry the 503 asks for finishes it.
           await services.transact(async (tx) => {
             await tx.store.updateUser(auth.userId, { accountState: 'deactivated' }, now);
             await tx.store.setDeletion({
@@ -336,8 +350,31 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
               eventType: 'deletion_request',
               context: {},
             });
-            await revokeAllForUser(services.sessions, auth.userId);
           });
+          try {
+            await revokeAllForUser(services.sessions, auth.userId);
+          } catch (error) {
+            // LOUD: the deletion is recorded and the account deactivated, so a
+            // session store that did not answer is a discrepancy an operator has
+            // to be able to see — not something to swallow behind a 200.
+            privacyLogger.error(
+              {
+                auditAction: 'deletion_revoke_incomplete',
+                userId: auth.userId,
+                message: error instanceof Error ? error.message : 'unknown',
+              },
+              'a deletion request is committed with sessions that may still be live',
+            );
+            return c.json(
+              {
+                error: {
+                  code: 'revoke_incomplete',
+                  message: 'The request was recorded but sessions could not be ended.',
+                },
+              },
+              503,
+            );
+          }
           await emitPrivacyRequestEvent(
             getEventPipelineServices(),
             'deletion',

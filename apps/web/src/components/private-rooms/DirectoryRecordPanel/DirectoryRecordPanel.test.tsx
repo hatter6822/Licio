@@ -73,6 +73,7 @@ function sessionDouble(
     name: 'Neighbourhood watch',
     clearDirectoryStub: async () => {},
     quarantineDirectoryStub: async () => {},
+    markDirectoryStubVerified: async () => {},
     directoryStubPayload: async () => ({
       roomPublicKey: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
       manifestKeyCommitment: 'Muh7CwUy5QuoJ8Hj5dzRVLOgJxwBRE-fnw7RkinJrAE',
@@ -459,6 +460,36 @@ describe('DirectoryRecordPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /remove licio’s record/i }));
     expect(await screen.findByText(/still hold the room/i)).toBeInTheDocument();
     expect(screen.queryByText(/deleted the room/i)).toBeNull();
+  });
+
+  it('can register the record LISTED, which is the only moment that choice exists', async () => {
+    // §21.3 fixes `directory_mode` at CREATE time and only ever demotes it, so a
+    // record registered `unlisted` can never become listed. This was the only
+    // later registration path and it hard-coded `unlisted` — which made the
+    // creation wizard's "try listing it again later" a promise nothing could
+    // keep after a failed directory step.
+    ownsRecord = false;
+    let posted: Record<string, unknown> | null = null;
+    mockApi((url, init) => {
+      if (init?.method === 'POST' && typeof init.body === 'string' && !url.includes('csrf')) {
+        posted = JSON.parse(init.body) as Record<string, unknown>;
+      }
+      return {
+        room_server_id: ROOM_SERVER_ID,
+        stub_id: STUB.stubId,
+        bootstrap_endpoints: [],
+        created_at: '2026-08-02T00:00:00.000Z',
+      };
+    });
+    render(<DirectoryRecordPanel session={sessionDouble(undefined)} />);
+    await screen.findByText(/Licio holds no record of this room/i);
+    await userEvent.click(screen.getByLabelText(/also list this room publicly/i));
+    await userEvent.click(screen.getByRole('button', { name: /store a bootstrap record/i }));
+    await screen.findByRole('status');
+    expect(posted).toMatchObject({
+      directory_mode: 'listed',
+      display_name: 'Neighbourhood watch',
+    });
   });
 
   it('shows a member whose ACCOUNT does not own the record none of the controls', async () => {

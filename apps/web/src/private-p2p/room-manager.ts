@@ -757,7 +757,27 @@ export class PrivateRoomSession {
      *  `StoredRoomSession`. Stored because later members cannot re-derive it. */
     readonly bootstrapBlindId: string;
   }): Promise<void> {
-    this.session = { ...this.session, directoryStub: { capability: stub } };
+    // VERIFIED by provenance: this device just registered the record and holds
+    // the room key that signed it, so there is nothing to check it against that
+    // it did not produce. A handle that arrives from someone else takes the
+    // other path (`finishJoin`) and starts unverified.
+    this.session = { ...this.session, directoryStub: { capability: stub, verified: true } };
+    await putRoomSession(this.session);
+  }
+
+  /**
+   * Release an invite-carried handle after it has been CHECKED against this room.
+   *
+   * The counterpart to `quarantineDirectoryStub`: verification has two outcomes
+   * and both have to be recorded, or "not yet checked" and "checked and fine"
+   * stay indistinguishable — which is exactly what let an unverified handle
+   * travel in invites.
+   */
+  async markDirectoryStubVerified(): Promise<void> {
+    const stored = this.session.directoryStub;
+    if (stored === undefined || stored.verified === true) return;
+    const { quarantined: _cleared, ...rest } = stored;
+    this.session = { ...this.session, directoryStub: { ...rest, verified: true } };
     await putRoomSession(this.session);
   }
 
@@ -787,7 +807,14 @@ export class PrivateRoomSession {
   async quarantineDirectoryStub(): Promise<void> {
     const stored = this.session.directoryStub;
     if (stored === undefined || stored.quarantined === true) return;
-    this.session = { ...this.session, directoryStub: { ...stored, quarantined: true } };
+    // …and REVOKE the release with it. Verification is now a positive fact that
+    // invites require, so a handle that fails a later check has to lose it —
+    // otherwise a record that verified once and was re-checked after the room
+    // moved would keep travelling on the strength of the old answer.
+    this.session = {
+      ...this.session,
+      directoryStub: { ...stored, quarantined: true, verified: false },
+    };
     await putRoomSession(this.session);
   }
 
@@ -1512,8 +1539,13 @@ export class PrivateRoomSession {
     // room points at another one, and copying it into an invite is how a
     // poisoned reference spreads through honest members — the next admin hands
     // it to everyone they invite. It travels only after it has verified.
+    // …and only once it HAS verified. `quarantined !== true` was the test, which
+    // reads "nobody has proved this wrong yet" as permission — and a handle from
+    // someone else's invite is unproved at the moment it is stored, while the
+    // check that would prove it runs asynchronously in a panel this admin need
+    // never open. Travel requires the positive fact.
     const stored = this.session.directoryStub;
-    const stub = stored?.quarantined === true ? undefined : stored?.capability;
+    const stub = stored?.verified === true ? stored.capability : undefined;
     const invite = this.p2p.createRoomInvite({
       roomPublicKey,
       grantedRole: params.grantedRole ?? 'member',

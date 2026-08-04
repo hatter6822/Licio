@@ -43,6 +43,7 @@ import type { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { useAuthStore } from '../../../stores/auth.js';
 import { Button } from '../../ui/Button/index.js';
 import { Card } from '../../ui/Card/index.js';
+import { Checkbox } from '../../ui/Checkbox/index.js';
 import { Input } from '../../ui/Input/index.js';
 
 export interface DirectoryRecordPanelProps {
@@ -83,6 +84,10 @@ export function DirectoryRecordPanel({
   const [busy, setBusy] = useState<Action>(null);
   /** The §21.3 display fields, while the owner is editing them. */
   const [editing, setEditing] = useState<{ name: string; description: string } | null>(null);
+  /** Register the record LISTED. §21.3 fixes the mode at create time, so this is
+   *  the only moment the choice exists — and the creation wizard's "try listing
+   *  it again later" depends on it being here. */
+  const [listPublicly, setListPublicly] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -123,6 +128,11 @@ export function DirectoryRecordPanel({
         setState({ kind: 'unverified' });
         return false;
       }
+      // RELEASE it: the record is signed by this room, so the handle points here
+      // and may travel in invites. Verification has two outcomes and both are
+      // recorded — without this, "not yet checked" and "checked and fine" are
+      // the same state, which is what let an unverified handle propagate.
+      await session.markDirectoryStubVerified();
       setState({ kind: 'present', record });
       return true;
     },
@@ -368,7 +378,11 @@ export function DirectoryRecordPanel({
                       let created: Awaited<ReturnType<typeof createPrivateRoomStub>> | null = null;
                       try {
                         created = await createPrivateRoomStub({
-                          directoryMode: 'unlisted',
+                          directoryMode: listPublicly ? 'listed' : 'unlisted',
+                          // Display metadata is `listed`-only — the server
+                          // REFUSES it on an unlisted record rather than
+                          // dropping it — so it is sent only where it belongs.
+                          ...(listPublicly ? { displayName: session.name } : {}),
                           rendezvousPolicy: 'licio_blind',
                           signedStub: payload.signedStub,
                           stubSignature: payload.stubSignature,
@@ -422,6 +436,29 @@ export function DirectoryRecordPanel({
                     ? t('privateRoom.record.registering', 'Registering…')
                     : t('privateRoom.record.register', 'Let Licio store a bootstrap record')}
                 </Button>
+                {/* THE LISTED PATH EXISTS HERE, or the creation wizard's copy is
+                    a promise nothing can keep.
+                    §21.3 sets `directory_mode` at CREATE time and only ever
+                    demotes it, so a record registered `unlisted` can never
+                    become listed — and this was the only later registration
+                    path. A creation whose directory step failed after the user
+                    chose "listed" was therefore told to "try listing it again
+                    later" with no way to do so. */}
+                <Checkbox
+                  label={t(
+                    'privateRoom.record.alsoList',
+                    'Also list this room publicly, under its name',
+                  )}
+                  checked={listPublicly}
+                  onCheckedChange={setListPublicly}
+                  disabled={busy !== null}
+                />
+                <p className="text-ink-muted text-xs" role="note">
+                  {t(
+                    'privateRoom.record.alsoListNote',
+                    'A listed room appears in Licio’s public directory by name. The room’s contents stay private either way, and you can delist it later.',
+                  )}
+                </p>
               </div>
             )}
           </div>

@@ -388,6 +388,66 @@ describe('§21 directory capability carried through the SEALED invite (WS-S.1.2b
       roomServerId: '11111111-1111-4111-8111-111111111111',
       bootstrapBlindId: payload.bootstrapBlindId,
     });
+    // …and it arrives UNVERIFIED. Nobody has checked it against this room yet:
+    // the handle rode someone else's invite and neither it nor the capability is
+    // bound to the room the invite was for.
+    expect(joiner.directoryStub?.verified).not.toBe(true);
+  });
+
+  it('will not put an UNVERIFIED handle into an invite of its own', async () => {
+    // The invite gate used to read "not quarantined" as permission, which is
+    // "nobody has proved this wrong yet" — and an invite-carried handle is
+    // unproved the moment it is stored, while the check that would prove it runs
+    // asynchronously in a panel the admin need never open. So a joiner promoted
+    // to admin could hand another room's stable bootstrap capability to
+    // everyone they invited, through entirely honest invitations.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Listed Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const payload = await founder.directoryStubPayload();
+    await founder.attachDirectoryStub({
+      roomServerId: '11111111-1111-4111-8111-111111111111',
+      bootstrapBlindId: payload.bootstrapBlindId,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const { request } = await prep.complete(
+      inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const { grant } = await founder.admitJoinRequest(invite, request);
+    if (!grant) throw new Error('expected a grant');
+    const joiner = await prep.completeJoin(parseJoinGrant(serializeJoinGrant(grant)) as never);
+
+    // The joiner holds the handle and invites someone else — it does NOT travel.
+    const next = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Cass',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const onward = await joiner.createInvite({
+      inviteePublicKey: next.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    expect(onward.invite.room_stub_ref).toBeUndefined();
+    expect(onward.invite.bootstrap_blind_id).toBeUndefined();
+
+    // …until the record verifies against THIS room, which is what releases it.
+    await joiner.markDirectoryStubVerified();
+    const afterCheck = await joiner.createInvite({
+      inviteePublicKey: next.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    expect(afterCheck.invite.room_stub_ref).toBe('11111111-1111-4111-8111-111111111111');
   });
 
   it('omits the handle for a room that registered no stub', async () => {

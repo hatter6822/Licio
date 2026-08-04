@@ -151,6 +151,22 @@ export interface StoredDirectoryStub {
    * one. Nothing propagates it while this is set.
    */
   readonly quarantined?: boolean;
+  /**
+   * Has the record this handle opens been CHECKED against this room?
+   *
+   * The absence of `quarantined` used to stand in for "fine", which is only true
+   * for a handle this device MINTED — the wizard registers the record and holds
+   * the room key that signed it. A handle that arrived in someone else's invite
+   * has been checked by nobody at the moment it is stored, and the check is
+   * asynchronous and lives in a panel the admin need never open: an invite
+   * issued before it finishes propagates another room's stable bootstrap
+   * capability through an otherwise honest member.
+   *
+   * So the default is UNVERIFIED and travel requires this flag, not merely the
+   * absence of the other one. `verifyDirectoryRecord` succeeding is what sets
+   * it.
+   */
+  readonly verified?: boolean;
 }
 
 /*

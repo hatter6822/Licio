@@ -236,7 +236,16 @@ room view's "Manage members & verify devices" toggle, all jsdom + axe tested):
   (`isCanonicalBase64Url`, `@licio/shared`), because a 32-byte key has four
   spellings that decode identically — and uniqueness is enforced on the TEXT
   while possession is proved against the BYTES, so without it one room is four
-  rows, each provable by the same holder.  The panel correspondingly treats a `/mine` miss
+  rows, each provable by the same holder.
+
+  A handle that arrives in someone else's invite is stored UNVERIFIED and does
+  not travel until `verifyDirectoryRecord` succeeds against this room. Neither
+  the handle nor the capability is bound to the invite's room, so an inviter who
+  belongs to room A can put A's handle into an invite for room B; treating "not
+  quarantined" as permission let a newly-joined admin forward that capability in
+  every invite they issued before the (asynchronous, panel-bound) check had run.
+  A handle this device minted is verified by provenance; quarantine revokes the
+  flag rather than only adding its own.  The panel correspondingly treats a `/mine` miss
   as "this account owns none", never as "the room has none", and offers
   registration only where absence is KNOWN (no stored handle, or a removal this
   device performed).  An unreadable record can be forgotten explicitly on this
