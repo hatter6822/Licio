@@ -455,7 +455,11 @@ export class DrizzleIdentityStore implements IdentityStore {
     return rebound.length > 0;
   }
 
-  async clearResumableVerification(userId: string, codeHash: string): Promise<boolean> {
+  async clearResumableVerification(
+    userId: string,
+    codeHash: string,
+    expectedSessionHash: string,
+  ): Promise<boolean> {
     if (!isUuid(userId)) return false;
     // The PRECONDITION IS THE WHERE CLAUSE: only a row that still HAS a
     // continuation is cleared, so of two concurrent completions exactly one
@@ -468,7 +472,7 @@ export class DrizzleIdentityStore implements IdentityStore {
         and(
           eq(mfaRecoveryCodes.userId, userId),
           eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
-          isNotNull(mfaRecoveryCodes.verificationSessionHash),
+          eq(mfaRecoveryCodes.verificationSessionHash, expectedSessionHash),
         ),
       )
       .returning({ id: mfaRecoveryCodes.id });

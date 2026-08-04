@@ -150,7 +150,10 @@ describe('authMiddleware', () => {
       async take() {
         throw new Error('redis down');
       },
-      async putIfPresent() {
+      async putIfVersion() {
+        throw new Error('redis down');
+      },
+      async rotate() {
         throw new Error('redis down');
       },
       async listForUser() {

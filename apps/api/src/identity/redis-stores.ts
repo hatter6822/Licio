@@ -88,6 +88,37 @@ export class RedisEphemeralStore implements EphemeralStore {
 }
 
 /**
+ * A stored session as it comes back off the wire, or `null` when it cannot be
+ * read.
+ *
+ * Validated at the trust boundary (zod on every boundary): a corrupt or tampered
+ * row is treated as no session — fail closed to unauthenticated, never a crash
+ * loop or a malformed record downstream.
+ *
+ * `version` defaults to 0 so a row written before the field existed still takes
+ * part in the compare-and-set rather than being unwritable.  Dropping it here
+ * would be worse than not having it: every CAS would compare against 0, so the
+ * first write would always win and the second would always be refused.
+ */
+function parseStoredSession(raw: string): StoredSession | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const candidate = parsed as { record?: unknown; expiresAt?: unknown; version?: unknown };
+    const record = sessionRecordSchema.parse(candidate.record);
+    if (typeof candidate.expiresAt !== 'number' || !Number.isFinite(candidate.expiresAt)) {
+      return null;
+    }
+    const version =
+      typeof candidate.version === 'number' && Number.isFinite(candidate.version)
+        ? candidate.version
+        : 0;
+    return { record, expiresAt: candidate.expiresAt, version };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Redis-backed session store.  The session record lives at `session:{tokenHash}`
  * with a PX TTL; a per-user set `session:user:{userId}` indexes a user's tokens so
  * the active-device list and bulk revocation are O(sessions-per-user).
@@ -131,18 +162,12 @@ export class RedisSessionStore implements SessionStore {
     // Validate at the trust boundary (zod on every boundary): a corrupt or
     // tampered row is DELETED and treated as no session — fail closed to
     // unauthenticated, never a crash loop or a malformed record downstream.
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      const candidate = parsed as { record?: unknown; expiresAt?: unknown };
-      const record = sessionRecordSchema.parse(candidate.record);
-      if (typeof candidate.expiresAt !== 'number' || !Number.isFinite(candidate.expiresAt)) {
-        throw new Error('bad expiresAt');
-      }
-      return { record, expiresAt: candidate.expiresAt };
-    } catch {
+    const parsed = parseStoredSession(raw);
+    if (parsed === null) {
       await this.#redis.del(this.#key(tokenHash));
       return null;
     }
+    return parsed;
   }
 
   async delete(tokenHash: string): Promise<void> {
@@ -152,21 +177,93 @@ export class RedisSessionStore implements SessionStore {
     await pipeline.exec();
   }
 
-  async putIfPresent(tokenHash: string, stored: StoredSession): Promise<boolean> {
-    // `SET … XX` writes ONLY when the key already exists, in one command — so a
-    // session deleted between this caller's read and its write is not brought
-    // back by the write (see the interface note; a resurrected session carries
-    // whatever privilege the edit was adding).  The per-user index needs no
-    // touch: the member is already there, and its TTL is only ever extended.
-    const ttlMs = Math.max(1, Math.ceil(stored.expiresAt - Date.now()));
-    const result = await this.#redis.set(
+  async putIfVersion(
+    tokenHash: string,
+    expectedVersion: number,
+    stored: StoredSession,
+  ): Promise<boolean> {
+    // ONE script, because this is three things that must agree: the key still
+    // exists, it is still at the version the caller read, and the per-user
+    // index outlives the session it indexes.
+    //
+    // `SET … XX` alone did the first only. It let a caller REVERT a change made
+    // since its read (a throttled activity slide put `mfa_verified: false` back
+    // over a landed MFA grant), and it extended the session's own TTL past the
+    // index's — after which `listForUser` could not see a live session, so it
+    // was invisible to the device list AND to bulk revocation, which is a
+    // session that cannot be signed out.
+    const written = await this.#redis.eval(
+      `local raw = redis.call('GET', KEYS[1])
+       if not raw then return 0 end
+       local ok, current = pcall(cjson.decode, raw)
+       local version = 0
+       if ok and type(current) == 'table' and type(current.version) == 'number' then
+         version = current.version
+       end
+       if version ~= tonumber(ARGV[2]) then return 0 end
+       redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+       redis.call('SADD', KEYS[2], ARGV[4])
+       redis.call('PEXPIRE', KEYS[2], ARGV[3], 'NX')
+       redis.call('PEXPIRE', KEYS[2], ARGV[3], 'GT')
+       return 1`,
+      2,
       this.#key(tokenHash),
-      JSON.stringify(stored),
-      'PX',
-      ttlMs,
-      'XX',
+      this.#userKey(stored.record.user_id),
+      JSON.stringify({ ...stored, version: expectedVersion + 1 }),
+      String(expectedVersion),
+      String(Math.max(1, Math.ceil(stored.expiresAt - Date.now()))),
+      tokenHash,
     );
-    return result === 'OK';
+    return Number(written) === 1;
+  }
+
+  async rotate(oldHash: string, newHash: string): Promise<StoredSession | null> {
+    // The record is read first only to learn WHICH user index to touch and what
+    // version to expect; the script re-checks that version, so a row that
+    // changed in between aborts the rotation rather than moving a stale copy.
+    const current = await this.get(oldHash);
+    if (current === null) return null;
+    const moved = { ...current, version: current.version + 1 };
+
+    // ONE script from there: the old token is gone and the new one exists, or
+    // neither is true.  As GETDEL-then-SET this could stop half way — the old
+    // key deleted, the successor never written — leaving the holder with NO
+    // session.  On the recovery path the continuation is settled BEFORE the
+    // rotation, so a spent last code was not resumable either: the lockout the
+    // continuation exists to prevent, one step further along.
+    //
+    // The index membership MOVES with the session (SREM old, SADD new) and its
+    // TTL is extended, never shortened — a session missing from that index is
+    // one the device list cannot show and bulk revocation cannot sign out.
+    const rotated = await this.#redis.eval(
+      `local raw = redis.call('GET', KEYS[1])
+       if not raw then return 0 end
+       local ok, parsed = pcall(cjson.decode, raw)
+       local version = 0
+       if ok and type(parsed) == 'table' and type(parsed.version) == 'number' then
+         version = parsed.version
+       end
+       if version ~= tonumber(ARGV[1]) then return 0 end
+       local ttl = redis.call('PTTL', KEYS[1])
+       if (not ttl) or ttl < 0 then ttl = tonumber(ARGV[3]) end
+       redis.call('SET', KEYS[2], ARGV[2], 'PX', ttl)
+       redis.call('DEL', KEYS[1])
+       redis.call('SREM', KEYS[3], ARGV[4])
+       redis.call('SADD', KEYS[3], ARGV[5])
+       redis.call('PEXPIRE', KEYS[3], ttl, 'NX')
+       redis.call('PEXPIRE', KEYS[3], ttl, 'GT')
+       return 1`,
+      3,
+      this.#key(oldHash),
+      this.#key(newHash),
+      this.#userKey(current.record.user_id),
+      String(current.version),
+      JSON.stringify(moved),
+      String(Math.max(1, Math.ceil(moved.expiresAt - Date.now()))),
+      oldHash,
+      newHash,
+    );
+    return Number(rotated) === 1 ? moved : null;
   }
 
   async take(tokenHash: string): Promise<StoredSession | null> {
@@ -177,14 +274,10 @@ export class RedisSessionStore implements SessionStore {
     const raw = await this.#redis.getdel(this.#key(tokenHash));
     if (!raw) return null;
     try {
-      const parsed: unknown = JSON.parse(raw);
-      const candidate = parsed as { record?: unknown; expiresAt?: unknown };
-      const record = sessionRecordSchema.parse(candidate.record);
-      if (typeof candidate.expiresAt !== 'number' || !Number.isFinite(candidate.expiresAt)) {
-        throw new Error('bad expiresAt');
-      }
-      await this.#redis.srem(this.#userKey(record.user_id), tokenHash);
-      return { record, expiresAt: candidate.expiresAt };
+      const parsed = parseStoredSession(raw);
+      if (parsed === null) throw new Error('unreadable session');
+      await this.#redis.srem(this.#userKey(parsed.record.user_id), tokenHash);
+      return parsed;
     } catch {
       // Corrupt row: the key is already gone, which is the same fail-closed
       // outcome `get` reaches by deleting it.  The user index entry is pruned

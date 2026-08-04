@@ -55,23 +55,30 @@ const MFA_STEP_MEMORY_MS = 90_000; // remember the used step for ~3 windows
 const RESUMABLE_VERIFICATION_WINDOW_MS = 15 * 60_000;
 
 /**
- * Is the verification this continuation names still UNFINISHED?
+ * May a DIFFERENT session take this continuation over?
  *
- * The only session that can answer is the one the continuation was spent for.
- * Alive and `mfa_verified` ⇒ the grant landed, and a single-use code has no
- * second grant to give.  Gone, or alive and unverified ⇒ it did not, and the
- * holder may finish it — which is the lockout this whole path exists to
- * prevent, since on the last code there is no other way back.
+ * Only when the session it names is GONE.  That session is the one thing that
+ * can answer both questions the takeover has to get right — did the grant land,
+ * and is anyone else already finishing it — because a claim REBINDS the row to
+ * the claimant, so an in-flight completion is a live named session.
+ *
+ * An earlier cut also allowed takeover from a session that was alive but not
+ * yet verified, on the reasoning that unverified means the grant had not
+ * landed.  It does, but it is not the only thing it can mean: it is equally
+ * what a claimant looks like in the instant between claiming and granting.  So
+ * A could claim, B could see A alive-and-unverified and rebind to itself, and
+ * both would then verify their own sessions from one single-use code.  It also
+ * bought nothing: while that session is alive its holder can finish the
+ * verification from it directly (the same-session arm), which is the case the
+ * resume path was written for.
  *
  * This deliberately does NOT ask whether the USER holds a verified session
- * anywhere.  That was the first cut and it read as evidence when it was not: a
- * verified session on a device the holder cannot reach says nothing about this
- * grant, and it permanently blocked a continuation their last code had paid
- * for.
+ * anywhere.  That cut read as evidence when it was not — a verified session on
+ * a device the holder cannot reach says nothing about this grant, and it
+ * permanently blocked a continuation their last code had paid for.
  */
-async function isUnfinished(services: IdentityServices, sessionHash: string): Promise<boolean> {
-  const stored = await services.sessions.get(sessionHash);
-  return stored === null || !stored.record.mfa_verified;
+async function isAbandoned(services: IdentityServices, sessionHash: string): Promise<boolean> {
+  return (await services.sessions.get(sessionHash)) === null;
 }
 
 const attemptsKey = (userId: string) => `mfaattempts:${userId}`;
@@ -261,7 +268,8 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
                 // SETTLED before the rotation that would otherwise hide it: the
                 // grant landed, so there is nothing left to resume, and the row
                 // is cleared while the session it names is still alive.
-                () => services.store.clearResumableVerification(auth.userId, matched),
+                () =>
+                  services.store.clearResumableVerification(auth.userId, matched, auth.tokenHash),
               );
             } catch (error) {
               // The code IS spent and recorded, and its continuation is pending:
@@ -347,11 +355,11 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
             resumable === null
               ? false
               : resumable.verificationSessionHash === auth.tokenHash ||
-                // DID THIS GRANT ALREADY LAND?  The one session that can answer
-                // is the one the continuation names: alive and verified means it
-                // landed and there is no second grant to give; gone, or alive
-                // and unverified, means it did not.
-                ((await isUnfinished(services, resumable.verificationSessionHash)) &&
+                // ABANDONED — the session it was spent for is GONE.  A claim
+                // rebinds the row to the claimant, so a live named session is
+                // either the holder (who can finish it themselves) or another
+                // request already finishing it; see `isAbandoned`.
+                ((await isAbandoned(services, resumable.verificationSessionHash)) &&
                   (await services.store.claimResumableVerification(
                     auth.userId,
                     presentedHash,
@@ -360,11 +368,16 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
                   )));
           if (resumable !== null && claimed) {
             try {
-              // The SAME ordering as a fresh consumption — grant, settle (which
-              // is also the claim that makes concurrent retries single-winner),
-              // then rotate.
+              // The SAME ordering as a fresh consumption — grant, settle, rotate
+              // — and the settle is conditional on THIS session still owning the
+              // continuation, so a request that lost it between the claim and
+              // here cannot report a completion it does not own.
               await grantVerification(services, auth.userId, auth.tokenHash, c, () =>
-                services.store.clearResumableVerification(auth.userId, presentedHash),
+                services.store.clearResumableVerification(
+                  auth.userId,
+                  presentedHash,
+                  auth.tokenHash,
+                ),
               );
             } catch (error) {
               // The session went away underneath us, or another request is

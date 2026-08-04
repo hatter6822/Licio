@@ -31,6 +31,21 @@ export interface StoredSession {
   record: SessionRecord;
   /** Sliding expiry instant (epoch ms); never exceeds the record's absolute cap. */
   expiresAt: number;
+  /**
+   * Bumped on every write — the handle a conditional write compares against.
+   *
+   * Every mutation here is read-modify-write over the WHOLE record, so two of
+   * them racing do not merge: the later write replaces the earlier one wholesale
+   * with a snapshot taken before it. That is not a lost update in the abstract —
+   * a throttled activity slide, holding a copy read just before an MFA grant,
+   * put `mfa_verified: false` back after the grant had landed, and the
+   * verification then rotated the REVERTED record and reported success. The
+   * recovery code was spent and no session ever became verified.
+   *
+   * A row written before this field existed reads as version 0, so a first
+   * conditional write against it still behaves.
+   */
+  version: number;
 }
 
 export interface SessionStore {
@@ -50,17 +65,34 @@ export interface SessionStore {
    */
   take(tokenHash: string): Promise<StoredSession | null>;
   /**
-   * Write ONLY if the session still exists; `false` when it does not.
+   * Write ONLY if the session is still there AND still at `expectedVersion`;
+   * `false` otherwise.  The stored version is bumped by the write.
    *
-   * Every mutation here is a read-then-write (`get`, edit the record, `put`),
-   * and a plain `put` does not care whether the row survived the gap.  So a
-   * concurrent rotation or revocation that deleted the session between the two
-   * was UNDONE by the write — it RESURRECTED the deleted session, carrying
-   * whatever privilege the edit was adding.  Two concurrent MFA verifications
-   * on one cookie ended with the rotated successor verified AND the old session
-   * back from the dead and verified: one single-use code, two live sessions.
+   * Existence alone was not enough, and both halves are load-bearing:
+   *
+   *  • WITHOUT the existence half, a mutation RESURRECTS a session a concurrent
+   *    rotation or sign-out deleted, restoring it with whatever privilege the
+   *    edit was adding.
+   *  • WITHOUT the version half, a mutation silently REVERTS one: these writes
+   *    replace the whole record, so a caller holding a snapshot read before
+   *    someone else's change puts that change back the way it was.  A throttled
+   *    activity slide did exactly that to an MFA grant — the verification then
+   *    rotated the reverted record and reported success, and the recovery code
+   *    was spent without any session becoming verified.
    */
-  putIfPresent(tokenHash: string, stored: StoredSession): Promise<boolean>;
+  putIfVersion(tokenHash: string, expectedVersion: number, stored: StoredSession): Promise<boolean>;
+  /**
+   * Move a session to a new token in ONE step, returning the moved record.
+   *
+   * The rotation is a hand-off and must not be able to stop half way. As
+   * `take` then `put` it could: the old key was already gone when the write of
+   * the successor failed, leaving the holder with NO session — and because the
+   * recovery continuation is settled before the rotation, a spent last code was
+   * no longer resumable either. That is the lockout the continuation exists to
+   * prevent, reintroduced one step further along. Atomically, a failure leaves
+   * the old session exactly where it was, still holding the grant.
+   */
+  rotate(oldHash: string, newHash: string): Promise<StoredSession | null>;
   listForUser(userId: string): Promise<Array<{ tokenHash: string; stored: StoredSession }>>;
   clear(): Promise<void>;
 }
@@ -97,13 +129,33 @@ export class InMemorySessionStore implements SessionStore {
     return stored;
   }
 
-  async putIfPresent(tokenHash: string, stored: StoredSession): Promise<boolean> {
-    // Test and write with NO `await` between — the same guarantee Redis's
-    // `SET … XX` gives, so a session deleted while the caller was editing its
-    // record is not brought back by the write.
-    if (!this.#byHash.has(tokenHash)) return false;
-    this.#byHash.set(tokenHash, stored);
+  async putIfVersion(
+    tokenHash: string,
+    expectedVersion: number,
+    stored: StoredSession,
+  ): Promise<boolean> {
+    // Test and write with NO `await` between — the same guarantee the Redis
+    // twin gets from a Lua script: a session deleted while the caller was
+    // editing it is not brought back, and one changed underneath the caller is
+    // not reverted to the copy they read.
+    const current = this.#byHash.get(tokenHash);
+    if (current === undefined || current.version !== expectedVersion) return false;
+    this.#byHash.set(tokenHash, { ...stored, version: expectedVersion + 1 });
     return true;
+  }
+
+  async rotate(oldHash: string, newHash: string): Promise<StoredSession | null> {
+    // One step: the old token is gone and the new one exists, or neither
+    // happened. No `await` between, so nothing observes the gap.
+    const stored = this.#byHash.get(oldHash);
+    if (stored === undefined) return null;
+    const moved = { ...stored, version: stored.version + 1 };
+    this.#byHash.delete(oldHash);
+    this.#byHash.set(newHash, moved);
+    const index = this.#byUser.get(stored.record.user_id);
+    index?.delete(oldHash);
+    index?.add(newHash);
+    return moved;
   }
 
   async listForUser(userId: string): Promise<Array<{ tokenHash: string; stored: StoredSession }>> {
@@ -164,7 +216,7 @@ export async function createSession(
     auth_assurance: { level: 'full', last_verified_at: iso(now) },
     absolute_expires_at: iso(absolute),
   });
-  await store.put(tokenHash, { record, expiresAt });
+  await store.put(tokenHash, { record, expiresAt, version: 0 });
   await enforceConcurrencyCap(store, input.userId, now);
   return { token, tokenHash, record, expiresAt, maxAgeSec: Math.ceil((expiresAt - now) / 1000) };
 }
@@ -210,6 +262,32 @@ export async function validateSession(
   return { tokenHash, record: stored.record };
 }
 
+/**
+ * Read-modify-write a session under the version CAS, retrying a lost race.
+ *
+ * These mutations edit ONE field of a whole-record snapshot, so two racing
+ * writers do not merge — the later one replaces the earlier wholesale. The CAS
+ * turns that silent revert into a visible miss, and the retry re-reads and
+ * re-applies the edit on top of whatever landed. Returns false only when the
+ * session is genuinely gone.
+ *
+ * Bounded: a caller that cannot win in a few attempts is contending with a
+ * writer far hotter than any real session, and looping forever inside a request
+ * is worse than reporting the miss.
+ */
+async function mutateSession(
+  store: SessionStore,
+  tokenHash: string,
+  edit: (stored: StoredSession) => StoredSession,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const stored = await store.get(tokenHash);
+    if (!stored) return false;
+    if (await store.putIfVersion(tokenHash, stored.version, edit(stored))) return true;
+  }
+  return false;
+}
+
 /** Sliding refresh of `last_active_at`, throttled to once per 5 minutes. */
 export async function touchSession(
   store: SessionStore,
@@ -219,16 +297,20 @@ export async function touchSession(
   const stored = await store.get(tokenHash);
   if (!stored) return;
   if (now - Date.parse(stored.record.last_active_at) < SESSION_POLICY.slideThrottleMs) return;
-  const ttl = stored.record.remember_me
-    ? SESSION_POLICY.rememberTtlMs
-    : SESSION_POLICY.defaultTtlMs;
-  const absolute = Date.parse(stored.record.absolute_expires_at);
-  // A slide must never RE-CREATE a session revoked mid-request (see
-  // `putIfPresent`) — sign-out would otherwise be undone by the next in-flight
-  // request that happened to be due a refresh.
-  await store.putIfPresent(tokenHash, {
-    record: { ...stored.record, last_active_at: iso(now) },
-    expiresAt: Math.min(now + ttl, absolute),
+  // Under the CAS, so a slide can neither RE-CREATE a session revoked
+  // mid-request nor REVERT a privilege granted since it read — it once put
+  // `mfa_verified: false` back over a landed MFA grant, from a copy read a
+  // moment earlier.
+  await mutateSession(store, tokenHash, (current) => {
+    const ttl = current.record.remember_me
+      ? SESSION_POLICY.rememberTtlMs
+      : SESSION_POLICY.defaultTtlMs;
+    const absolute = Date.parse(current.record.absolute_expires_at);
+    return {
+      ...current,
+      record: { ...current.record, last_active_at: iso(now) },
+      expiresAt: Math.min(now + ttl, absolute),
+    };
   });
 }
 
@@ -243,22 +325,23 @@ export async function rotateSession(
   now: number = Date.now(),
 ): Promise<CreatedSession | null> {
   const oldHash = sha256Hex(oldToken);
-  // TAKE the old session, do not merely read it.  A rotation is a hand-off and
-  // exactly one caller may perform it: two concurrent requests carrying the same
-  // cookie both passed a read, both wrote a successor, and one session became
-  // TWO live ones — a privilege transition that multiplies instead of moving.
-  // On the recovery-code path that was one single-use code granting MFA to two
-  // sessions, which is also how a stolen cookie replayed alongside the genuine
-  // request kept a session of its own.
+  // ONE STEP, and exactly one caller may take it.  This was a read, a write of
+  // the successor, then a delete of the old — which fails in both directions.
+  // Two concurrent requests carrying the same cookie both passed the read and
+  // both wrote a successor, so one session became TWO: a privilege transition
+  // that multiplies instead of moving (one single-use recovery code granting
+  // MFA twice; a stolen cookie replayed alongside the genuine request keeping a
+  // session of its own). Taking the old session first fixed that and opened the
+  // opposite hole — the old key was already gone when the successor's write
+  // failed, leaving the holder with NO session and, since the continuation is
+  // settled before this point, no way to resume a spent last code either.
   //
-  // The delete now precedes the write, so a failure loses the session rather
-  // than duplicating it: the caller signs in again, which is the right side to
-  // fail on for a privilege change.
-  const stored = await store.take(oldHash);
-  if (!stored) return null;
+  // `rotate` is both halves at once: after it, the old token is gone and the new
+  // one exists, or neither is true and the old session still holds the grant.
   const token = randomToken(32);
   const tokenHash = sha256Hex(token);
-  await store.put(tokenHash, stored);
+  const stored = await store.rotate(oldHash, tokenHash);
+  if (!stored) return null;
   return {
     token,
     tokenHash,
@@ -283,17 +366,14 @@ export async function markStepUp(
   tokenHash: string,
   now: number = Date.now(),
 ): Promise<void> {
-  const stored = await store.get(tokenHash);
-  if (!stored) return;
-  // Present at the WRITE too — see `putIfPresent`: a plain `put` would restore
-  // a session revoked while this one was being edited.
-  await store.putIfPresent(tokenHash, {
-    ...stored,
+  // Under the CAS — see `mutateSession`.
+  await mutateSession(store, tokenHash, (current) => ({
+    ...current,
     record: {
-      ...stored.record,
+      ...current.record,
       auth_assurance: { level: 'full', last_verified_at: iso(now) },
     },
-  });
+  }));
 }
 
 /**
@@ -315,20 +395,18 @@ export async function markMfaVerified(
   tokenHash: string,
   now: number = Date.now(),
 ): Promise<boolean> {
-  const stored = await store.get(tokenHash);
-  if (!stored) return false;
-  // …AND STILL PRESENT AT THE WRITE.  A plain `put` here resurrected a session
-  // that a concurrent rotation had already taken, handing the grant to a row
-  // that was supposed to be gone — so one recovery code left the rotated
-  // successor verified AND the old session back from the dead and verified.
-  return store.putIfPresent(tokenHash, {
-    ...stored,
+  // UNDER THE CAS.  A plain `put` here resurrected a session a concurrent
+  // rotation had already taken — handing the grant to a row that was supposed
+  // to be gone — and, in the other direction, let a concurrent activity slide
+  // put `mfa_verified: false` back over this very grant from a stale snapshot.
+  return mutateSession(store, tokenHash, (current) => ({
+    ...current,
     record: {
-      ...stored.record,
+      ...current.record,
       mfa_verified: true,
       auth_assurance: { level: 'full', last_verified_at: iso(now) },
     },
-  });
+  }));
 }
 
 /** Revoke all of a user's sessions except `exceptHash`; returns the revoked count. */

@@ -52,8 +52,8 @@ describe('clearResumableVerification', () => {
     // both complete the verification.
     const store = await storeWithSpentCode();
     const results = await Promise.all([
-      store.clearResumableVerification(USER, CODE),
-      store.clearResumableVerification(USER, CODE),
+      store.clearResumableVerification(USER, CODE, 'session-a'),
+      store.clearResumableVerification(USER, CODE, 'session-a'),
     ]);
     expect(results.filter(Boolean)).toHaveLength(1);
     expect(await store.findResumableVerification(USER, CODE, SINCE)).toBeNull();
@@ -61,7 +61,7 @@ describe('clearResumableVerification', () => {
 
   it('reports false when there was no continuation to clear', async () => {
     const store = await storeWithSpentCode();
-    expect(await store.clearResumableVerification(USER, OTHER)).toBe(false);
+    expect(await store.clearResumableVerification(USER, OTHER, 'session-a')).toBe(false);
   });
 });
 

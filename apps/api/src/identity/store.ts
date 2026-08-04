@@ -200,7 +200,15 @@ export interface IdentityStore {
    * of them removes it — the loser is told to sign in again, which by then is
    * true, because the winner's rotation has replaced the session they hold.
    */
-  clearResumableVerification(userId: string, codeHash: string): Promise<boolean>;
+  clearResumableVerification(
+    userId: string,
+    codeHash: string,
+    /** Clear only while the row still names THIS session.  Ownership can change
+     *  between a claim and the completion it authorises, and a settle that
+     *  ignored that would let a request report a completion another session now
+     *  owns. */
+    expectedSessionHash: string,
+  ): Promise<boolean>;
   /**
    * COMPARE-AND-SET: take a continuation over, only while it still names
    * `expectedSessionHash`.
@@ -427,10 +435,17 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     return { remaining: pending.remaining, verificationSessionHash: pending.sessionHash };
   }
 
-  async clearResumableVerification(userId: string, codeHash: string): Promise<boolean> {
+  async clearResumableVerification(
+    userId: string,
+    codeHash: string,
+    expectedSessionHash: string,
+  ): Promise<boolean> {
     // Test and delete with NO `await` between — the same single-winner
     // guarantee the conditional DELETE gives on a single-threaded runtime.
-    return this.#pendingVerifications.delete(`${userId}:${codeHash}`);
+    const key = `${userId}:${codeHash}`;
+    const pending = this.#pendingVerifications.get(key);
+    if (pending === undefined || pending.sessionHash !== expectedSessionHash) return false;
+    return this.#pendingVerifications.delete(key);
   }
 
   async claimResumableVerification(

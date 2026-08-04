@@ -323,23 +323,28 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     // The grant fails after the unit commits.
     // `markMfaVerified` is a free function over the store's `put`, so the fault
     // is injected there — the first write of the verified flag fails.
-    // The grant is a CONDITIONAL write (`putIfPresent`) — it must not resurrect
-    // a session a concurrent rotation deleted — so that is where the fault goes.
-    const realPut = services.sessions.putIfPresent.bind(services.sessions);
+    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
+    // resurrect a session a concurrent rotation deleted nor revert one changed
+    // since it read — so that is where the fault goes.
+    const realPut = services.sessions.putIfVersion.bind(services.sessions);
     let failed = false;
-    services.sessions.putIfPresent = async (tokenHash: string, record: StoredSession) => {
+    services.sessions.putIfVersion = async (
+      tokenHash: string,
+      expectedVersion: number,
+      record: StoredSession,
+    ) => {
       if (!failed && record.record.mfa_verified === true) {
         failed = true;
         throw new Error('session store unavailable');
       }
-      return realPut(tokenHash, record);
+      return realPut(tokenHash, expectedVersion, record);
     };
     const attempt = await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
       headers: headers(`__Host-sid=${sid3}`),
       body: JSON.stringify({ code: recovery }),
     });
-    services.sessions.putIfPresent = realPut;
+    services.sessions.putIfVersion = realPut;
     expect(attempt.status).toBeGreaterThanOrEqual(500);
     expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
 
@@ -486,23 +491,28 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     // Spend the code with the grant failing, leaving the continuation pending
     // AND its session still alive — which is what makes both retries take the
     // same-session arm.
-    // The grant is a CONDITIONAL write (`putIfPresent`) — it must not resurrect
-    // a session a concurrent rotation deleted — so that is where the fault goes.
-    const realPut = services.sessions.putIfPresent.bind(services.sessions);
+    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
+    // resurrect a session a concurrent rotation deleted nor revert one changed
+    // since it read — so that is where the fault goes.
+    const realPut = services.sessions.putIfVersion.bind(services.sessions);
     let failed = false;
-    services.sessions.putIfPresent = async (tokenHash: string, record: StoredSession) => {
+    services.sessions.putIfVersion = async (
+      tokenHash: string,
+      expectedVersion: number,
+      record: StoredSession,
+    ) => {
       if (!failed && record.record.mfa_verified === true) {
         failed = true;
         throw new Error('session store unavailable');
       }
-      return realPut(tokenHash, record);
+      return realPut(tokenHash, expectedVersion, record);
     };
     await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
       headers: headers(`__Host-sid=${live}`),
       body: JSON.stringify({ code: recovery }),
     });
-    services.sessions.putIfPresent = realPut;
+    services.sessions.putIfVersion = realPut;
     expect(await sessionMfaVerified(`__Host-sid=${live}`)).toBe(false);
 
     // Two retries, same cookie, at once.
@@ -556,23 +566,28 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     });
 
     // Spend the code with the grant failing, then lose that session.
-    // The grant is a CONDITIONAL write (`putIfPresent`) — it must not resurrect
-    // a session a concurrent rotation deleted — so that is where the fault goes.
-    const realPut = services.sessions.putIfPresent.bind(services.sessions);
+    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
+    // resurrect a session a concurrent rotation deleted nor revert one changed
+    // since it read — so that is where the fault goes.
+    const realPut = services.sessions.putIfVersion.bind(services.sessions);
     let failed = false;
-    services.sessions.putIfPresent = async (tokenHash: string, record: StoredSession) => {
+    services.sessions.putIfVersion = async (
+      tokenHash: string,
+      expectedVersion: number,
+      record: StoredSession,
+    ) => {
       if (!failed && record.record.mfa_verified === true) {
         failed = true;
         throw new Error('session store unavailable');
       }
-      return realPut(tokenHash, record);
+      return realPut(tokenHash, expectedVersion, record);
     };
     await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
       headers: headers(`__Host-sid=${doomed}`),
       body: JSON.stringify({ code: recovery }),
     });
-    services.sessions.putIfPresent = realPut;
+    services.sessions.putIfVersion = realPut;
     await services.sessions.delete(sha256Hex(doomed));
 
     // A newly authenticated laptop finishes it, even though the phone is
@@ -620,23 +635,28 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     });
 
     // Spend the code with the grant failing, then destroy that session.
-    // The grant is a CONDITIONAL write (`putIfPresent`) — it must not resurrect
-    // a session a concurrent rotation deleted — so that is where the fault goes.
-    const realPut = services.sessions.putIfPresent.bind(services.sessions);
+    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
+    // resurrect a session a concurrent rotation deleted nor revert one changed
+    // since it read — so that is where the fault goes.
+    const realPut = services.sessions.putIfVersion.bind(services.sessions);
     let failed = false;
-    services.sessions.putIfPresent = async (tokenHash: string, record: StoredSession) => {
+    services.sessions.putIfVersion = async (
+      tokenHash: string,
+      expectedVersion: number,
+      record: StoredSession,
+    ) => {
       if (!failed && record.record.mfa_verified === true) {
         failed = true;
         throw new Error('session store unavailable');
       }
-      return realPut(tokenHash, record);
+      return realPut(tokenHash, expectedVersion, record);
     };
     await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
       headers: headers(`__Host-sid=${doomed}`),
       body: JSON.stringify({ code: recovery }),
     });
-    services.sessions.putIfPresent = realPut;
+    services.sessions.putIfVersion = realPut;
     await services.sessions.delete(sha256Hex(doomed));
     // …and the enrolling session too, so this is genuinely the situation the
     // takeover arm exists for: the user holds NO verified session, which is the
@@ -702,23 +722,28 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     });
 
     // The grant fails after the unit commits: the code is spent and pending.
-    // The grant is a CONDITIONAL write (`putIfPresent`) — it must not resurrect
-    // a session a concurrent rotation deleted — so that is where the fault goes.
-    const realPut = services.sessions.putIfPresent.bind(services.sessions);
+    // The grant is a CONDITIONAL write (`putIfVersion`) — it must neither
+    // resurrect a session a concurrent rotation deleted nor revert one changed
+    // since it read — so that is where the fault goes.
+    const realPut = services.sessions.putIfVersion.bind(services.sessions);
     let failed = false;
-    services.sessions.putIfPresent = async (tokenHash: string, record: StoredSession) => {
+    services.sessions.putIfVersion = async (
+      tokenHash: string,
+      expectedVersion: number,
+      record: StoredSession,
+    ) => {
       if (!failed && record.record.mfa_verified === true) {
         failed = true;
         throw new Error('session store unavailable');
       }
-      return realPut(tokenHash, record);
+      return realPut(tokenHash, expectedVersion, record);
     };
     await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
       headers: headers(`__Host-sid=${sid3}`),
       body: JSON.stringify({ code: recovery }),
     });
-    services.sessions.putIfPresent = realPut;
+    services.sessions.putIfVersion = realPut;
 
     // …then MFA is re-enrolled from elsewhere, which replaces the code set.
     await services.store.setAuth(userId, {

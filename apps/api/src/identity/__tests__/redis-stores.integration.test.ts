@@ -152,6 +152,105 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     expect((await store.listForUser(userId))[0]?.tokenHash).toBe(b.tokenHash);
   });
 
+  it('RedisSessionStore: a slid session stays DISCOVERABLE — the index outlives it', async () => {
+    // `SET … XX` extended the session key and left the per-user index on its
+    // ORIGINAL TTL. For a user with one session the index could then expire
+    // while the session was still valid, and `listForUser` is what the device
+    // list, `revokeOthersForUser` and bulk revocation all read — so the session
+    // became invisible to every one of them. A live session nobody can sign out
+    // is the part that matters.
+    //
+    // Only real Redis has key expiry at all; the in-memory twin has no index TTL
+    // to get wrong.
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
+    const userId = '77777777-7777-4777-8777-777777777777';
+    const a = await createSession(store, {
+      userId,
+      authMethod: 'webauthn',
+      credentialRef: 'c',
+      deviceLabel: 'dev',
+      rememberMe: false,
+    });
+
+    // Squeeze the index down to a hair, as a short-lived session would have.
+    const userKey = `${SESSION_PREFIX}user:${userId}`;
+    await (redis as IORedis).pexpire(userKey, 40);
+
+    // A slide writes the session further out…
+    const read = (await store.get(a.tokenHash)) as StoredSession;
+    expect(
+      await store.putIfVersion(a.tokenHash, read.version, {
+        ...read,
+        expiresAt: Date.now() + 60_000,
+      }),
+    ).toBe(true);
+
+    // …and carries the index with it, rather than letting it lapse underneath.
+    await new Promise((r) => setTimeout(r, 120));
+    expect(await store.get(a.tokenHash)).not.toBeNull();
+    expect(await store.listForUser(userId)).toHaveLength(1);
+  });
+
+  it('RedisSessionStore: putIfVersion() refuses a STALE version', async () => {
+    // The half `SET … XX` cannot give, and the half most likely to be wrong
+    // here: the version is read back out of the stored JSON inside Lua, so a
+    // decode that quietly yielded nil would compare 0 against 0 and let every
+    // write through while looking correct.
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
+    const userId = '99999999-9999-4999-8999-999999999999';
+    const a = await createSession(store, {
+      userId,
+      authMethod: 'webauthn',
+      credentialRef: 'c',
+      deviceLabel: 'dev',
+      rememberMe: false,
+    });
+
+    const stale = (await store.get(a.tokenHash)) as StoredSession;
+    // Someone else's write lands first…
+    expect(
+      await store.putIfVersion(a.tokenHash, stale.version, {
+        ...stale,
+        record: { ...stale.record, mfa_verified: true },
+      }),
+    ).toBe(true);
+    expect((await store.get(a.tokenHash))?.version).toBe(stale.version + 1);
+
+    // …and the stale snapshot cannot put its pre-grant copy back.
+    expect(await store.putIfVersion(a.tokenHash, stale.version, stale)).toBe(false);
+    expect((await store.get(a.tokenHash))?.record.mfa_verified).toBe(true);
+  });
+
+  it('RedisSessionStore: rotate() moves the session and its index entry, atomically', async () => {
+    // Half a rotation is worse than none: as GETDEL-then-SET, a failure between
+    // them left the holder with no session at all — and on the recovery path,
+    // where the continuation is settled BEFORE the rotation, no way to resume a
+    // spent last code either.
+    const store = new RedisSessionStore(redis as IORedis, SESSION_PREFIX);
+    const userId = '88888888-8888-4888-8888-888888888888';
+    const a = await createSession(store, {
+      userId,
+      authMethod: 'webauthn',
+      credentialRef: 'c',
+      deviceLabel: 'dev',
+      rememberMe: false,
+    });
+
+    const moved = await store.rotate(a.tokenHash, 'newhash-rotate-test');
+    expect(moved).not.toBeNull();
+    expect(await store.get(a.tokenHash)).toBeNull(); // old gone
+    expect(await store.get('newhash-rotate-test')).not.toBeNull(); // new there
+    // The index followed, so the moved session is still discoverable — and the
+    // stale member is not left behind to be pruned later.
+    const listed = await store.listForUser(userId);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.tokenHash).toBe('newhash-rotate-test');
+
+    // A rotation of something that is not there moves nothing.
+    expect(await store.rotate('absent-hash', 'another')).toBeNull();
+    expect(await store.get('another')).toBeNull();
+  });
+
   it('RedisSessionStore: take() hands the session to exactly ONE caller', async () => {
     // A rotation is a hand-off, and `take` is what makes it one. Only a real
     // Redis proves it: GETDEL is a single command, whereas the GET+DEL pair it
@@ -173,7 +272,7 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     expect(await store.listForUser(userId)).toHaveLength(0);
   });
 
-  it('RedisSessionStore: putIfPresent() does not RESURRECT a deleted session', async () => {
+  it('RedisSessionStore: putIfVersion() refuses a deleted session and a stale version', async () => {
     // Every session mutation is read-then-write, and a plain SET would recreate
     // a session that a concurrent rotation or sign-out had removed — restoring
     // it with whatever privilege the edit was adding. `SET … XX` cannot.
@@ -190,7 +289,7 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
 
     // Present ⇒ the write lands and says so.
     expect(
-      await store.putIfPresent(a.tokenHash, {
+      await store.putIfVersion(a.tokenHash, read.version, {
         ...read,
         record: { ...read.record, mfa_verified: true },
       }),
@@ -199,7 +298,7 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
 
     // Gone ⇒ the write finds nothing, and does not bring it back.
     await store.delete(a.tokenHash);
-    expect(await store.putIfPresent(a.tokenHash, read)).toBe(false);
+    expect(await store.putIfVersion(a.tokenHash, read.version, read)).toBe(false);
     expect(await store.get(a.tokenHash)).toBeNull();
   });
 
