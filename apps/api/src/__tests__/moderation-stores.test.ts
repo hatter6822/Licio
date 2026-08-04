@@ -329,10 +329,16 @@ describe('InMemoryAccountBlockStore', () => {
     expect(await store.blockedEitherWay(B, C)).toBe(false); // unrelated
     expect([...(await store.blockedSetFor(A))].sort()).toEqual([B, C].sort());
     expect([...(await store.blockedSetFor(B))]).toEqual([A]); // blocked-by direction
-    // Pagination: newest first, afterCreatedAt cursor.
+    // Pagination: newest first, (createdAt, blockId) keyset cursor.
     const all = await store.listByBlocker(A, null, 10);
     expect(all.length).toBe(2);
-    const next = await store.listByBlocker(A, all[0]?.createdAt ?? null, 10);
+    const anchor = all[0];
+    if (anchor === undefined) throw new Error('expected a first row to page from');
+    const next = await store.listByBlocker(
+      A,
+      { createdAt: anchor.createdAt, blockId: anchor.blockId },
+      10,
+    );
     expect(next.length).toBe(1);
     // Owner guards.
     expect(await store.delete(first.blockId, B)).toBe(false); // not owner
@@ -340,6 +346,37 @@ describe('InMemoryAccountBlockStore', () => {
     expect(await store.delete(first.blockId, A)).toBe(true);
     expect(await store.findPair(A, B)).toBeNull();
     expect(await store.getById('missing')).toBeNull();
+  });
+
+  it('pages rows that share a millisecond without dropping any', async () => {
+    // The clock above ADVANCES between inserts, so no two rows ever tie — which
+    // is why a timestamp-only cursor looked correct for as long as it did.  Here
+    // the clock is frozen: every block is created in the same millisecond, which
+    // is what "blocked several accounts in one sitting" actually looks like, and
+    // what `created_at` (millisecond resolution) records.
+    const store = new InMemoryAccountBlockStore(() => START);
+    const targets = Array.from(
+      { length: 5 },
+      (_, index) => `00000000-0000-4000-8000-00000000000${index}`,
+    );
+    for (const target of targets) await store.insert(A, target);
+
+    const seen: string[] = [];
+    let cursor: { createdAt: string; blockId: string } | null = null;
+    for (let page = 0; page < 10; page++) {
+      const rows = await store.listByBlocker(A, cursor, 2);
+      if (rows.length === 0) break;
+      for (const row of rows) seen.push(row.blockedUserId);
+      const last = rows[rows.length - 1];
+      if (last === undefined) break;
+      cursor = { createdAt: last.createdAt, blockId: last.blockId };
+    }
+
+    // Without the id in the cursor this yields 2 of 5: the first page ends on a
+    // row whose timestamp every remaining row also has, so `createdAt < cursor`
+    // excludes all of them at once and the walk stops one page in.
+    expect(seen.length).toBe(targets.length);
+    expect([...seen].sort()).toEqual([...targets].sort());
   });
 });
 

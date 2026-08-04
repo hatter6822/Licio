@@ -491,9 +491,13 @@ export interface AccountBlockStore {
   getById(blockId: string): Promise<AccountBlockRecord | null>;
   delete(blockId: string, ownerUserId: string): Promise<boolean>;
   findPair(blockerUserId: string, blockedUserId: string): Promise<AccountBlockRecord | null>;
+  /** Keyset page over `(createdAt, blockId)` DESC — the id is not decoration:
+   *  `created_at` is millisecond-resolution, so two blocks made in the same
+   *  millisecond compare EQUAL, and a timestamp-only cursor drops whichever of
+   *  them the page did not end on. */
   listByBlocker(
     blockerUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly blockId: string } | null,
     limit: number,
   ): Promise<AccountBlockRecord[]>;
   /** True when EITHER user has blocked the other (bilateral enforcement). */
@@ -512,9 +516,10 @@ export interface AccountMuteStore {
   getById(muteId: string): Promise<AccountMuteRecord | null>;
   delete(muteId: string, ownerUserId: string): Promise<boolean>;
   findPair(muterUserId: string, mutedUserId: string): Promise<AccountMuteRecord | null>;
+  /** Keyset page over `(createdAt, muteId)` DESC — see `listByBlocker`. */
   listByMuter(
     muterUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly muteId: string } | null,
     limit: number,
   ): Promise<AccountMuteRecord[]>;
   /** Active (non-expired at `nowIso`) muted-user ids for the muter. */
@@ -671,8 +676,32 @@ export interface EvidenceDecisionStore {
 // In-memory adapters.
 // ---------------------------------------------------------------------------
 
-function afterCreated<T extends { createdAt: string }>(rows: T[], after: string | null): T[] {
-  return after === null ? rows : rows.filter((r) => r.createdAt < after);
+/**
+ * Descending keyset page over `(createdAt, id)`.
+ *
+ * The id half is load-bearing.  This compared the timestamp ALONE, which is a
+ * page boundary only while no two rows share one — and `created_at` is
+ * millisecond resolution, so two blocks (or mutes) created in the same
+ * millisecond compare equal and `createdAt < after` excludes BOTH.  Whichever
+ * one the page did not end on was dropped from the listing permanently, and
+ * the page came back short, which is how the caller decides it reached the end.
+ */
+function afterKeyset<T extends { createdAt: string }>(
+  rows: T[],
+  after: { createdAt: string; id: string } | null,
+  idOf: (row: T) => string,
+): T[] {
+  if (after === null) return rows;
+  return rows.filter(
+    (r) => r.createdAt < after.createdAt || (r.createdAt === after.createdAt && idOf(r) < after.id),
+  );
+}
+
+/** The same DESC order the keyset predicate assumes; they must not diverge. */
+function byCreatedThenIdDesc<T extends { createdAt: string }>(
+  idOf: (row: T) => string,
+): (a: T, b: T) => number {
+  return (a, b) => b.createdAt.localeCompare(a.createdAt) || idOf(b).localeCompare(idOf(a));
 }
 
 export class InMemoryModerationCaseStore implements ModerationCaseStore, InMemoryRollback {
@@ -1236,13 +1265,18 @@ export class InMemoryAccountBlockStore implements AccountBlockStore {
   }
   async listByBlocker(
     blockerUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly blockId: string } | null,
     limit: number,
   ): Promise<AccountBlockRecord[]> {
+    const idOf = (r: AccountBlockRecord) => r.blockId;
     const rows = [...this.#rows.values()]
       .filter((r) => r.blockerUserId === blockerUserId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return afterCreated(rows, afterCreatedAt)
+      .sort(byCreatedThenIdDesc(idOf));
+    return afterKeyset(
+      rows,
+      after === null ? null : { createdAt: after.createdAt, id: after.blockId },
+      idOf,
+    )
       .slice(0, limit)
       .map((r) => ({ ...r }));
   }
@@ -1315,13 +1349,18 @@ export class InMemoryAccountMuteStore implements AccountMuteStore {
   }
   async listByMuter(
     muterUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly muteId: string } | null,
     limit: number,
   ): Promise<AccountMuteRecord[]> {
+    const idOf = (r: AccountMuteRecord) => r.muteId;
     const rows = [...this.#rows.values()]
       .filter((r) => r.muterUserId === muterUserId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return afterCreated(rows, afterCreatedAt)
+      .sort(byCreatedThenIdDesc(idOf));
+    return afterKeyset(
+      rows,
+      after === null ? null : { createdAt: after.createdAt, id: after.muteId },
+      idOf,
+    )
       .slice(0, limit)
       .map((r) => ({ ...r }));
   }

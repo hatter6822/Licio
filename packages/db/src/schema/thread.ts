@@ -15,7 +15,8 @@
 // `dormant`, `caution`) was REPLACED via enum recreation with a USING map
 // (empty|emerging→active, dormant→archived, caution→elevated), so this file
 // declares exactly the canonical values.
-import { index, integer, pgEnum, pgTable, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { index, integer, pgEnum, pgTable, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { rooms } from './room.js';
 import { stories } from './story.js';
 
@@ -57,8 +58,8 @@ export const threads = pgTable(
       .notNull()
       .default('active'),
     safetyState: threadSafetyStateEnum('safety_state').notNull().default('normal'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     /** A story may host multiple thread branches (WS-G.1.1 acceptance).  Its

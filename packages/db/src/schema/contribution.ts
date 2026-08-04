@@ -19,18 +19,8 @@
 // Author deletion tombstones: `user_id` is SET NULL so thread integrity
 // survives account deletion (WS-G.1.2a; the WS-D.2.4 anonymize hook).
 import { sql } from 'drizzle-orm';
-import {
-  check,
-  index,
-  jsonb,
-  pgEnum,
-  pgTable,
-  text,
-  timestamp,
-  uniqueIndex,
-  uuid,
-} from 'drizzle-orm/pg-core';
-import { tsvector } from './_custom.js';
+import { check, index, jsonb, pgEnum, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { instant, tsvector } from './_custom.js';
 import { claims } from './claim.js';
 import { threads } from './thread.js';
 import { users } from './user.js';
@@ -101,9 +91,9 @@ export const contributions = pgTable(
      *  it can no longer be challenged (steward unsettle / a material edit
      *  clears it).  A separate column, NEVER a dispute-status value: the row
      *  still reads `validated` on every existing wire/ranking/search surface. */
-    settledAt: timestamp('settled_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    settledAt: instant('settled_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
     /**
      * WS-F.3.1a generated full-text column (unified public-content search).
      * Body-only at weight B — a generated column can reference only its OWN
@@ -177,7 +167,7 @@ export const contributionEditHistory = pgTable(
     previousBody: text('previous_body').notNull(),
     previousCitations: jsonb('previous_citations').$type<unknown[]>().notNull(),
     previousMetadata: jsonb('previous_metadata').$type<Record<string, unknown>>().notNull(),
-    editedAt: timestamp('edited_at', { withTimezone: true }).notNull().defaultNow(),
+    editedAt: instant('edited_at').notNull().defaultNow(),
   },
   (t) => [index('contribution_edit_history_contribution_idx').on(t.contributionId, t.editedAt)],
 );

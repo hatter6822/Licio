@@ -13,7 +13,7 @@ import {
   type IdentityServices,
   setIdentityServices,
 } from '../identity/services.js';
-import { createSession, type StoredSession } from '../identity/sessions.js';
+import { createSession, hasVerifiedSession, type StoredSession } from '../identity/sessions.js';
 import { base32Decode, hashRecoveryCode, totp } from '../identity/totp.js';
 import { signupCaptcha } from './pow-test-helpers.js';
 
@@ -379,6 +379,76 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect(afterRotation.status).toBe(400);
   });
 
+  it('does not resurrect a continuation whose SETTLE failed after the grant landed', async () => {
+    // The window the settle was supposed to close, with the settle failing.
+    //
+    // `finishMfa` commits the consumption, grants in Redis, and ROTATES — which
+    // deletes the session the continuation names — and only then does the route
+    // clear the row.  If that clear fails, the continuation is left pointing at
+    // a session that no longer exists, which is indistinguishable from "the
+    // grant never landed": another primary-authenticated session adopts it and
+    // a single-use recovery code verifies a second session.
+    const { app, sid } = await signup('mfasettle');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
+      .recovery_codes[0] as string;
+    const userId = (
+      await services.sessions.get(sha256Hex(cookie(confirm, '__Host-sid').split('=')[1] as string))
+    )?.record.user_id as string;
+    const { token: sidA } = await createSession(services.sessions, {
+      userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'first',
+      rememberMe: false,
+    });
+
+    // The verification SUCCEEDS; only the settle that follows it fails.
+    const realClear = services.store.clearResumableVerification.bind(services.store);
+    services.store.clearResumableVerification = async () => {
+      throw new Error('database unavailable');
+    };
+    const verified = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${sidA}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    services.store.clearResumableVerification = realClear;
+    // The request failed, but the grant is real: Redis holds a verified,
+    // rotated session and the continuation was never cleared.
+    expect(verified.status).toBeGreaterThanOrEqual(500);
+    expect(
+      await hasVerifiedSession(services.sessions, userId),
+      'the grant landed even though the settle did not',
+    ).toBe(true);
+
+    // A SECOND session now presents the same spent code.  The session the
+    // continuation names is gone (the rotation deleted it), so the takeover arm
+    // is wide open on every check except the one that matters: this user is
+    // already verified, and a spent code has no second grant to give.
+    const { token: sidB } = await createSession(services.sessions, {
+      userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'second',
+      rememberMe: false,
+    });
+    const second = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${sidB}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    expect(second.status).toBe(400);
+    expect(await sessionMfaVerified(`__Host-sid=${sidB}`)).toBe(false);
+  });
+
   it('lets only ONE session adopt an abandoned continuation', async () => {
     // Two primary-authenticated sessions can both find the original session gone
     // and both conclude they may finish it — and a code that is single-use by
@@ -423,6 +493,12 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     });
     services.sessions.put = realPut;
     await services.sessions.delete(sha256Hex(doomed));
+    // …and the enrolling session too, so this is genuinely the situation the
+    // takeover arm exists for: the user holds NO verified session, which is the
+    // lockout the resume path is there to prevent.  While one survives there is
+    // nothing to rescue, and a spent code is simply spent — which is what stops
+    // a continuation whose settle failed from granting a second time.
+    await services.sessions.delete(sha256Hex(sid2.split('=')[1] as string));
 
     // Two fresh sessions race to adopt it.
     const tokens = await Promise.all([

@@ -18,17 +18,8 @@
 // shell id, and the rendezvous record is DELIBERATELY un-linkable to any room
 // (the server cannot map a blind id to a room/account/CID — §15.3.1).
 import { sql } from 'drizzle-orm';
-import {
-  check,
-  index,
-  jsonb,
-  pgEnum,
-  pgTable,
-  text,
-  timestamp,
-  uniqueIndex,
-  uuid,
-} from 'drizzle-orm/pg-core';
+import { check, index, jsonb, pgEnum, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { roomDirectoryModeEnum, rooms } from './room.js';
 import { users } from './user.js';
 
@@ -107,8 +98,8 @@ export const privateRoomStubs = pgTable(
     createdByAccountId: uuid('created_by_account_id').references(() => users.userId, {
       onDelete: 'set null',
     }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     /** At most one stub per P2P room shell — enforced STRUCTURALLY (unique),
@@ -183,8 +174,8 @@ export const privateRendezvousRecords = pgTable(
     /** Sealed under `rendezvous_key`; the server never decodes it. */
     encryptedAnnouncement: text('encrypted_announcement').notNull(),
     /** Short TTL (5–30 min); expired rows are never returned + are swept. */
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: instant('expires_at').notNull(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     /** Poll-by-room-blind-id; the only query shape the rendezvous service needs. */

@@ -21,10 +21,10 @@ import {
   pgSchema,
   primaryKey,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { users } from './user.js';
 
 export const knomosisSchema = pgSchema('knomosis');
@@ -52,17 +52,15 @@ export const roomModelStatusEnum = knomosisSchema.enum('room_model_status', [
   'superseded',
 ]);
 
-const tz = (name: string) => timestamp(name, { withTimezone: true });
-
 /** The single elected-steward seat per room (WS-U.1.1a; SPEC §16.6). */
 export const roomStewardSeats = knomosisSchema.table('room_steward_seat', {
   roomId: uuid('room_id').primaryKey(), // soft ref to public.rooms (isolation)
   holderUserId: uuid('holder_user_id').references(() => users.userId, { onDelete: 'set null' }),
-  termStart: tz('term_start').notNull().defaultNow(),
-  termEnd: tz('term_end').notNull(),
+  termStart: instant('term_start').notNull().defaultNow(),
+  termEnd: instant('term_end').notNull(),
   bootstrap: boolean('bootstrap').notNull().default(true),
   currentElectionId: uuid('current_election_id'), // soft intra-context ref
-  updatedAt: tz('updated_at').notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 export type RoomStewardSeatRow = typeof roomStewardSeats.$inferSelect;
 
@@ -73,8 +71,8 @@ export const stewardElections = knomosisSchema.table(
     electionId: uuid('election_id').primaryKey().defaultRandom(),
     roomId: uuid('room_id').notNull(), // soft ref
     status: stewardElectionStatusEnum('status').notNull().default('scheduled'),
-    opensAt: tz('opens_at').notNull(),
-    closesAt: tz('closes_at').notNull(),
+    opensAt: instant('opens_at').notNull(),
+    closesAt: instant('closes_at').notNull(),
     weightModel: text('weight_model').notNull().default('one_civic_account_one_vote'),
     /** The turnout electorate, FROZEN at open — mirroring `eligible_count` on
      *  the ratification vote.  The settle tally divides by this, not by a fresh
@@ -84,8 +82,8 @@ export const stewardElections = knomosisSchema.table(
     winnerUserId: uuid('winner_user_id').references(() => users.userId, { onDelete: 'set null' }),
     tally: jsonb('tally'), // settled CandidateTally[] snapshot (survives voter erasure)
     mode: governanceVoteModeEnum('mode').notNull().default('simulated'),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    settledAt: tz('settled_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    settledAt: instant('settled_at'),
   },
   (t) => [
     index('steward_election_room_idx').on(t.roomId),
@@ -117,7 +115,7 @@ export const stewardGovernanceVotes = knomosisSchema.table(
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
     weight: numeric('weight').notNull(),
-    castAt: tz('cast_at').notNull().defaultNow(),
+    castAt: instant('cast_at').notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.electionId, t.voterUserId] }),
@@ -158,7 +156,7 @@ export const roomGovernanceModels = knomosisSchema.table(
     // bundle's member-selected huggingface.co model references, captured at
     // propose time (transparency/audit). Null when the bundle selects none.
     hubVerification: jsonb('hub_verification'),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('room_governance_model_room_idx').on(t.roomId),
@@ -185,7 +183,7 @@ export const roomGovernancePrompts = knomosisSchema.table(
     proposedByUserId: uuid('proposed_by_user_id').references(() => users.userId, {
       onDelete: 'set null',
     }),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     foreignKey({
@@ -227,8 +225,8 @@ export const modelRatifications = knomosisSchema.table(
       .references(() => roomGovernanceModels.modelId, { onDelete: 'cascade' }),
     lawPackId: uuid('law_pack_id'), // soft intra-context ref (the bounds being ratified)
     status: modelRatificationStatusEnum('status').notNull().default('open'),
-    opensAt: tz('opens_at').notNull(),
-    closesAt: tz('closes_at').notNull(),
+    opensAt: instant('opens_at').notNull(),
+    closesAt: instant('closes_at').notNull(),
     minQuorum: integer('min_quorum').notNull(),
     // The eligible-voter count SNAPSHOTTED at open — the FROZEN turnout denominator
     // (M4). Freezing it (alongside min_quorum) makes the adoption bound fixed for
@@ -239,8 +237,8 @@ export const modelRatifications = knomosisSchema.table(
     }),
     tally: jsonb('tally'), // settled RatificationResult snapshot
     outcome: modelRatificationOutcomeEnum('outcome'),
-    createdAt: tz('created_at').notNull().defaultNow(),
-    settledAt: tz('settled_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    settledAt: instant('settled_at'),
   },
   (t) => [
     index('model_ratification_room_idx').on(t.roomId),
@@ -267,7 +265,7 @@ export const modelRatificationBallots = knomosisSchema.table(
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
     choice: modelRatificationChoiceEnum('choice').notNull(),
-    castAt: tz('cast_at').notNull().defaultNow(),
+    castAt: instant('cast_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.voteId, t.voterUserId] })],
 );
@@ -292,7 +290,7 @@ export const roomLawPacks = knomosisSchema.table(
     roomId: uuid('room_id').notNull(), // soft ref
     version: text('version').notNull(),
     document: jsonb('document').notNull(), // the LawPack
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
     // --- WS-M.1.3a/c/d (migration 0082; all nullable/defaulted for WS-U rows).
     /** SHA-256 hex over the canonical bundle minus this field (WS-M.1.3a). */
     hashCommitment: text('hash_commitment'),
@@ -301,7 +299,7 @@ export const roomLawPacks = knomosisSchema.table(
     fixtures: jsonb('fixtures'),
     humanSummary: text('human_summary'),
     published: boolean('published').notNull().default(false),
-    effectiveAt: tz('effective_at'),
+    effectiveAt: instant('effective_at'),
     supersedesLawPackId: uuid('supersedes_law_pack_id'),
   },
   (t) => [index('room_law_pack_room_idx').on(t.roomId)],
@@ -331,7 +329,7 @@ export const roomAgentBindings = knomosisSchema.table(
     // ratification may flip `active` but must never clear this, so a community vote
     // can never re-activate a floor-frozen agent (the legal floor is non-overridable).
     floorFrozen: boolean('floor_frozen').notNull().default(false),
-    approvedAt: tz('approved_at').notNull().defaultNow(),
+    approvedAt: instant('approved_at').notNull().defaultNow(),
   },
   (t) => [
     foreignKey({
@@ -356,7 +354,7 @@ export const agentActionLogs = knomosisSchema.table(
     lawPackRuleRef: text('law_pack_rule_ref'),
     statementOfReasons: text('statement_of_reasons').notNull(),
     reversible: boolean('reversible').notNull(),
-    createdAt: tz('created_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [index('agent_action_log_room_idx').on(t.roomId)],
 );
@@ -386,8 +384,8 @@ export const roomPendingRemoderations = knomosisSchema.table(
     roomId: uuid('room_id').notNull(), // soft ref
     subjectRef: text('subject_ref').notNull(), // soft ref to the moderated contribution
     attempts: integer('attempts').notNull().default(0),
-    enqueuedAt: tz('enqueued_at').notNull().defaultNow(),
-    lastAttemptAt: tz('last_attempt_at'),
+    enqueuedAt: instant('enqueued_at').notNull().defaultNow(),
+    lastAttemptAt: instant('last_attempt_at'),
   },
   (t) => [
     primaryKey({ columns: [t.roomId, t.subjectRef] }),
@@ -411,7 +409,7 @@ export const agentTreasuryActions = knomosisSchema.table(
     targetAllocation: jsonb('target_allocation'),
     accepted: boolean('accepted').notNull(),
     verdict: jsonb('verdict').notNull(), // the kernel Verdict (evidence or rejection)
-    executedAt: tz('executed_at').notNull().defaultNow(),
+    executedAt: instant('executed_at').notNull().defaultNow(),
   },
   (t) => [index('agent_treasury_action_room_idx').on(t.roomId)],
 );

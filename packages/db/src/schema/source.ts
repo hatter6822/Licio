@@ -22,10 +22,10 @@ import {
   pgEnum,
   pgTable,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 
 export const sources = pgTable(
   'sources',
@@ -52,8 +52,8 @@ export const sources = pgTable(
       .$type<DisplayRestrictions>()
       .notNull()
       .default(sql`'{"noindex": false, "noarchive": false, "excerpt_max_chars": null}'::jsonb`),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     // PARTIAL unique: one profile per domain; many NULL-domain (non-web) rows.
@@ -117,7 +117,7 @@ export const sourceSyndications = pgTable(
     /** Evidence for the edge (story ids, URLs, review notes) — auditable. */
     evidenceRef: text('evidence_ref').notNull(),
     confidence: doublePrecision('confidence').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('source_syndications_pair_uq').on(t.fromSourceId, t.toSourceId),

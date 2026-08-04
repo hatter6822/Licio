@@ -1123,20 +1123,24 @@ export class DrizzleAccountBlockStore implements AccountBlockStore {
 
   async listByBlocker(
     blockerUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly blockId: string } | null,
     limit: number,
   ): Promise<AccountBlockRecord[]> {
     const c: SQL[] = [eq(accountBlocks.blockerUserId, blockerUserId)];
-    if (afterCreatedAt !== null) {
+    if (after !== null) {
+      // A ROW comparison over the same `(created_at, block_id)` the ORDER BY
+      // uses.  On the timestamp alone this dropped every block that shared a
+      // millisecond with the one the page ended on — permanently, and with a
+      // `next_cursor` that looked like it had worked.
       c.push(
-        sql`${accountBlocks.createdAt} < ${new Date(afterCreatedAt).toISOString()}::timestamptz`,
+        sql`(${accountBlocks.createdAt}, ${accountBlocks.blockId}) < (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.blockId}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(accountBlocks)
       .where(and(...c))
-      .orderBy(desc(accountBlocks.createdAt))
+      .orderBy(desc(accountBlocks.createdAt), desc(accountBlocks.blockId))
       .limit(Math.max(0, limit));
     return rows.map(mapBlock);
   }
@@ -1237,20 +1241,22 @@ export class DrizzleAccountMuteStore implements AccountMuteStore {
 
   async listByMuter(
     muterUserId: string,
-    afterCreatedAt: string | null,
+    after: { readonly createdAt: string; readonly muteId: string } | null,
     limit: number,
   ): Promise<AccountMuteRecord[]> {
     const c: SQL[] = [eq(accountMutes.muterUserId, muterUserId)];
-    if (afterCreatedAt !== null) {
+    if (after !== null) {
+      // See `listByBlocker` — the id half is what makes a shared millisecond a
+      // tie to break rather than a row to lose.
       c.push(
-        sql`${accountMutes.createdAt} < ${new Date(afterCreatedAt).toISOString()}::timestamptz`,
+        sql`(${accountMutes.createdAt}, ${accountMutes.muteId}) < (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.muteId}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(accountMutes)
       .where(and(...c))
-      .orderBy(desc(accountMutes.createdAt))
+      .orderBy(desc(accountMutes.createdAt), desc(accountMutes.muteId))
       .limit(Math.max(0, limit));
     return rows.map(mapMute);
   }

@@ -40,7 +40,7 @@ import {
   type SecurityActivityEntry,
   type StewardRoleId,
 } from '@licio/shared';
-import { and, desc, eq, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import {
   type AuditEntryInput,
   type AuditStore,
@@ -406,6 +406,7 @@ export class DrizzleIdentityStore implements IdentityStore {
   async findResumableVerification(
     userId: string,
     codeHash: string,
+    usedSince: string,
   ): Promise<{ remaining: number; verificationSessionHash: string } | null> {
     if (!isUuid(userId)) return null;
     const rows = await this.#db
@@ -416,6 +417,11 @@ export class DrizzleIdentityStore implements IdentityStore {
           eq(mfaRecoveryCodes.userId, userId),
           eq(mfaRecoveryCodes.codeHash, Buffer.from(codeHash, 'hex')),
           isNotNull(mfaRecoveryCodes.verificationSessionHash),
+          // Bounded to the window an interrupted verification could still be
+          // finished in.  A continuation that failed to settle would otherwise
+          // stay adoptable forever, and become a second use of a single-use
+          // code once the sessions its grant created had expired.
+          gte(mfaRecoveryCodes.usedAt, new Date(usedSince)),
         ),
       )
       .limit(1);

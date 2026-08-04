@@ -897,6 +897,13 @@
       "when": 1783728005047,
       "tag": "0128_recovery_code_verification_session",
       "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1783728006047,
+      "tag": "0129_timestamp_millisecond_precision",
+      "breakpoints": true
     }
   ]
 }

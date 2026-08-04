@@ -36,11 +36,10 @@ import {
   pgTable,
   primaryKey,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { bytea, tsvector } from './_custom.js';
+import { bytea, instant, tsvector } from './_custom.js';
 import { rooms } from './room.js';
 import { sources } from './source.js';
 import { uploads } from './upload.js';
@@ -197,7 +196,7 @@ export const stories = pgTable(
     excerpt: text('excerpt'),
     publisher: text('publisher'),
     author: text('author'),
-    publishedAt: timestamp('published_at', { withTimezone: true }),
+    publishedAt: instant('published_at'),
     mediaType: mediaTypeEnum('media_type'),
     extractionState: extractionStateEnum('extraction_state').notNull().default('pending'),
     hiddenState: storyHiddenStateEnum('hidden_state'),
@@ -208,13 +207,11 @@ export const stories = pgTable(
      *  be challenged (a steward unsettle clears it; stories have no author
      *  edit path, so no edit reset applies).  A separate column, NEVER a
      *  dispute-status value (the story still reads `validated` everywhere). */
-    settledAt: timestamp('settled_at', { withTimezone: true }),
+    settledAt: instant('settled_at'),
     /** Last material update (new contribution/evidence/claim) — freshness input. */
-    lastMaterialUpdateAt: timestamp('last_material_update_at', { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    lastMaterialUpdateAt: instant('last_material_update_at').notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
     /**
      * WS-F.3.1a generated full-text column. Weighted A/B/C; language-aware
      * (English stems via the `english` configuration; everything else uses
@@ -310,7 +307,7 @@ export const storyLifecycleAudits = pgTable(
     actorType: lifecycleActorTypeEnum('actor_type').notNull(),
     /** Steward actor when actor_type = steward; null for system transitions. */
     actorUserId: uuid('actor_user_id').references(() => users.userId, { onDelete: 'set null' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [index('story_lifecycle_audits_story_idx').on(t.storyId, t.createdAt)],
 );
@@ -340,7 +337,7 @@ export const storySignatures = pgTable(
     /** The pinned hash-family version (invariants MINHASH_FAMILY_VERSION). */
     familyVersion: integer('family_version').notNull(),
     textSource: signatureTextSourceEnum('text_source').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     check('story_signatures_minhash_len', sql`octet_length(${t.minhash}) = ${t.numHashes} * 4`),
@@ -388,7 +385,7 @@ export const storySourceLinks = pgTable(
     linkType: storySourceLinkTypeEnum('link_type').notNull(),
     /** The syndicated copy's canonical URL (provenance for the auto-link). */
     viaCanonicalUrl: text('via_canonical_url'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.storyId, t.sourceId] }),
@@ -412,7 +409,7 @@ export const storyFreshness = pgTable(
     /** The topic-cadence input used (median inter-arrival ms); null = unknown. */
     topicBaselineMs: bigint('topic_baseline_ms', { mode: 'number' }),
     featureVersion: integer('feature_version').notNull(),
-    computedAt: timestamp('computed_at', { withTimezone: true }).notNull(),
+    computedAt: instant('computed_at').notNull(),
   },
   (t) => [
     check(

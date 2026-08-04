@@ -18,6 +18,7 @@ import { constantTimeEqual } from '../identity/crypto.js';
 import type { IdentityServices, IdentityTx } from '../identity/services.js';
 import {
   buildSessionCookie,
+  hasVerifiedSession,
   markMfaVerified,
   readSessionToken,
   rotateSession,
@@ -37,6 +38,22 @@ import { err } from './auth-support.js';
 const MFA_MAX_ATTEMPTS = 5;
 const MFA_ATTEMPT_WINDOW_MS = 5 * 60_000;
 const MFA_STEP_MEMORY_MS = 90_000; // remember the used step for ~3 windows
+
+/**
+ * How long a spent recovery code can still FINISH the verification it was spent
+ * for.
+ *
+ * A continuation describes an operation in flight, and in flight has a duration:
+ * the user is retrying the request they just made, or signing in again after the
+ * one that failed. Fifteen minutes covers that generously.
+ *
+ * Unbounded it would be a slow leak instead. The continuation is cleared on
+ * success, but that clear is a separate write from the grant it settles — so a
+ * verification that succeeded and then failed to settle leaves a pending row
+ * forever, and once the sessions its grant created have expired, the spent code
+ * becomes usable a second time.
+ */
+const RESUMABLE_VERIFICATION_WINDOW_MS = 15 * 60_000;
 
 const attemptsKey = (userId: string) => `mfaattempts:${userId}`;
 const usedStepKey = (userId: string) => `mfastep:${userId}`;
@@ -262,13 +279,22 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           // gets nothing. No second consumption and no second `mfa_verify` row —
           // this is the same verification finishing, not a new one.
           //
-          // The window is closed by SETTLING, not by the rotation: a completed
-          // verification clears its continuation, so a pending row means the
-          // grant never landed. Resting on the rotation instead would have made
-          // every spent code look unfinished the moment it succeeded.
+          // SETTLING IS NOT THE ONLY THING HOLDING THIS SHUT, because settling
+          // is a second write and it can fail. `finishMfa` grants in Redis and
+          // ROTATES — which deletes the session the continuation names — and
+          // only then does the caller clear the row. If that clear fails, the
+          // continuation is left naming a session that no longer exists, which
+          // is exactly what "the grant never landed" looks like, and the code
+          // would verify a second session.
+          //
+          // So the takeover arm below asks the store the grant actually lives
+          // in: a landed grant leaves a live `mfa_verified` session, and that
+          // trace cannot be lost by a failed Postgres write. Settling remains,
+          // as the tidy-up it always was rather than the boundary.
           const resumable = await services.store.findResumableVerification(
             auth.userId,
             presentedHash,
+            new Date(Date.now() - RESUMABLE_VERIFICATION_WINDOW_MS).toISOString(),
           );
           // WHO MAY FINISH IT: this session, or — if the session it was spent
           // for no longer exists — any session of the same user.
@@ -296,6 +322,12 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
               ? false
               : resumable.verificationSessionHash === auth.tokenHash ||
                 ((await services.sessions.get(resumable.verificationSessionHash)) === null &&
+                  // DID THE GRANT ALREADY LAND?  A successful verification
+                  // leaves this user holding a live, mfa-verified session, and
+                  // a spent code has no second grant to give.  Without this,
+                  // the rotation alone made every success look unfinished the
+                  // moment the settle failed.
+                  !(await hasVerifiedSession(services.sessions, auth.userId)) &&
                   (await services.store.claimResumableVerification(
                     auth.userId,
                     presentedHash,

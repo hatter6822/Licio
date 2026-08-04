@@ -1540,7 +1540,7 @@ table definitions. Migrations are ordered SQL files in
 
 **Migrations are hand-authored in this repository.** The tracked Drizzle
 meta snapshots stop far behind the migration chain (they end at `0047`;
-the chain runs to `0119`), so `pnpm db:generate` would diff the schema
+the chain runs well past it), so `pnpm db:generate` would diff the schema
 against a stale snapshot and emit a garbage migration — do not use it here.
 The working loop:
 
@@ -1549,8 +1549,22 @@ The working loop:
 # 2. hand-write packages/db/drizzle/NNNN_short_name.sql (next number in order)
 # 3. append the matching entry to packages/db/drizzle/meta/_journal.json
 pnpm db:migrate                  # apply it locally
+pnpm check:timestamp-precision   # every timestamptz declared (3) — see below
 pnpm --filter @licio/db test     # run the db project's tests
 ```
+
+**Timestamps: `instant('col')`, never `timestamp(…)`.**  A bare `timestamptz`
+is MICROSECOND resolution and nothing here can hold one — every timestamp is
+produced by, and read back through, a JavaScript `Date`.  The extra digits are
+write-only, and they silently delete rows from paged reads: a keyset cursor
+read back through a `Date` has been rounded DOWN, so it names an instant
+strictly *before* the row it came from, a descending page skips every row
+sharing that millisecond, and the page comes back SHORT — which is how a caller
+decides it reached the end.  `instant()` (`schema/_custom.ts`) declares
+`timestamptz(3)`; in SQL write `timestamptz(3)` directly.
+`check:timestamp-precision` fails the build on either spelling of the mistake,
+and the gated `timestamp-precision` suite asks the live server, which is the
+half a static gate cannot see.
 
 The commands:
 

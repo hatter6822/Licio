@@ -9,17 +9,8 @@
 // The table carries a generated full-text column (WS-F.3.1a) so claims are
 // searchable alongside stories.
 import { sql } from 'drizzle-orm';
-import {
-  check,
-  doublePrecision,
-  index,
-  pgEnum,
-  pgTable,
-  text,
-  timestamp,
-  uuid,
-} from 'drizzle-orm/pg-core';
-import { tsvector } from './_custom.js';
+import { check, doublePrecision, index, pgEnum, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { instant, tsvector } from './_custom.js';
 import { stories } from './story.js';
 import { users } from './user.js';
 
@@ -62,8 +53,8 @@ export const claims = pgTable(
     extractionConfidence: doublePrecision('extraction_confidence'),
     /** Extractor model/heuristic version (WS-K provenance seam). */
     modelVersion: text('model_version'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
     searchTsv: tsvector('search_tsv').generatedAlwaysAs(
       () => sql`setweight(to_tsvector('simple', coalesce(canonical_text, '')), 'A')`,
     ),

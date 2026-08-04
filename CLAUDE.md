@@ -88,6 +88,15 @@ pnpm check:sql-identifiers          # no migration identifier AT Postgres's 63-b
                                     #   ones; the gated migration harness settles it authoritatively by
                                     #   listening for Postgres's own truncation NOTICE, which also
                                     #   covers Drizzle-derived and `EXECUTE format()` names
+pnpm check:timestamp-precision      # every `timestamptz` is declared `(3)` — the resolution a
+                                    #   JavaScript `Date` can hold.  Microseconds are write-only here
+                                    #   and not inert: a keyset cursor read back through a `Date` names
+                                    #   an instant BEFORE its own row, so a descending page silently
+                                    #   drops every row sharing that millisecond and comes back SHORT —
+                                    #   which is how a caller decides it reached the end.  `instant()`
+                                    #   (schema/_custom.ts) is the ONLY way to declare one; the gated
+                                    #   `timestamp-precision` suite asks the SERVER, which is the half a
+                                    #   static gate cannot see
 pnpm check:governance-kyc           # every governance-participation POST enforces the KYC guard
 pnpm check:neutrality               # WS-I ranking neutrality · check:adversarial — WS-O.4.5 ensemble suite
 pnpm check:lcap-scheduler           # WS-R lane anti-starvation

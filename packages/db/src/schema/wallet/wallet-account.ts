@@ -13,8 +13,8 @@
 // The address is treated as personal data (§19.5): stored only as a keyed hash
 // (distinct HMAC namespace from the auth-wallet) plus a truncated display form.
 import { sql } from 'drizzle-orm';
-import { index, integer, pgSchema, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
-import { bytea } from '../_custom.js';
+import { index, integer, pgSchema, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { bytea, instant } from '../_custom.js';
 import { users } from '../user.js';
 
 export const walletSchema = pgSchema('wallet');
@@ -53,15 +53,15 @@ export const walletAccounts = walletSchema.table(
     riskState: walletRiskEnum('risk_state').notNull().default('pending'),
     // User-defined display label (WS-L.2.5c); null falls back to "Wallet N".
     label: text('label'),
-    linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
-    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    linkedAt: instant('linked_at').notNull().defaultNow(),
+    lastUsedAt: instant('last_used_at'),
     // WS-L.2.5b unlink lifecycle: when the unlink was requested, when the
     // cooling-off period elapses (finalization sweep), and when it finalized.
     // The row is retained after finalization for audit + the WS-L.2.5d
     // re-link cooldown (keyed off `unlinked_at`).
-    unlinkRequestedAt: timestamp('unlink_requested_at', { withTimezone: true }),
-    unlinkFinalizeAfter: timestamp('unlink_finalize_after', { withTimezone: true }),
-    unlinkedAt: timestamp('unlinked_at', { withTimezone: true }),
+    unlinkRequestedAt: instant('unlink_requested_at'),
+    unlinkFinalizeAfter: instant('unlink_finalize_after'),
+    unlinkedAt: instant('unlinked_at'),
   },
   (t) => [
     index('wallet_accounts_user_idx').on(t.userId),

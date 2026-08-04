@@ -11,8 +11,8 @@
 //     the former `ip_hash` column): only a coarse device descriptor is recorded.
 //   • `user_auth` has NO password column — the schema cannot store a password.
 import { sql } from 'drizzle-orm';
-import { boolean, index, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
-import { bytea } from './_custom.js';
+import { boolean, index, pgEnum, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { bytea, instant } from './_custom.js';
 import { users } from './user.js';
 
 export const authMethodEnum = pgEnum('auth_method', ['webauthn', 'email_otp', 'wallet']);
@@ -30,9 +30,9 @@ export const sessions = pgTable(
     // user-agent. Only a coarse device descriptor is recorded.
     deviceLabel: text('device_label'),
     rememberMe: boolean('remember_me').notNull().default(false),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    lastActiveAt: timestamp('last_active_at', { withTimezone: true }).notNull().defaultNow(),
-    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    lastActiveAt: instant('last_active_at').notNull().defaultNow(),
+    revokedAt: instant('revoked_at'),
   },
   (t) => [
     index('sessions_user_idx').on(t.userId),
@@ -45,7 +45,7 @@ export const userAuth = pgTable('user_auth', {
     .primaryKey()
     .references(() => users.userId, { onDelete: 'cascade' }),
   emailVerified: boolean('email_verified').notNull().default(false),
-  emailVerifiedAt: timestamp('email_verified_at', { withTimezone: true }),
+  emailVerifiedAt: instant('email_verified_at'),
   // An email-change in flight: the NEW address, staged until it proves control
   // (WS-D.1.4a).  The current verified email stays live until confirmation, so a
   // typo can never strand an email-only account with zero verified methods.
@@ -55,10 +55,10 @@ export const userAuth = pgTable('user_auth', {
   mfaEnabled: boolean('mfa_enabled').notNull().default(false),
   // Enrolment started (secret staged) but not yet proven with a first TOTP code.
   mfaPending: boolean('mfa_pending').notNull().default(false),
-  mfaEnrolledAt: timestamp('mfa_enrolled_at', { withTimezone: true }),
+  mfaEnrolledAt: instant('mfa_enrolled_at'),
   // NOTE: there is deliberately NO password_hash column.  See WS-D overview.
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: instant('created_at').notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 
 // Single-use, hashed MFA recovery codes (WS-D.1.5a).  Stored hashed so a DB read
@@ -71,12 +71,12 @@ export const mfaRecoveryCodes = pgTable(
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
     codeHash: bytea('code_hash').notNull(),
-    usedAt: timestamp('used_at', { withTimezone: true }),
+    usedAt: instant('used_at'),
     /** The session this code was spent to verify — see migration 0128. Set with
      *  `used_at`, so a retry from that same session can resume a verification
      *  whose Redis grant failed after the consumption committed. */
     verificationSessionHash: text('verification_session_hash'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('mfa_recovery_user_idx').on(t.userId),

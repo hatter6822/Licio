@@ -172,6 +172,16 @@ export interface IdentityStore {
   findResumableVerification(
     userId: string,
     codeHash: string,
+    /** Ignore a continuation whose consumption is older than this instant.
+     *
+     *  A continuation describes a verification that is still IN FLIGHT, and
+     *  in-flight has a duration.  Unbounded, a row that failed to settle stays
+     *  adoptable indefinitely — so a code spent successfully, whose settle
+     *  happened to fail, becomes usable a second time days later once the
+     *  sessions it granted have expired.  Bounding it to the window an
+     *  interrupted verification could plausibly be resumed in leaves the
+     *  recovery path intact and closes the rest. */
+    usedSince: string,
   ): Promise<{ remaining: number; verificationSessionHash: string } | null>;
   /**
    * SETTLE a continuation once its grant has landed.
@@ -245,9 +255,13 @@ export interface IdentityStore {
 export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
   readonly #users = new Map<string, StoredUser>();
   readonly #auth = new Map<string, StoredUserAuth>();
-  /** `${userId}:${codeHash}` → the session a spent code was spent to verify.
-   *  The in-memory twin of `mfa_recovery_codes.verification_session_hash`. */
-  readonly #pendingVerifications = new Map<string, { sessionHash: string; remaining: number }>();
+  /** `${userId}:${codeHash}` → the session a spent code was spent to verify, and
+   *  WHEN it was spent.  The in-memory twin of
+   *  `mfa_recovery_codes.verification_session_hash` beside its `used_at`. */
+  readonly #pendingVerifications = new Map<
+    string,
+    { sessionHash: string; remaining: number; usedAt: string }
+  >();
   readonly #webauthn = new Map<string, StoredWebauthnCredential>();
   readonly #walletAuth = new Map<string, StoredWalletAuthCredential>();
   readonly #exportJobs = new Map<string, StoredExportJob>();
@@ -385,6 +399,9 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
     this.#pendingVerifications.set(`${userId}:${codeHash}`, {
       sessionHash: verificationSessionHash,
       remaining: remaining.length,
+      // The twin of `used_at`, set in the SAME write as the session hash — the
+      // resume window is measured from the consumption, not from the lookup.
+      usedAt: new Date().toISOString(),
     });
     return { remaining: remaining.length };
   }
@@ -392,9 +409,13 @@ export class InMemoryIdentityStore implements IdentityStore, InMemoryRollback {
   async findResumableVerification(
     userId: string,
     codeHash: string,
+    usedSince: string,
   ): Promise<{ remaining: number; verificationSessionHash: string } | null> {
     const pending = this.#pendingVerifications.get(`${userId}:${codeHash}`);
     if (pending === undefined) return null;
+    // Past the window a verification could still be in flight, the continuation
+    // is not a resumable operation — it is a spent code with an unsettled row.
+    if (pending.usedAt < usedSince) return null;
     return { remaining: pending.remaining, verificationSessionHash: pending.sessionHash };
   }
 

@@ -12,6 +12,7 @@ import type {
   ModerationNoticeView,
   ModerationReasonCode,
 } from '@licio/shared';
+import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/keyset-cursor.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationNoticeRecord, ModerationNoticeStore } from './stores.js';
 
@@ -170,16 +171,22 @@ export async function listNotices(
   cursor: string | null,
   limit: number,
 ): Promise<ModerationNoticeListResponse> {
-  const at = cursor === null ? -1 : cursor.indexOf('|');
-  const after =
-    cursor !== null && at > 0
-      ? { createdAt: cursor.slice(0, at), noticeId: cursor.slice(at + 1) }
-      : null;
+  // THE SHARED DECODER, not a sixth hand-rolled one.  This split on `|` and
+  // accepted anything with a non-empty left part — so `?cursor=a|b` reached the
+  // store's `::timestamptz` / `::uuid` casts, raised 22P02, and came back as a
+  // 500 on a read endpoint.  That is the exact defect `keyset-cursor.ts` was
+  // written for after it appeared in five other queues; this one just never got
+  // it.  The route now validates the grammar too, so an unreadable cursor is a
+  // 400 naming the field rather than a silent restart from page one.
+  const decoded = decodeKeysetCursor(cursor ?? undefined);
+  const after = decoded === null ? null : { createdAt: decoded.time, noticeId: decoded.id };
   const records = await services.notices.listByUser(userId, after, limit + 1);
   const page = records.slice(0, limit);
   const last = page.at(-1);
   const nextCursor =
-    records.length > limit && last !== undefined ? `${last.createdAt}|${last.noticeId}` : null;
+    records.length > limit && last !== undefined
+      ? encodeKeysetCursor(last.createdAt, last.noticeId)
+      : null;
   return {
     notices: page.map(noticeToView),
     next_cursor: nextCursor,

@@ -270,6 +270,34 @@ export async function markMfaVerified(
   return true;
 }
 
+/**
+ * Does this user hold a live session that has already cleared MFA?
+ *
+ * This is the durable-enough answer to "did the grant land?", asked of the store
+ * the grant actually lives in.  A recovery code's continuation records WHICH
+ * session it was spent for, and the verification then ROTATES that session — so
+ * moments after a SUCCESS the recorded hash names a session that no longer
+ * exists, which is indistinguishable from the failure the continuation exists
+ * for.  Settling the continuation is what separates them, and settling is a
+ * second write that can fail after the grant is already in Redis and the
+ * rotated cookie already queued.
+ *
+ * A landed grant leaves exactly one trace that cannot be lost that way: a live,
+ * `mfa_verified` session belonging to this user.  So a continuation may be
+ * taken over by a DIFFERENT session only while no such session exists — which
+ * is precisely the situation it was written for (the grant never applied, so the
+ * user holds nothing) and never the situation where it would hand a single-use
+ * code its second grant.
+ */
+export async function hasVerifiedSession(
+  store: SessionStore,
+  userId: string,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const sessions = await store.listForUser(userId);
+  return sessions.some((s) => s.stored.expiresAt > now && s.stored.record.mfa_verified);
+}
+
 /** Revoke all of a user's sessions except `exceptHash`; returns the revoked count. */
 export async function revokeOthersForUser(
   store: SessionStore,

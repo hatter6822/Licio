@@ -22,6 +22,10 @@ import { DrizzleAuditStore, DrizzleIdentityStore, DrizzleJobLeaseStore } from '.
 import type { StoredUser } from '../store.js';
 
 const DB_URL = process.env['DATABASE_URL'];
+
+/** Any instant safely inside the resume window — these cases are about WHO may
+ *  finish a continuation, not about when it lapses (which the expiry leg covers). */
+const RESUMABLE_SINCE = new Date(0).toISOString();
 const IT_DB = 'licio_drizzle_store_it';
 
 function userInput(
@@ -244,25 +248,40 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
     // consumption committed. (The code above was spent by raw SQL standing in
     // for a concurrent winner, so it carries no session — which is exactly what
     // `null` should say.)
-    expect(await store.findResumableVerification(userId, target)).toBeNull();
+    expect(await store.findResumableVerification(userId, target, RESUMABLE_SINCE)).toBeNull();
     const second = codes[1] as string;
     expect(await store.consumeRecoveryCode(userId, second, 'session-hash-b')).toEqual({
       remaining: 1,
     });
     // The lookup reports WHICH session it was spent for; the route decides who
     // may finish it (that session, or any of the user's once it is gone).
-    expect(await store.findResumableVerification(userId, second)).toEqual({
+    expect(await store.findResumableVerification(userId, second, RESUMABLE_SINCE)).toEqual({
       remaining: 1,
       verificationSessionHash: 'session-hash-b',
     });
     // An ACTIVE code has no verification to resume.
-    expect(await store.findResumableVerification(userId, codes[2] as string)).toBeNull();
+    expect(
+      await store.findResumableVerification(userId, codes[2] as string, RESUMABLE_SINCE),
+    ).toBeNull();
+
+    // AND THE CONTINUATION EXPIRES.  A verification is resumable while it is
+    // still in flight; a pending row that outlived that window is a spent code
+    // whose settle failed, not an operation to finish.  Unbounded it would come
+    // back to life as a second use of a single-use code once the sessions its
+    // grant created had expired.
+    expect(
+      await store.findResumableVerification(
+        userId,
+        second,
+        new Date(Date.now() + 1000).toISOString(),
+      ),
+    ).toBeNull();
 
     // A FACTOR RESET clears every pending continuation: re-enrolling ends the
     // factor the continuation was about, and without this an old session could
     // present its already-spent old code and be verified against the NEW one.
     await store.setAuth(userId, { recoveryCodeHashes: [sha256Hex('fresh-1')] });
-    expect(await store.findResumableVerification(userId, second)).toBeNull();
+    expect(await store.findResumableVerification(userId, second, RESUMABLE_SINCE)).toBeNull();
 
     // An unknown code and an unknown user are both "not active", never a throw.
     expect(

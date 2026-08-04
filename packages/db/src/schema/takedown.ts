@@ -11,7 +11,8 @@
 // public projection, and follows the moderation/legal retention class
 // (§22.4).
 import { sql } from 'drizzle-orm';
-import { check, index, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { check, index, pgEnum, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { users } from './user.js';
 
 export const takedownTargetTypeEnum = pgEnum('takedown_target_type', ['story', 'source']);
@@ -44,8 +45,8 @@ export const takedownRequests = pgTable(
     resolutionNote: text('resolution_note'),
     /** The steward who actioned/rejected; deletion keeps the audit trail. */
     actionedBy: uuid('actioned_by').references(() => users.userId, { onDelete: 'set null' }),
-    actionedAt: timestamp('actioned_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    actionedAt: instant('actioned_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('takedown_requests_status_idx').on(t.status, t.createdAt),

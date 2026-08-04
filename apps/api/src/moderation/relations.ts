@@ -13,6 +13,7 @@ import type {
   MuteListResponse,
   MuteRecordView,
 } from '@licio/shared';
+import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/keyset-cursor.js';
 import type { ModerationServices } from './services.js';
 import type { AccountBlockRecord, AccountMuteRecord } from './stores.js';
 
@@ -65,11 +66,24 @@ export async function listBlocks(
   cursor: string | null,
   limit: number,
 ): Promise<BlockListPage> {
-  const rows = await services.blocks.listByBlocker(blockerUserId, cursor, limit + 1);
+  // The cursor is `(createdAt, blockId)`, not a bare timestamp.  Two blocks made
+  // in the same millisecond compare EQUAL on the timestamp alone, so the one the
+  // page did not end on was excluded from the next page and never appeared —
+  // the list simply lacked it, with a `next_cursor` that looked correct.
+  const decoded = decodeKeysetCursor(cursor ?? undefined);
+  const rows = await services.blocks.listByBlocker(
+    blockerUserId,
+    decoded === null ? null : { createdAt: decoded.time, blockId: decoded.id },
+    limit + 1,
+  );
   const page = rows.slice(0, limit);
+  const last = page.at(-1);
   return {
     blocks: page.map(toBlockView),
-    next_cursor: rows.length > limit ? (page.at(-1)?.createdAt ?? null) : null,
+    next_cursor:
+      rows.length > limit && last !== undefined
+        ? encodeKeysetCursor(last.createdAt, last.blockId)
+        : null,
   };
 }
 
@@ -99,11 +113,21 @@ export async function listMutes(
   cursor: string | null,
   limit: number,
 ): Promise<MuteListPage> {
-  const rows = await services.mutes.listByMuter(muterUserId, cursor, limit + 1);
+  // `(createdAt, muteId)` — see `listBlocks` for what the id half prevents.
+  const decoded = decodeKeysetCursor(cursor ?? undefined);
+  const rows = await services.mutes.listByMuter(
+    muterUserId,
+    decoded === null ? null : { createdAt: decoded.time, muteId: decoded.id },
+    limit + 1,
+  );
   const page = rows.slice(0, limit);
+  const last = page.at(-1);
   return {
     mutes: page.map(toMuteView),
-    next_cursor: rows.length > limit ? (page.at(-1)?.createdAt ?? null) : null,
+    next_cursor:
+      rows.length > limit && last !== undefined
+        ? encodeKeysetCursor(last.createdAt, last.muteId)
+        : null,
   };
 }
 

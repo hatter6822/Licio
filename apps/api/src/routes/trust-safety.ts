@@ -29,6 +29,7 @@ import { z } from 'zod';
 import { roomVisibleToUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { getIdentityServices } from '../identity/services.js';
+import { keysetCursorSchema } from '../lib/keyset-cursor.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { checkEligibility, submitAppeal } from '../moderation/appeals.js';
@@ -433,7 +434,7 @@ export function createTrustSafetyRoutes() {
       .get(
         '/blocks',
         authMiddleware(),
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        zValidator('query', z.object({ cursor: keysetCursorSchema.optional() })),
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
@@ -490,7 +491,7 @@ export function createTrustSafetyRoutes() {
       .get(
         '/mutes',
         authMiddleware(),
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        zValidator('query', z.object({ cursor: keysetCursorSchema.optional() })),
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
@@ -606,7 +607,7 @@ export function createTrustSafetyRoutes() {
       .get(
         '/moderation/notices',
         authMiddleware(),
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        zValidator('query', z.object({ cursor: keysetCursorSchema.optional() })),
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);

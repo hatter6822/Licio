@@ -5,7 +5,8 @@
 // metadata only (country-level location at most).  The application has no
 // update/delete path; on account deletion the actor link is severed (set null)
 // rather than the row removed, preserving forensic history (§25.4).
-import { index, jsonb, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { index, jsonb, pgEnum, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { users } from './user.js';
 
 export const auditEventTypeEnum = pgEnum('audit_event_type', [
@@ -104,7 +105,7 @@ export const auditLog = pgTable(
     eventType: auditEventTypeEnum('event_type').notNull(),
     targetRef: text('target_ref'), // hashed where it is a token/session id
     context: jsonb('context').notNull(), // minimized: country/device/method/setting diffs
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('audit_log_actor_idx').on(t.actorUserId),

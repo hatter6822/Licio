@@ -32,10 +32,10 @@ import {
   pgEnum,
   pgTable,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { users } from './user.js';
 
 // ---------------------------------------------------------------------------
@@ -95,9 +95,9 @@ export const moderationCases = pgTable(
     enforcementDelayed: boolean('enforcement_delayed').notNull().default(false),
     /** The action that resolved the case, when resolved by enforcement. */
     resolvedActionId: uuid('resolved_action_id'),
-    slaDueAt: timestamp('sla_due_at', { withTimezone: true }).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    slaDueAt: instant('sla_due_at').notNull(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     // At most one OPEN case per target (a new report joins it; a resolved case
@@ -136,7 +136,7 @@ export const moderationReports = pgTable(
     evidenceUrls: jsonb('evidence_urls').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
     /** Client-supplied idempotency key (offline-queue replay safe). */
     localOperationId: text('local_operation_id').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('moderation_reports_case_idx').on(t.caseId),
@@ -185,7 +185,7 @@ export const moderationActions = pgTable(
       onDelete: 'set null',
     }),
     reportIds: jsonb('report_ids').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('moderation_actions_subject_idx').on(t.subjectUserId, t.createdAt),
@@ -215,7 +215,7 @@ export const moderationAudit = pgTable(
       // The sequence assigns it — declared here so the insert type does not demand a
       // value the writer must not invent.
       .default(sql`nextval('moderation_audit_ordinal_seq')`),
-    eventTime: timestamp('event_time', { withTimezone: true }).notNull().defaultNow(),
+    eventTime: instant('event_time').notNull().defaultNow(),
     /** Null actor ⇒ `system` (automated block). */
     actorUserId: uuid('actor_user_id').references(() => users.userId, { onDelete: 'set null' }),
     actorRole: text('actor_role'),
@@ -258,7 +258,7 @@ export const moderationAudit = pgTable(
      * ordinary case and is unconstrained.
      */
     idempotencyKey: text('idempotency_key'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     /** 0126 — see `idempotencyKey`. PARTIAL: only the rows that opt in. */
@@ -319,7 +319,7 @@ export const accountBlocks = pgTable(
     blockedUserId: uuid('blocked_user_id')
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('account_blocks_pair_uq').on(t.blockerUserId, t.blockedUserId),
@@ -343,8 +343,8 @@ export const accountMutes = pgTable(
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
     /** Null ⇒ "forever"; otherwise the auto-lift time. */
-    expiresAt: timestamp('expires_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: instant('expires_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('account_mutes_pair_uq').on(t.muterUserId, t.mutedUserId),
@@ -385,12 +385,12 @@ export const moderationAppeals = pgTable(
       onDelete: 'set null',
     }),
     isBanAppeal: boolean('is_ban_appeal').notNull().default(false),
-    slaDueAt: timestamp('sla_due_at', { withTimezone: true }).notNull(),
-    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    slaDueAt: instant('sla_due_at').notNull(),
+    decidedAt: instant('decided_at'),
     decidedBy: uuid('decided_by').references(() => users.userId, { onDelete: 'set null' }),
     decisionReasonCode: text('decision_reason_code'),
     decisionExplanation: text('decision_explanation'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     // One appeal per action (WS-J.1.3b 409 on duplicate).
@@ -426,8 +426,8 @@ export const moderationNotices = pgTable(
     reasonCode: text('reason_code'),
     appealable: boolean('appealable').notNull().default(false),
     appealStatus: appealStatusEnum('appeal_status'),
-    readAt: timestamp('read_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    readAt: instant('read_at'),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('moderation_notices_user_idx').on(t.userId, t.createdAt),
@@ -453,7 +453,7 @@ export const reviewerStatus = pgTable('reviewer_status', {
     .primaryKey()
     .references(() => users.userId, { onDelete: 'cascade' }),
   status: reviewerAvailabilityEnum('status').notNull().default('offline'),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().defaultNow(),
 });
 export type ReviewerStatusRowDb = typeof reviewerStatus.$inferSelect;
 export type ReviewerStatusInsert = typeof reviewerStatus.$inferInsert;
@@ -484,9 +484,9 @@ export const coordinatedReportIncidents = pgTable(
     status: coordinatedReportIncidentStatusEnum('status').notNull().default('open'),
     /** Aggregate, base-rate-conditioned summary — never per-reporter identity. */
     summary: text('summary').notNull(),
-    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    reviewedAt: instant('reviewed_at'),
     reviewedBy: uuid('reviewed_by').references(() => users.userId, { onDelete: 'set null' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     foreignKey({
@@ -544,7 +544,7 @@ export const evidenceDecisions = pgTable(
      *  (like moderation_audit.actor_user_id): a hard right-to-erasure purge
      *  severs the link while the decision record survives. */
     decidedBy: uuid('decided_by').references(() => users.userId, { onDelete: 'set null' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     // Shape rule: the two citation actions carry a citation; clear carries none.

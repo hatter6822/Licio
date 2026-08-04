@@ -28,11 +28,11 @@ import {
   pgEnum,
   pgTable,
   text,
-  timestamp,
   uniqueIndex,
   uuid,
   vector,
 } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 
 /** Must match the registered model's dimensionality (WS-F.3.2a). */
 export const EMBEDDING_DIMENSION = 384;
@@ -54,8 +54,8 @@ export const embeddings = pgTable(
     /** Registry model version (WS-F.3.2a) — re-embedding provenance. */
     modelVersion: text('model_version').notNull(),
     embedding: vector('embedding', { dimensions: EMBEDDING_DIMENSION }).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
+    updatedAt: instant('updated_at').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('embeddings_target_model_uq').on(t.targetType, t.targetId, t.modelVersion),

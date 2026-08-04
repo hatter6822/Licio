@@ -1750,10 +1750,22 @@ export class PrivateRoomSession {
       return { verdict };
     }
 
-    // A CLAIM WHOSE ADMISSION DOES NOT COMPLETE IS HANDED BACK. Everything below
-    // can throw — MLS operations, the engine, the session write — and the use is
-    // already taken, so without this a transient failure would silently spend a
-    // single-use invite and leave the invitee with nothing to retry against.
+    // A CLAIM WHOSE ADMISSION DOES NOT COMPLETE IS HANDED BACK — but only while
+    // there is nothing to hand it back FROM.
+    //
+    // `applyLocalOp` seals the `member.add` and ingests it, which puts it in the
+    // room's persisted op log; from that instant the new member is part of the
+    // room's state and will be served to any peer that syncs. A later failure
+    // (the session write, the snapshot, `exportArchive`) leaves that member in
+    // place, and the commit may already have been broadcast — so releasing the
+    // claim there does not undo an admission, it hands out a SECOND use of an
+    // invite that has already admitted someone. A single-use invite would then
+    // admit two devices while the first, grantless member stays in the roster.
+    //
+    // Before that line, nothing durable exists and a release is exactly right:
+    // the MLS operations and the verdict checks can throw or reject, and the
+    // invitee must have something to retry against.
+    let durablyAdmitted = false;
     try {
       const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
       const invited = await this.p2p.inviteDevice(group, verdict.keyPackage);
@@ -1820,6 +1832,10 @@ export class PrivateRoomSession {
         },
       );
       await this.engine.applyLocalOp(op, sealParams);
+      // THE ADMISSION IS DURABLE FROM HERE: the `member.add` is in the persisted
+      // op log and syncs to peers. The use is spent whether or not the rest of
+      // this method completes.
+      durablyAdmitted = true;
 
       const epochs = [
         ...this.session.epochs.filter((e) => e.epoch !== epoch),
@@ -1892,7 +1908,10 @@ export class PrivateRoomSession {
       if (driverOwnsBudget) await inviteStore.incrementInviteUses(invite.invite_id);
       return { verdict, grant };
     } catch (error) {
-      if (claimed !== null) await inviteStore.releaseInviteUse(invite.invite_id);
+      // Only an admission that never became durable gives its use back.
+      if (claimed !== null && !durablyAdmitted) {
+        await inviteStore.releaseInviteUse(invite.invite_id);
+      }
       throw error;
     }
   }

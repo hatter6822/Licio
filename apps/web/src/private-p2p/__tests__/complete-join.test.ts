@@ -208,6 +208,55 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
     expect(accepted.verdict.ok).toBe(true);
   });
 
+  it('KEEPS the claim once the admission is durable, even if the rest fails', async () => {
+    // The other half of the rule above, and the one that matters for single-use.
+    // `applyLocalOp` puts the `member.add` in the persisted op log — from there
+    // the joiner IS a member and syncs to peers. A failure after that point
+    // (the session write, the snapshot, the archive) does not undo it, so
+    // handing the use back would let a single-use invite admit a SECOND device
+    // while the first one sits in the roster.
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'One-shot Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const { request } = await prep.complete(
+      inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+
+    // Fail the FIRST write after the op is durable.
+    const spy = vi
+      .spyOn(sessionStore, 'putRoomSession')
+      .mockRejectedValueOnce(new Error('quota exceeded'));
+    await expect(founder.admitJoinRequest(invite, request)).rejects.toThrow('quota exceeded');
+    spy.mockRestore();
+
+    // The member really is in the room — this is not a no-op that could be retried.
+    const members = [...founder.state().members.values()];
+    expect(members.some((m) => m.displayName === 'Bob')).toBe(true);
+
+    // …so the single use is spent. A second attempt finds the invite exhausted
+    // rather than admitting another device against the same one.
+    const { request: second } = await prep.complete(
+      inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length),
+    );
+    const again = await founder.admitJoinRequest(invite, second);
+    expect(again.verdict.ok).toBe(false);
+    if (again.verdict.ok) throw new Error('unreachable');
+    expect(again.verdict.reason).toBe('exhausted');
+  });
+
   it('removeMember rotates the epoch — the evicted device cannot read post-removal content (§10.9)', async () => {
     const mkStore = await storeFactory();
     const founder = await PrivateRoomSession.create({

@@ -12,7 +12,8 @@
 // recipients' inboxes where the deleted account was the ACTOR are anonymized
 // (actor_user_id nulled, actor_handle replaced) so the erased handle stops
 // appearing anywhere.
-import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { index, jsonb, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { instant } from './_custom.js';
 import { users } from './user.js';
 
 export const replyNotifications = pgTable(
@@ -31,8 +32,8 @@ export const replyNotifications = pgTable(
      *  rows in OTHER users' inboxes (null once the actor is erased). */
     actorUserId: uuid('actor_user_id').references(() => users.userId, { onDelete: 'set null' }),
     actorHandle: text('actor_handle').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
-    readAt: timestamp('read_at', { withTimezone: true }),
+    createdAt: instant('created_at').notNull(),
+    readAt: instant('read_at'),
   },
   (t) => [
     uniqueIndex('reply_notifications_comment_idx').on(t.commentId),
@@ -46,7 +47,7 @@ export const userSettings = pgTable('user_settings', {
    *  id) — unlinkable at rest. */
   stateRef: text('state_ref').primaryKey(),
   settings: jsonb('settings').$type<Record<string, unknown>>().notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+  updatedAt: instant('updated_at').notNull(),
 });
 
 export type ReplyNotificationRow = typeof replyNotifications.$inferSelect;

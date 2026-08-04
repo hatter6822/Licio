@@ -395,6 +395,67 @@ describe.skipIf(!DB_URL)('Drizzle event-pipeline stores integration (WS-E.3.1)',
     );
   });
 
+  it('pageByTypeSince: the denominator is the full match, from the same statement', async () => {
+    // The transparency report prints a capped page beside the total it is a
+    // page OF.  Those used to be two statements — a list and a count — and
+    // under READ COMMITTED each gets its own snapshot, so an output committing
+    // between them was counted but could not have been listed, and
+    // `total_outputs` / `truncated` / the covered range described different
+    // datasets.  One statement carries `count(*) over ()`, evaluated over the
+    // whole matching set BEFORE the LIMIT.
+    //
+    // Only live Postgres proves this: the in-memory twin counts an array, so a
+    // window function that silently returned the PAGE length would pass every
+    // unit test.
+    const since = new Date(Date.UTC(2026, 6, 1)).toISOString();
+    const until = new Date(Date.UTC(2026, 6, 2)).toISOString();
+    for (let i = 0; i < 7; i += 1) {
+      await invariants.upsert({
+        invariantType: 'GWEI',
+        targetType: 'cohort',
+        targetId: randomUUID(),
+        timeWindow: { start: since, end: until },
+        version: '1.0.0',
+        scoreVector: { gw2: 0.1 },
+        explanationSummary: null,
+        confidence: 0.8,
+        coverage: 1,
+        reasonCodes: [],
+        fallbackUsed: false,
+        versionMetadata: null,
+        shadowMode: true,
+        createdAt: new Date(Date.UTC(2026, 6, 1, 0, i)).toISOString(),
+      });
+    }
+
+    const page = await invariants.pageByTypeSince('GWEI', since, 3, until);
+    expect(page.rows).toHaveLength(3);
+    expect(page.total).toBe(7); // NOT 3 — the cap does not shrink the denominator
+    // Newest first, so the page is the top of the interval it reports on.
+    expect(page.rows.map((r) => r.createdAt)).toEqual(
+      [...page.rows].map((r) => r.createdAt).sort((a, b) => b.localeCompare(a)),
+    );
+
+    // An empty interval reports zero rather than carrying the previous total.
+    const empty = await invariants.pageByTypeSince(
+      'GWEI',
+      new Date(Date.UTC(2020, 0, 1)).toISOString(),
+      3,
+      new Date(Date.UTC(2020, 0, 2)).toISOString(),
+    );
+    expect(empty).toEqual({ rows: [], total: 0 });
+
+    // And the in-memory adapter answers identically, or a defect passes every
+    // unit test and only appears against live Postgres.
+    const memory = new InMemoryInvariantOutputStore();
+    for (const r of (await invariants.pageByTypeSince('GWEI', since, 100, until)).rows) {
+      await memory.upsert(r);
+    }
+    const fromMemory = await memory.pageByTypeSince('GWEI', since, 3, until);
+    expect(fromMemory.total).toBe(page.total);
+    expect(fromMemory.rows.map((r) => r.createdAt)).toEqual(page.rows.map((r) => r.createdAt));
+  });
+
   it('signal ledger: owner-scoped keyset pagination and purge coupling', async () => {
     const mk = (i: number) => ({
       entryId: randomUUID(),

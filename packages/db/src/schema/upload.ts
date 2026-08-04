@@ -9,18 +9,8 @@
 // shared malware intelligence later).  Alt text is REQUIRED for images at the
 // API layer (WCAG; null only for documents).
 import { sql } from 'drizzle-orm';
-import {
-  boolean,
-  check,
-  index,
-  integer,
-  pgEnum,
-  pgTable,
-  text,
-  timestamp,
-  uuid,
-} from 'drizzle-orm/pg-core';
-import { bytea } from './_custom.js';
+import { boolean, check, index, integer, pgEnum, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { bytea, instant } from './_custom.js';
 import { users } from './user.js';
 
 export const uploadScanStateEnum = pgEnum('upload_scan_state', ['pending', 'clear', 'flagged']);
@@ -61,7 +51,7 @@ export const uploads = pgTable(
      * migration SQL (ON DELETE SET NULL).
      */
     ownerStoryId: uuid('owner_story_id'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().defaultNow(),
   },
   (t) => [
     index('uploads_owner_idx').on(t.ownerUserId),

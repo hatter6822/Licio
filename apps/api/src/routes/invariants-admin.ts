@@ -349,18 +349,26 @@ export function createInvariantsAdminRoutes(
         // could not — reporting truncation that had not happened.
         const periodEnd = generatedAt.toISOString();
         const store = resolveEvents().invariantStore;
-        const rows = await store.listByTypeSince(
+        // STATE THE COVERAGE, FROM ONE READ.  GWEI emits one output per eligible
+        // cohort pair per scheduler run, so the cap is reachable in an ordinary
+        // period — and a capped list with no denominator reads as a complete
+        // account of the window and cannot be reconciled against the logged
+        // outputs.  The count is the one fact the truncated read cannot supply
+        // about itself.
+        //
+        // It arrives WITH the page rather than from a second call: two
+        // statements are two READ COMMITTED snapshots, so an output that
+        // committed between them was counted but could not have been listed,
+        // and `total_outputs` / `truncated` / the covered range then described
+        // different datasets.  Sharing `periodEnd` does not fix that — the
+        // bound is on `created_at`, and a row with an earlier `created_at` can
+        // still commit later.
+        const { rows, total } = await store.pageByTypeSince(
           'GWEI',
           periodStart,
           TRANSPARENCY_ROW_CAP,
           periodEnd,
         );
-        // STATE THE COVERAGE.  GWEI emits one output per eligible cohort pair
-        // per scheduler run, so the cap is reachable in an ordinary period —
-        // and a capped list with no denominator reads as a complete account of
-        // the window and cannot be reconciled against the logged outputs.  The
-        // count is the one fact the truncated read cannot supply about itself.
-        const total = await store.countByTypeSince('GWEI', periodStart, periodEnd);
         const threshold = 0.5;
         const statements = rows.map((row) => {
           const suppressed = row.reasonCodes.includes('SUPPRESSED_K_ANONYMITY');
