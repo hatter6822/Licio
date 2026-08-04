@@ -183,11 +183,15 @@ describe('CreatePrivateRoomWizard', () => {
     }
   });
 
-  it('reconciles the SERVER record away when the local write fails', async () => {
+  it('REPAIRS the local handle instead of discarding the server record', async () => {
     // The POST succeeds, the IndexedDB attach does not (quota, a private-mode
-    // eviction). `room_server_id` is the only handle for delist and delete and
-    // no endpoint lists an account's stubs, so dropping it would strand a
-    // publicly-enumerable record its own creator could never reach.
+    // eviction). This used to DELETE the committed record, on the reasoning
+    // that a handle-less record is unreachable — but the owner lookup that
+    // finds it here disproves that, and for a `listed` room the delete threw
+    // away something the user cannot remake, since the settings path registers
+    // `unlisted` records only. So the found id is re-attached, which is the
+    // actual repair for the failure that occurred: the POST landed and only
+    // this device's write did not.
     const calls: { method: string; url: string }[] = [];
     // The room's founder signing key is generated per run, so the owner lookup
     // echoes back whatever the create actually signed — that key is how the
@@ -228,6 +232,78 @@ describe('CreatePrivateRoomWizard', () => {
         headers: { 'content-type': 'application/json' },
       });
     });
+    // The first attach fails (the transient local fault); the repair attempt
+    // that follows the owner lookup succeeds, which is the ordinary case.
+    let attachCalls = 0;
+    const attachSpy = vi
+      .spyOn(PrivateRoomSession.prototype, 'attachDirectoryStub')
+      .mockImplementation(async () => {
+        attachCalls += 1;
+        if (attachCalls === 1) throw new Error('QuotaExceededError');
+      });
+    try {
+      const user = userEvent.setup();
+      const onCreated = vi.fn();
+      render(<CreatePrivateRoomWizard onCreated={onCreated} />);
+      await user.type(screen.getByLabelText(/room name/i), 'Doomed Room');
+      for (const ack of PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS) {
+        await user.click(screen.getByLabelText(ack.label));
+      }
+      await user.click(screen.getByRole('button', { name: /create private room/i }));
+
+      // The handle was re-attached from the record the owner lookup found…
+      await waitFor(() => expect(attachCalls).toBe(2));
+      // …and the record itself was never deleted.
+      expect(calls.some((call) => call.method === 'DELETE')).toBe(false);
+      // No warning survives a successful repair: nothing is left for the user
+      // to do about it.
+      expect(screen.queryByText(/could not save its directory record/i)).not.toBeInTheDocument();
+    } finally {
+      attachSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('KEEPS the record when the repair fails too, and says where to find it', async () => {
+    // The local store is genuinely broken, so the handle cannot be re-attached.
+    // Deleting a committed `listed` registration to tidy up would destroy a
+    // public-listing choice the user cannot remake; `/mine` can still reach it,
+    // so the honest answer is to keep it and say so.
+    const calls: { method: string; url: string }[] = [];
+    let signedRoomKey = '';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      calls.push({ method: init?.method ?? 'GET', url });
+      if (typeof init?.body === 'string' && init.body.includes('signed_stub')) {
+        const parsed = JSON.parse(init.body) as { signed_stub?: { room_public_key?: string } };
+        signedRoomKey = parsed.signed_stub?.room_public_key ?? '';
+      }
+      const body = url.includes('/csrf-token')
+        ? { token: 'test-csrf-token' }
+        : url.includes('/private-rooms/mine')
+          ? {
+              stubs: [
+                {
+                  room_server_id: '11111111-1111-4111-8111-111111111111',
+                  stub_id: '22222222-2222-4222-8222-222222222222',
+                  directory_mode: 'listed',
+                  room_public_key: signedRoomKey,
+                  signed_stub: {},
+                },
+              ],
+              next_cursor: null,
+            }
+          : {
+              room_server_id: '11111111-1111-4111-8111-111111111111',
+              stub_id: '22222222-2222-4222-8222-222222222222',
+              bootstrap_endpoints: [],
+              created_at: '2026-08-02T00:00:00.000Z',
+            };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
     const attachSpy = vi
       .spyOn(PrivateRoomSession.prototype, 'attachDirectoryStub')
       .mockRejectedValue(new Error('QuotaExceededError'));
@@ -241,15 +317,8 @@ describe('CreatePrivateRoomWizard', () => {
       }
       await user.click(screen.getByRole('button', { name: /create private room/i }));
 
-      await screen.findByText(/could not save its directory record/i);
-      await waitFor(() =>
-        expect(
-          calls.some(
-            (call) =>
-              call.method === 'DELETE' && call.url.includes('11111111-1111-4111-8111-111111111111'),
-          ),
-        ).toBe(true),
-      );
+      await screen.findByText(/the record is kept either way/i);
+      expect(calls.some((call) => call.method === 'DELETE')).toBe(false);
       // The ROOM survives — it is local and already created.
       expect(onCreated).not.toHaveBeenCalled();
       expect(screen.getByRole('button', { name: /open the room anyway/i })).toBeInTheDocument();

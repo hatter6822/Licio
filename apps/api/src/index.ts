@@ -478,6 +478,10 @@ if (db) {
         // would commit on its own, and a later failure in the unit would leave
         // the user's attention history irreversibly gone, the record rolled
         // back, and a 500 telling them it did not happen.
+        // Every workstream's `/config` write, on this transaction — one table,
+        // one binding, so a config change and the record of who made it commit
+        // together everywhere.
+        config: new DrizzlePwattConfigStore(tx),
         purgeAttention: (userId, mode) =>
           purgeUserAttention(
             {
@@ -600,6 +604,7 @@ if (db) {
         takedowns: new DrizzleTakedownStore(tx),
         stories: new DrizzleStoryStore(tx),
         embeddings: new DrizzleEmbeddingStore(tx),
+        reviewQueue: new DrizzleReviewQueueStore(tx),
         identityAudit: new DrizzleAuditStore(tx),
       }),
     );
@@ -743,6 +748,11 @@ if (db) {
         // and both are re-asked inside the unit.
         rooms: new DrizzleRoomStore(tx),
         promotions: new DrizzlePromotionStore(tx),
+        // The MFCI resolution surface on the same handle: `resolve` is a
+        // compare-and-set, so its trail row has to commit with it or there is
+        // no second chance to write one.
+        mfciCases: new DrizzleMfciCaseStore(tx),
+        mfciRiskStates: new DrizzleMfciRiskStateStore(tx),
       }),
     );
 }

@@ -26,6 +26,7 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
+import type { PwattConfigStore } from '../events/stores.js';
 import type { AuditStore } from '../identity/audit.js';
 import {
   type InMemoryRollback as InMemoryRollbackContract,
@@ -534,6 +535,12 @@ export interface ComplianceTxStores {
    * half a §19.1 subject would notice.
    */
   identityAudit: AuditStore;
+  /** Published legal disclosures — an immutable publish plus its identity-trail
+   *  mirror, which used to be a best-effort append after the fact. */
+  disclosures: DisclosureStore;
+  /** The runtime-config store, so a `compliance.*` key change and the record of
+   *  who made it commit together. */
+  config: PwattConfigStore;
 }
 
 /**
@@ -1090,8 +1097,18 @@ export class InMemoryKycVerificationStore
   }
 }
 
-export class InMemoryDisclosureStore implements DisclosureStore {
+export class InMemoryDisclosureStore implements DisclosureStore, InMemoryRollbackContract {
   readonly #rows: DisclosureVersionRecord[] = [];
+
+  /** The unit of work's undo — a publish carries its publisher in the row AND a
+   *  mirror in the identity trail, and the two commit together. */
+  beginRollback(): () => void {
+    const saved = [...this.#rows];
+    return () => {
+      this.#rows.length = 0;
+      this.#rows.push(...saved);
+    };
+  }
 
   async publish(record: DisclosureVersionRecord): Promise<DisclosureVersionRecord> {
     if (

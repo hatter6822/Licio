@@ -1012,6 +1012,46 @@ describe('trust-safety route branches', () => {
     ).toBe(404);
   });
 
+  it('answers a lost-response RETRY even after the listing is gone', async () => {
+    // `submitReport` replays a stored report ahead of its own gates, but the
+    // route's target-existence check ran before it was ever called — and that
+    // check reads a world that moves. A listed-room report whose response was
+    // lost, retried after the owner delists, met `target_not_found`: an accepted
+    // report reported as a failure, by a check the stored row makes irrelevant,
+    // to an offline queue that cannot tell this from a real rejection.
+    const { getPrivateRoomStubService, PrivateRoomStubService, setPrivateRoomStubService } =
+      await import('../private-rooms/service.js');
+    const previous = getPrivateRoomStubService();
+    const { InMemoryPrivateRoomStubStore } = await import('../private-rooms/stores.js');
+    const service = new PrivateRoomStubService(new InMemoryPrivateRoomStubStore());
+    const roomServerId = randomUUID();
+    let listed = true;
+    service.isPubliclyListed = async () => listed;
+    service.listingSnapshot = async () => null;
+    setPrivateRoomStubService(service);
+    try {
+      const reporter = await seedUser({ handle: `rr${randomUUID().slice(0, 6)}` });
+      const body = reportBody({
+        target_type: 'room',
+        target_id: roomServerId,
+        content_kind: undefined,
+      });
+      const first = await app().request(post('/v1/reports', body, reporter.cookie));
+      expect(first.status).toBe(201);
+      const original = (await first.json()) as { report_id: string };
+
+      // …the owner delists (or removes) the record, then the client retries.
+      listed = false;
+      const retry = await app().request(post('/v1/reports', body, reporter.cookie));
+      expect(retry.status).toBe(200);
+      const replayed = (await retry.json()) as { report_id: string; idempotent: boolean };
+      expect(replayed.idempotent).toBe(true);
+      expect(replayed.report_id).toBe(original.report_id);
+    } finally {
+      setPrivateRoomStubService(previous);
+    }
+  });
+
   it('#12b records evidence for a listed room whose listing VANISHED before the capture', async () => {
     // The most urgent version of this report — filed, then the room delisted or
     // its record removed before the capture ran — was the one case that carried

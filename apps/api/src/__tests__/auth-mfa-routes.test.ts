@@ -241,6 +241,55 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect((await readJson<{ recovery_remaining: number }>(retry)).recovery_remaining).toBe(9);
   });
 
+  it('does NOT verify the session when the unit fails to commit', async () => {
+    // `markMfaVerified` writes to Redis and cannot join the Postgres
+    // transaction, so its ORDER is the whole guarantee. Inside the unit, a
+    // commit failure left the session already privileged while the consumption
+    // and the record rolled back — steward authority with nothing accounting
+    // for it, and the code still reusable. After the commit, a failure grants
+    // nothing.
+    const { app, sid } = await signup('mfacommit');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const sid2 = cookie(confirm, '__Host-sid');
+    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
+      .recovery_codes[0] as string;
+    // A session that has NOT cleared MFA this session (the confirm rotated it).
+    const { token: sid3 } = await createSession(services.sessions, {
+      userId: (await services.sessions.get(sha256Hex(sid2.split('=')[1] as string)))?.record
+        .user_id as string,
+      authMethod: 'email_otp',
+      deviceLabel: 'test',
+      rememberMe: false,
+    });
+    expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
+
+    // The unit accepts its writes and then fails to commit.
+    const realTransact = services.transact.bind(services);
+    services.transact = async (work) => {
+      await realTransact(work);
+      throw new Error('commit failed');
+    };
+    const attempt = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${sid3}`),
+      body: JSON.stringify({ code: recovery }),
+    });
+    services.transact = realTransact;
+    expect(attempt.status).toBeGreaterThanOrEqual(500);
+    // The session is STILL unverified: no privilege was granted by a request
+    // whose record did not survive.
+    expect(await sessionMfaVerified(`__Host-sid=${sid3}`)).toBe(false);
+  });
+
   it('records a REJECTED attempt as a failure, not as a verification', async () => {
     // Both paths appended `mfa_verify`, so the trail could not answer "did this
     // account clear MFA?" — a brute-force run read exactly like sign-ins.

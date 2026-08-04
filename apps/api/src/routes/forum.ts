@@ -1299,16 +1299,22 @@ export function createForumRoutes() {
           const problem = validateForumConfigChange(getForumServices().config(), key, value);
           if (problem !== null) return c.json(deny('invalid_config', problem), 422);
           const events = getEventPipelineServices();
-          await storeForumConfigValue(events.configStore, key, value);
           const forum = getForumServices();
-          await forum.reloadConfig();
           const identity = getIdentityServices();
-          await identity.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'forum_config_change',
-            targetRef: key,
-            context: { setting: key, new_value: JSON.stringify(value).slice(0, 256) },
+          // One unit: a live config change with no record of who made it is the
+          // same defect as an unrecorded enforcement.
+          await identity.transact(async (tx) => {
+            await storeForumConfigValue(tx.config ?? events.configStore, key, value);
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'forum_config_change',
+              targetRef: key,
+              context: { setting: key, new_value: JSON.stringify(value).slice(0, 256) },
+            });
           });
+          // AFTER the commit — a reload from an uncommitted write would cache a
+          // value the database does not hold.
+          await forum.reloadConfig();
           return c.json({ config: forum.config() });
         },
       )

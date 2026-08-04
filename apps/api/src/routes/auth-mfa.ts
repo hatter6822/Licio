@@ -307,16 +307,28 @@ async function finishMfa<T>(
    */
   consume?: (tx: IdentityTx) => Promise<T | null>,
 ): Promise<T | null> {
+  // THE PRIVILEGE IS GRANTED AFTER THE COMMIT, and this ordering is the whole
+  // point of the function.
+  //
   // The session flag lives in Redis and cannot join a Postgres transaction, so
-  // the RECORD gates the change: it is appended first, inside the unit, and the
-  // flag is set inside it too — a failed `markMfaVerified` aborts the record
-  // rather than leaving a verified session nothing accounts for.
+  // one of the two orderings has to be chosen deliberately. It used to sit
+  // INSIDE the unit, on the reasoning that a failed `markMfaVerified` would
+  // then abort the record — true, and it bought the smaller half. The other
+  // half is what a failure actually looks like: Postgres accepting the callback
+  // and then failing to COMMIT left Redis already holding a verified session
+  // while the consumption and the `mfa_verify` row both rolled back. The
+  // request answered 500, the recovery code stayed reusable, and the session
+  // held steward privileges with nothing recording that it ever cleared MFA.
+  //
+  // After the commit, the two failure modes are: nothing happens at all, or the
+  // factor is spent and RECORDED while the session stays unverified — costing
+  // the user a retry with another code, never granting authority no record
+  // accounts for. A privilege gate must fail closed on the privilege.
   const spent = await services
     .transact(async (tx) => {
       const consumed = consume === undefined ? (undefined as T) : await consume(tx);
       if (consumed === null) throw new RecoveryCodeAlreadySpentError();
       await tx.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
-      await markMfaVerified(services.sessions, tokenHash);
       return consumed;
     })
     .catch((error: unknown) => {
@@ -325,6 +337,7 @@ async function finishMfa<T>(
       throw error;
     });
   if (spent === null) return null;
+  await markMfaVerified(services.sessions, tokenHash);
   await services.otp.delete(attemptsKey(userId));
   const token = readSessionToken(c.req.header('cookie'));
   const rotated = token ? await rotateSession(services.sessions, token) : null;

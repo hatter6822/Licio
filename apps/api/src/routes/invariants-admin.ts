@@ -254,43 +254,54 @@ export function createInvariantsAdminRoutes(
         if (!z.string().uuid().safeParse(caseId).success) {
           return c.json(deny('invalid_case', 'caseId must be a UUID'), 422);
         }
-        const resolved = await invariants.mfciCases.resolve(
-          caseId,
-          action,
-          `steward:${auth.userId}`,
-          new Date(invariants.now()).toISOString(),
-        );
-        if (!resolved) return c.json(deny('not_found', 'No open case with that id'), 404);
-        // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d)
-        // AND releases the held risk state through the analyst-override
-        // evidence path (WS-H.3.4a: downward needs clearing or an override).
-        if (action === 'cleared') {
-          await resolveItemSafetyState(
-            resolveEvents(),
-            identity,
-            resolved.targetId,
-            'clear',
+        // THE RESOLUTION, THE RELEASE AND THE RECORD ARE ONE UNIT.
+        //
+        // `resolve` is a compare-and-set: once it lands the case is no longer
+        // open and every retry answers `not_found`, so an append failure after
+        // it left a resolved case, a lifted safety freeze and a released risk
+        // state with nothing naming the steward who did any of it — and no
+        // second chance to write the row. The clearing path is the one that
+        // matters most: it is what takes a freeze OFF.
+        const resolved = await invariants.transact(async (tx) => {
+          const outcome = await tx.mfciCases.resolve(
+            caseId,
+            action,
             `steward:${auth.userId}`,
+            new Date(invariants.now()).toISOString(),
           );
-          const current =
-            (await invariants.mfciRiskStates.get(resolved.targetId))?.state ?? 'normal';
-          const transition = nextRiskState(current, 0, invariants.config().mfciRiskThresholds, {
-            analystOverride: true,
+          if (!outcome) return null;
+          // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d)
+          // AND releases the held risk state through the analyst-override
+          // evidence path (WS-H.3.4a: downward needs clearing or an override).
+          if (action === 'cleared') {
+            await resolveItemSafetyState(
+              resolveEvents(),
+              identity,
+              outcome.targetId,
+              'clear',
+              `steward:${auth.userId}`,
+            );
+            const current = (await tx.mfciRiskStates.get(outcome.targetId))?.state ?? 'normal';
+            const transition = nextRiskState(current, 0, invariants.config().mfciRiskThresholds, {
+              analystOverride: true,
+            });
+            await tx.mfciRiskStates.set({
+              targetId: outcome.targetId,
+              state: transition.to,
+              score: 0,
+              reason: transition.reason,
+              updatedAt: new Date(invariants.now()).toISOString(),
+            });
+          }
+          await tx.audit({
+            actorUserId: auth.userId,
+            eventType: 'mfci_case_action',
+            targetRef: caseId,
+            context: { action, target_id: outcome.targetId, risk_state: outcome.riskState },
           });
-          await invariants.mfciRiskStates.set({
-            targetId: resolved.targetId,
-            state: transition.to,
-            score: 0,
-            reason: transition.reason,
-            updatedAt: new Date(invariants.now()).toISOString(),
-          });
-        }
-        await identity.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'mfci_case_action',
-          targetRef: caseId,
-          context: { action, target_id: resolved.targetId, risk_state: resolved.riskState },
+          return outcome;
         });
+        if (!resolved) return c.json(deny('not_found', 'No open case with that id'), 404);
         return c.json({ case: resolved });
       })
 
@@ -797,14 +808,23 @@ export function createInvariantsAdminRoutes(
         const problem = validateInvariantsConfigValue(key, value);
         if (problem !== null) return c.json(deny('invalid_value', problem), 422);
         const invariants = resolveInvariants();
-        await storeInvariantsConfigValue(resolveEvents().configStore, key, value);
-        await invariants.reloadConfig();
-        await resolveIdentity().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'invariant_config_change',
-          targetRef: key,
-          context: { key },
+        const identity = resolveIdentity();
+        // The value and the record of who set it commit together: a live
+        // configuration change nothing accounts for is the same defect as an
+        // unrecorded enforcement, on the surface that decides what the
+        // invariants are allowed to do.
+        await identity.transact(async (tx) => {
+          await storeInvariantsConfigValue(tx.config ?? resolveEvents().configStore, key, value);
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'invariant_config_change',
+            targetRef: key,
+            context: { key },
+          });
         });
+        // The in-process cache reload follows the COMMIT — reloading from an
+        // uncommitted write would serve a value the database does not hold.
+        await invariants.reloadConfig();
         return c.json({ ok: true, key });
       })
 

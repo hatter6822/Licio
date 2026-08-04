@@ -105,19 +105,27 @@ export function createIngestionAdminRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const ingestion = getIngestionServices();
           const { action, note } = c.req.valid('json');
-          const resolved = await ingestion.reviewQueue.resolve(
-            c.req.valid('param').reviewId,
-            `${action}: ${note}`,
-            auth.userId,
-            new Date(ingestion.now()).toISOString(),
-          );
-          if (!resolved) return c.json(deny('not_found', 'Review item not found'), 404);
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'ingestion_review_action',
-            targetRef: resolved.reviewId,
-            context: { setting: resolved.kind, new_value: action },
+          // The resolution and the record of who made it are one unit: a review
+          // item resolved with nothing naming the steward is a decision with no
+          // decider, and `resolve` is a compare-and-set — once it lands, the
+          // retry finds nothing open and no second chance to write the row.
+          const resolved = await ingestion.transact(async (tx) => {
+            const item = await tx.reviewQueue.resolve(
+              c.req.valid('param').reviewId,
+              `${action}: ${note}`,
+              auth.userId,
+              new Date(ingestion.now()).toISOString(),
+            );
+            if (!item) return null;
+            await tx.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'ingestion_review_action',
+              targetRef: item.reviewId,
+              context: { setting: item.kind, new_value: action },
+            });
+            return item;
           });
+          if (!resolved) return c.json(deny('not_found', 'Review item not found'), 404);
           return c.json({ item: resolved });
         },
       )
@@ -438,17 +446,21 @@ export function createIngestionAdminRoutes() {
           if (problem !== null) return c.json(deny('invalid_config', problem), 422);
           const events = getEventPipelineServices();
           const ingestion = getIngestionServices();
-          await storeIngestionConfigValue(
-            events.configStore,
-            key as keyof IngestionRuntimeConfig,
-            value,
-          );
-          await ingestion.reloadConfig();
-          await getIdentityServices().audit.append({
-            actorUserId: auth.userId,
-            eventType: 'ingestion_config_change',
-            context: { setting: key },
+          // The value and the record of who set it are one unit; the cache
+          // reload follows the commit.
+          await getIdentityServices().transact(async (tx) => {
+            await storeIngestionConfigValue(
+              tx.config ?? events.configStore,
+              key as keyof IngestionRuntimeConfig,
+              value,
+            );
+            await tx.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'ingestion_config_change',
+              context: { setting: key },
+            });
           });
+          await ingestion.reloadConfig();
           return c.json({ ok: true, key });
         },
       )

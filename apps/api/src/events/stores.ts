@@ -14,6 +14,7 @@
 //   • retention operations are batched and idempotent (WS-E.1.4).
 import type { ActorBehaviorWindow } from '@licio/invariants';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 /** A stored event row (ISO timestamps; mirrors packages/db `events`). */
 export interface StoredEvent {
@@ -1057,8 +1058,14 @@ export interface PwattConfigStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryPwattConfigStore implements PwattConfigStore {
+export class InMemoryPwattConfigStore implements PwattConfigStore, InMemoryRollback {
   readonly #rows = new Map<string, Record<string, unknown>>();
+
+  /** The unit of work's undo: a runtime-config change and the record of who made
+   *  it commit together, so a failed append must not leave the new value live. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
 
   async get(key: string): Promise<Record<string, unknown> | null> {
     return this.#rows.get(key) ?? null;

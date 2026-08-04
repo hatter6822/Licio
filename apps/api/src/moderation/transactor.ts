@@ -43,6 +43,8 @@
 // and two bulk operations over overlapping sets in different orders would deadlock.  One
 // case per unit keeps a single lock order — case row, then the chain — which no cycle
 // can form across.
+
+import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import type { AuditWriteInput } from './audit.js';
 import type { ModerationContentPort } from './ports.js';
@@ -112,6 +114,10 @@ export interface ModerationTx {
    *  appeal is no longer pending and every retry answers `already_decided` — so its audit
    *  row has to commit with it or there is no second chance to write one. */
   readonly appeals: ModerationAppealStore;
+  /** The moderation runtime-config store. A live policy change with no record of
+   *  who made it is the same defect as an unrecorded enforcement — the console's
+   *  denylists and thresholds decide what the platform blocks. */
+  readonly config: PwattConfigStore;
   /**
    * The WS-S §21.4 directory DEMOTION, bound to this transaction.
    *

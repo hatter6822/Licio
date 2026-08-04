@@ -101,6 +101,29 @@ export type SubmitReportOutcome =
    *  standing warning; the matched value is discarded, never stored. */
   | { ok: false; code: 'key_material_blocked'; message: string };
 
+/**
+ * The stored answer to a report this reporter has ALREADY filed, or null.
+ *
+ * Exported because the ROUTE has to ask it before its own target-existence
+ * gates, not only `submitReport` before its mint-only ones. A lost-response
+ * retry arrives after the world may have moved: the reported room can be
+ * delisted or removed by then, and a P2P shell can never satisfy
+ * `roomVisibleToUser`, so the retry was answered `target_not_found` — a report
+ * that WAS accepted, reported as a failure, by a check the stored row makes
+ * irrelevant. Replay first, validate second: the row already exists, so nothing
+ * about the current world can change what happened.
+ */
+export async function findIdempotentReplay(
+  services: ModerationServices,
+  reporterUserId: string,
+  localOperationId: string,
+): Promise<{ ok: true; response: ReportCreatedResponse; caseId: string } | null> {
+  const byOp = await services.reports.findByOperationId(reporterUserId, localOperationId);
+  if (!byOp) return null;
+  services.metrics.increment('reports.idempotent_op');
+  return { ok: true, response: toResponse(byOp, true), caseId: byOp.caseId };
+}
+
 function toResponse(report: ModerationReportRecord, idempotent: boolean): ReportCreatedResponse {
   return {
     report_id: report.reportId,
@@ -154,11 +177,8 @@ export async function submitReport(
   //    filter shipped, or before a detector tuning, whose stored text the scan
   //    now trips) instead of its stored response, storing no new secret either
   //    way (WS-N.2.3e is about a NEW row).
-  const byOp = await services.reports.findByOperationId(reporterUserId, request.local_operation_id);
-  if (byOp) {
-    services.metrics.increment('reports.idempotent_op');
-    return { ok: true, response: toResponse(byOp, true), caseId: byOp.caseId };
-  }
+  const replay = await findIdempotentReplay(services, reporterUserId, request.local_operation_id);
+  if (replay) return replay;
   // 2. Idempotency by reporter+target+reason within the 24h cooldown (edit-then-
   //    resubmit to evade the per-target cap is the same logical report).
   const cooldownIso = new Date(nowMs - 24 * 3_600_000).toISOString();

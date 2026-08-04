@@ -227,6 +227,12 @@ export function createInMemoryModerationServices(
         notices: noticeStore,
         appeals: appealStore,
         incidents: incidentStore,
+        // Read at CALL time: the production boot swaps in the Drizzle config
+        // store after this object is built, and a captured reference would keep
+        // writing where nothing else reads.
+        get config() {
+          return services.configStore;
+        },
         // A no-op: the in-memory transactor already runs units one at a time, which is
         // the property the Postgres advisory lock buys.
         lockRevertScope: async () => {},
@@ -261,6 +267,7 @@ export function createInMemoryModerationServices(
         appealStore,
         incidentStore,
         auditStore,
+        ...(services.configStore instanceof InMemoryPwattConfigStore ? [services.configStore] : []),
         ...(options.extraRollbacks ?? []),
         ...extraRollbacks,
       ],

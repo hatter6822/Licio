@@ -117,6 +117,12 @@ export interface InvariantTx {
   /** The shadow-status history — a promotion is a durable governance decision
    *  and carries the operator's identity-trail row with it. */
   readonly promotions: PromotionStore;
+  /** MFCI cases + risk states — a steward's confirm/clear/escalate is a durable
+   *  decision that lifts or holds a safety freeze, and it carries the trail row
+   *  naming who made it. `resolve` is a compare-and-set, so once it lands there
+   *  is no second chance to write that row. */
+  readonly mfciCases: MfciCaseStore;
+  readonly mfciRiskStates: MfciRiskStateStore;
 }
 
 export interface InvariantPlatformServices {
@@ -216,6 +222,12 @@ export function createInMemoryInvariantServices(
       get promotions(): PromotionStore {
         return services.promotions;
       },
+      get mfciCases(): MfciCaseStore {
+        return services.mfciCases;
+      },
+      get mfciRiskStates(): MfciRiskStateStore {
+        return services.mfciRiskStates;
+      },
     },
     // The AUDIT belongs in the undo too, and its absence was the same silent
     // hole the ingestion stores had: `tx.audit` appends through the identity
@@ -226,6 +238,10 @@ export function createInMemoryInvariantServices(
       ...(services.bridgeAttempts instanceof InMemoryBridgeAttemptStore ? [bridgeAttempts] : []),
       ...(services.promotions instanceof InMemoryPromotionStore ? [services.promotions] : []),
       ...(identity.audit instanceof InMemoryAuditStore ? [identity.audit] : []),
+      ...(services.mfciCases instanceof InMemoryMfciCaseStore ? [services.mfciCases] : []),
+      ...(services.mfciRiskStates instanceof InMemoryMfciRiskStateStore
+        ? [services.mfciRiskStates]
+        : []),
     ],
   );
 

@@ -42,6 +42,7 @@ import type {
   SarStatus,
 } from '@licio/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, sql } from 'drizzle-orm';
+import { DrizzlePwattConfigStore } from '../events/drizzle-event-stores.js';
 import { DrizzleAuditStore } from '../identity/drizzle-store.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
@@ -1577,7 +1578,7 @@ export class DrizzleComplianceTransactor implements ComplianceTransactor {
   }
 }
 
-/** The six unit-of-work stores bound to one handle (a db or a transaction). */
+/** Every unit-of-work store bound to one handle (a db or a transaction). */
 function complianceStoresOver(db: DbOrTx): ComplianceTxStores {
   return {
     cases: new DrizzleComplianceCaseStore(db),
@@ -1589,6 +1590,10 @@ function complianceStoresOver(db: DbOrTx): ComplianceTxStores {
     pins: new DrizzleWalletRiskPinStore(db),
     declarations: new DrizzleRegionDeclarationStore(db),
     kyc: new DrizzleKycVerificationStore(db),
+    disclosures: new DrizzleDisclosureStore(db),
+    // The `compliance.*` runtime-config keys, so a change and the record of who
+    // made it commit together (one `pwatt_config` table, one handle).
+    config: new DrizzlePwattConfigStore(db),
     // The WS-D trail on the SAME handle: one action, both records.
     identityAudit: new DrizzleAuditStore(db),
   };

@@ -91,6 +91,9 @@ export interface IngestionTx {
   readonly takedowns: TakedownStore;
   readonly stories: StoryStore;
   readonly embeddings: EmbeddingStore;
+  /** The steward review queue — a resolution is a durable decision and carries
+   *  the identity-trail row naming who made it. */
+  readonly reviewQueue: ReviewQueueStore;
   /** The WS-D identity trail, on that handle: an operator action on a source,
    *  syndication or takedown is accountable or it did not happen. */
   readonly identityAudit: AuditStore;
@@ -365,6 +368,9 @@ export function createInMemoryIngestionServices(
       get embeddings(): EmbeddingStore {
         return services.embeddings;
       },
+      get reviewQueue(): ReviewQueueStore {
+        return services.reviewQueue;
+      },
       get identityAudit(): AuditStore {
         return getIdentityServices().audit;
       },
@@ -376,6 +382,7 @@ export function createInMemoryIngestionServices(
         services.takedowns,
         services.stories,
         services.embeddings,
+        services.reviewQueue,
         getIdentityServices().audit,
       ].filter(
         (store): store is typeof store & InMemoryRollback =>

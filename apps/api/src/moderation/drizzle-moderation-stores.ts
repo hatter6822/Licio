@@ -52,6 +52,7 @@ import {
   type SQL,
   sql,
 } from 'drizzle-orm';
+import { DrizzlePwattConfigStore } from '../events/drizzle-event-stores.js';
 import { keysetAfterRow } from '../lib/keyset.js';
 import { isUniqueViolation, uniqueViolationConstraint } from '../lib/pg-errors.js';
 import { appendAudit } from './audit.js';
@@ -1949,6 +1950,9 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
         notices: new DrizzleModerationNoticeStore(tx),
         appeals: new DrizzleModerationAppealStore(tx),
         incidents: new DrizzleCoordinatedReportIncidentStore(tx),
+        // The console's runtime config, on this handle: one `pwatt_config`
+        // table, so a policy change and its record commit together.
+        config: new DrizzlePwattConfigStore(tx),
         // `hashtext` rather than a literal: the scope is a uuid, and the lock space is
         // shared, so it is namespaced to keep it clear of the chain key and of the
         // rendezvous store's own `hashtext` pairs.

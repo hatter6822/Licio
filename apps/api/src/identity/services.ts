@@ -6,6 +6,8 @@
 // without threading them through every handler; tests swap in a fresh in-memory
 // bundle per case.
 
+import { getEventPipelineServices } from '../events/services.js';
+import { InMemoryPwattConfigStore, type PwattConfigStore } from '../events/stores.js';
 import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { type AuditStore, InMemoryAuditStore } from './audit.js';
 import type { AuthMethodInventory } from './auth-methods.js';
@@ -194,6 +196,22 @@ export interface IdentityTx {
    * must say so by absence rather than by pretending.
    */
   readonly purgeAttention?: (userId: string, mode: 'delete' | 'reset') => Promise<number>;
+  /**
+   * The runtime-CONFIG store, on this handle.
+   *
+   * Every workstream's `/config` endpoint is the same two statements — set the
+   * value, append the record of who set it — and every one of them ran the two
+   * apart, so a failed append left a live configuration change with nothing
+   * accounting for it. They all write the SAME `pwatt_config` table through the
+   * same `PwattConfigStore` interface, so one binding closes all of them: in
+   * production it is built over the identity transaction, and in memory it is
+   * the WS-E store those handlers already use.
+   *
+   * Domains with their own config-store INSTANCE (WS-N compliance, WS-J
+   * moderation) use their own transactor instead — writing their keys through
+   * this handle would, in memory, write to a different map than they read from.
+   */
+  readonly config?: PwattConfigStore;
 }
 
 export interface IdentityServices {
@@ -376,11 +394,20 @@ export function createInMemoryIdentityServices(config: IdentityConfig): Identity
       // does not pretend to more than it has.
       purgeAttention: (userId, mode) =>
         services.purgeAttention?.(userId, mode) ?? Promise.resolve(0),
+      // In memory this IS the store those handlers hold, so the twin is atomic
+      // over it (registered in the rollback list below).
+      get config(): PwattConfigStore {
+        return getEventPipelineServices().configStore;
+      },
     },
-    () => [
-      ...(services.store instanceof InMemoryIdentityStore ? [services.store] : []),
-      ...(services.audit instanceof InMemoryAuditStore ? [services.audit] : []),
-    ],
+    () => {
+      const config = getEventPipelineServices().configStore;
+      return [
+        ...(services.store instanceof InMemoryIdentityStore ? [services.store] : []),
+        ...(services.audit instanceof InMemoryAuditStore ? [services.audit] : []),
+        ...(config instanceof InMemoryPwattConfigStore ? [config] : []),
+      ];
+    },
   );
   const services: IdentityServices = {
     config,

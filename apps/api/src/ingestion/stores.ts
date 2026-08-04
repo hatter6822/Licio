@@ -1481,10 +1481,21 @@ export class InMemoryTakedownStore implements TakedownStore, InMemoryRollback {
   }
 }
 
-export class InMemoryReviewQueueStore implements ReviewQueueStore {
+export class InMemoryReviewQueueStore implements ReviewQueueStore, InMemoryRollback {
   readonly #records = new Map<string, ReviewItemRecord>();
   readonly #now: () => number;
   #counter = 0;
+
+  /** The unit of work's undo — a review resolution commits with the record of
+   *  the steward who made it. */
+  beginRollback(): () => void {
+    const records = mapRollback(this.#records);
+    const counter = this.#counter;
+    return () => {
+      records();
+      this.#counter = counter;
+    };
+  }
 
   constructor(now: () => number = Date.now) {
     this.#now = now;

@@ -190,8 +190,14 @@ export interface MfciCaseStore {
 
 const RISK_SEVERITY: Record<string, number> = { severe: 3, high: 2, elevated: 1, normal: 0 };
 
-export class InMemoryMfciCaseStore implements MfciCaseStore {
+export class InMemoryMfciCaseStore implements MfciCaseStore, InMemoryRollback {
   readonly #rows = new Map<string, MfciCaseRowRecord>();
+
+  /** The unit of work's undo — an MFCI resolution and the record of the steward
+   *  who made it commit together. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
 
   async insert(row: MfciCaseRowRecord): Promise<void> {
     this.#rows.set(row.caseId, { ...row });
@@ -296,8 +302,14 @@ export interface MfciRiskStateStore {
   clear(): Promise<void>;
 }
 
-export class InMemoryMfciRiskStateStore implements MfciRiskStateStore {
+export class InMemoryMfciRiskStateStore implements MfciRiskStateStore, InMemoryRollback {
   readonly #rows = new Map<string, MfciRiskStateRecord>();
+
+  /** The unit of work's undo — an MFCI resolution and the record of the steward
+   *  who made it commit together. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
 
   async get(targetId: string): Promise<MfciRiskStateRecord | null> {
     const row = this.#rows.get(targetId);

@@ -912,11 +912,22 @@ export async function assembleEngagementLandscape(
   // that fixed array. The read is two columns and at most `LANDSCAPE_SCAN_CEILING`
   // rows; the expensive half — hydration, which joins rooms for the visibility
   // bar — stays batched below.
-  const candidates = await events.windowStore.listActiveInWindow(
+  // ONE ROW PAST THE CEILING, which is what makes "was this truncated?"
+  // answerable rather than assumed.
+  //
+  // Reading exactly the ceiling cannot tell a window that holds precisely that
+  // many candidates from one that holds more, so an hour with exactly 1,000
+  // active rows — every one of them examined — reported itself truncated and
+  // told a steward their complete map might be hiding half the hour. The extra
+  // row is never used as a candidate; it exists only to answer the question,
+  // and it costs one row.
+  const probed = await events.windowStore.listActiveInWindow(
     windowStart,
     '1h',
-    LANDSCAPE_SCAN_CEILING,
+    LANDSCAPE_SCAN_CEILING + 1,
   );
+  const truncated = probed.length > LANDSCAPE_SCAN_CEILING;
+  const candidates = truncated ? probed.slice(0, LANDSCAPE_SCAN_CEILING) : probed;
   for (let at = 0; at < candidates.length; at += LANDSCAPE_HYDRATE_BATCH) {
     const page = candidates.slice(at, at + LANDSCAPE_HYDRATE_BATCH);
     // Hydrate PUBLIC-ONLY, in one query: the restriction lives in the read
@@ -946,7 +957,7 @@ export async function assembleEngagementLandscape(
   // own warning. Both are the same question, and it has a direct answer: every
   // candidate this walk was offered was examined, and the read that offered them
   // was not itself truncated.
-  const complete = examined === candidates.length && candidates.length < LANDSCAPE_SCAN_CEILING;
+  const complete = examined === candidates.length && !truncated;
 
   const edges: ReebEdge[] = [];
   for (let i = 0; i < nodes.length; i += 1) {

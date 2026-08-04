@@ -217,13 +217,16 @@ export function createRankingAdminRoutes(
         const problem = validateRankingConfigValue(key, value);
         if (problem !== null) return c.json(deny('invalid_config', problem), 422);
         const ranking = resolveRanking();
-        await ranking.events.configStore.set(key, value);
-        await ranking.reloadConfig();
-        await resolveIdentity().audit.append({
-          actorUserId: auth.userId,
-          eventType: 'ranking_config_change',
-          context: { setting: key },
+        // One unit; the reload follows the commit.
+        await resolveIdentity().transact(async (tx) => {
+          await (tx.config ?? ranking.events.configStore).set(key, value);
+          await tx.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'ranking_config_change',
+            context: { setting: key },
+          });
         });
+        await ranking.reloadConfig();
         ranking.log('ranking.config.changed', { key });
         return c.json({ key, ok: true });
       })

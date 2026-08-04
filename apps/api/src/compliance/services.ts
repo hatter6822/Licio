@@ -206,6 +206,7 @@ export function createInMemoryComplianceServices(
   const pins = new InMemoryWalletRiskPinStore();
   const declarations = new InMemoryRegionDeclarationStore();
   const kyc = new InMemoryKycVerificationStore();
+  const disclosures = new InMemoryDisclosureStore();
   // The in-memory transactor gives dev/tests the SAME all-or-nothing semantics
   // Postgres gives production (the house rule: the in-memory adapters emulate
   // every DB protection, and a transaction is one).
@@ -223,6 +224,8 @@ export function createInMemoryComplianceServices(
       pins,
       declarations,
       kyc,
+      disclosures,
+      config: options.configStore,
       get identityAudit(): AuditStore {
         return getIdentityServices().audit;
       },
@@ -237,6 +240,8 @@ export function createInMemoryComplianceServices(
       pins,
       declarations,
       kyc,
+      disclosures,
+      ...(options.configStore instanceof InMemoryPwattConfigStore ? [options.configStore] : []),
       ...(getIdentityServices().audit instanceof InMemoryAuditStore
         ? [getIdentityServices().audit as unknown as InMemoryAuditStore]
         : []),
@@ -250,7 +255,7 @@ export function createInMemoryComplianceServices(
     caseAudit,
     declarations,
     kyc,
-    disclosures: new InMemoryDisclosureStore(),
+    disclosures,
     acks: new InMemoryDisclosureAckStore(),
     pins,
     sars,

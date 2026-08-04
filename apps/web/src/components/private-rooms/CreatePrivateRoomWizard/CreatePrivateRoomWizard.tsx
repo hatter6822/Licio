@@ -20,11 +20,7 @@ import {
 import { useEffect, useId, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError } from '../../../lib/api.js';
-import {
-  createPrivateRoomStub,
-  deletePrivateRoomStub,
-  findMyPrivateRoomStub,
-} from '../../../lib/private-rooms-api.js';
+import { createPrivateRoomStub, findMyPrivateRoomStub } from '../../../lib/private-rooms-api.js';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { useAuthStore } from '../../../stores/auth.js';
 import { Button } from '../../ui/Button/index.js';
@@ -202,6 +198,10 @@ export function CreatePrivateRoomWizard({
         let created: Awaited<ReturnType<typeof createPrivateRoomStub>> | null = null;
         /** Did a request actually go out? Nothing to reconcile if it did not. */
         let posted = false;
+        /** Hoisted so the catch can RE-ATTACH a record it finds: the blind id
+         *  comes from the epoch-0 rendezvous key and cannot be recomputed at a
+         *  later epoch, so the repair needs the same value the POST carried. */
+        let bootstrapBlindId: string | null = null;
         try {
           // The ACCOUNT registering: the server binds the proof to it, so a
           // published pair replayed by anyone else is useless.
@@ -209,6 +209,7 @@ export function CreatePrivateRoomWizard({
           if (payload.registrationProof === undefined) {
             throw new Error('registration requires a signed-in account');
           }
+          bootstrapBlindId = payload.bootstrapBlindId;
           posted = true;
           created = await createPrivateRoomStub({
             directoryMode: directory,
@@ -272,7 +273,28 @@ export function CreatePrivateRoomWizard({
               // the owner lookup exists — without it, a lost response left a
               // record nobody could ever address.
               const ours = await findMyPrivateRoomStub({ roomPublicKey });
-              if (ours !== null) await deletePrivateRoomStub(ours.room_server_id);
+              if (ours !== null && bootstrapBlindId !== null) {
+                // REPAIR, DO NOT DISCARD.
+                //
+                // Finding the record by room key is proof it is addressable —
+                // which is the very thing the delete was here to prevent losing,
+                // back when no owner lookup existed. Deleting it now throws away
+                // a committed registration to avoid an orphan that this line has
+                // just disproved, and for a `listed` room it throws away
+                // something the user cannot remake: the settings path registers
+                // `unlisted` records only, so "try listing it again later" was
+                // not true.
+                //
+                // So the local handle is re-attached instead. That IS the
+                // failure being recovered from — the POST succeeded and only
+                // this device's write did not.
+                await session.attachDirectoryStub({
+                  roomServerId: ours.room_server_id,
+                  bootstrapBlindId,
+                });
+                setDirectoryWarning(null);
+                directoryFailed = false;
+              }
             } catch {
               // The reconcile read failed too. Escalate the copy only when a
               // record is KNOWN to exist: if the create was a bare transport
@@ -284,7 +306,7 @@ export function CreatePrivateRoomWizard({
                 setDirectoryWarning(
                   t(
                     'privateRoom.create.directoryUnreconciled',
-                    'The room was created on this device, but Licio could not confirm whether a directory record was saved for it. Open this room’s settings later to check and remove it if one is there.',
+                    'The room was created on this device, but Licio could not confirm whether a directory record was saved for it. The record is kept either way — open this room’s settings later to manage or remove it.',
                   ),
                 );
               }

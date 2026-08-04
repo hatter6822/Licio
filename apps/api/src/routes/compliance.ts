@@ -1690,10 +1690,22 @@ export function createComplianceRoutes() {
         if (problem !== null) return c.json(deny('invalid_config_value', problem), 400);
         // WHO changed it rides the SAME write as the change (see
         // `storeComplianceConfigValue`, which owns the `compliance.` key prefix
-        // jointly with the loader that reads it).
-        await storeComplianceConfigValue(services.configStore, key, value, {
-          changed_by_ref: services.opaqueRef(auth.userId),
-          changed_at: new Date(services.now()).toISOString(),
+        // jointly with the loader that reads it) — AND the identity mirror now
+        // commits with both. It used to be appended afterwards and swallowed on
+        // failure, on the reasoning that the change was already attributed
+        // in-row; true, but it left the operator's own trail permanently
+        // missing a change they made, recoverable by nothing. In one unit a
+        // failure costs a retry instead.
+        await services.transactor.run(async (stores) => {
+          await storeComplianceConfigValue(stores.config, key, value, {
+            changed_by_ref: services.opaqueRef(auth.userId),
+            changed_at: new Date(services.now()).toISOString(),
+          });
+          await stores.identityAudit.append({
+            actorUserId: auth.userId,
+            eventType: 'compliance_config_change',
+            context: { setting: key },
+          });
         });
         await services.reloadConfig();
         // WS-E.1.4: retention-override changes propagate to the events job
@@ -1703,21 +1715,6 @@ export function createComplianceRoutes() {
             services.config,
           );
         }
-        // Best-effort MIRROR into the identity audit (a different bounded
-        // context, so it cannot join the write above): failing it must not 500
-        // a change that is already live and attributed.
-        await getIdentityServices()
-          .audit.append({
-            actorUserId: auth.userId,
-            eventType: 'compliance_config_change',
-            context: { setting: key },
-          })
-          .catch((error: unknown) => {
-            services.log('compliance.config.audit_mirror_failed', {
-              key,
-              message: error instanceof Error ? error.message : 'unknown',
-            });
-          });
         return c.json({ key, applied: true });
       },
     )
@@ -1919,22 +1916,39 @@ export function createComplianceRoutes() {
         const body = c.req.valid('json');
         let record: Awaited<ReturnType<typeof services.disclosures.publish>>;
         try {
-          record = await services.disclosures.publish({
-            id: services.uuid(),
-            disclosureId: body.disclosure_id,
-            region: body.region,
-            version: body.version,
-            locale: body.locale,
-            title: body.title,
-            contentMd: body.content_md,
-            requiresAcknowledgment: body.requires_acknowledgment,
-            // The attribution rides the row the publish creates, so the act and
-            // the record of WHO performed it are ONE write.  Recorded after,
-            // it could be lost to a failure and never recovered: a publish is
-            // immutable, so the retry only meets `already_published` and the
-            // live legal disclosure would keep no publisher record at all.
-            publishedByRef: services.opaqueRef(auth.userId),
-            publishedAt: new Date(services.now()).toISOString(),
+          // The publish and the identity mirror are ONE unit. The attribution
+          // already rides the row (`publishedByRef`), which is why the mirror
+          // used to be best-effort — but a swallowed failure left counsel's own
+          // trail permanently missing a publication they made, and a publish is
+          // IMMUTABLE, so nothing could ever add it afterwards. Rolling back
+          // costs a retry; the previous shape cost the record forever.
+          record = await services.transactor.run(async (stores) => {
+            const published = await stores.disclosures.publish({
+              id: services.uuid(),
+              disclosureId: body.disclosure_id,
+              region: body.region,
+              version: body.version,
+              locale: body.locale,
+              title: body.title,
+              contentMd: body.content_md,
+              requiresAcknowledgment: body.requires_acknowledgment,
+              // The attribution rides the row the publish creates, so the act and
+              // the record of WHO performed it are ONE write.  Recorded after,
+              // it could be lost to a failure and never recovered: a publish is
+              // immutable, so the retry only meets `already_published` and the
+              // live legal disclosure would keep no publisher record at all.
+              publishedByRef: services.opaqueRef(auth.userId),
+              publishedAt: new Date(services.now()).toISOString(),
+            });
+            await stores.identityAudit.append({
+              actorUserId: auth.userId,
+              eventType: 'disclosure_change',
+              context: {
+                setting: body.disclosure_id,
+                new_value: `v${body.version}:${body.region}`,
+              },
+            });
+            return published;
           });
         } catch (error) {
           // ONLY the unique conflict is `already_published`.  Calling a store
@@ -1960,23 +1974,6 @@ export function createComplianceRoutes() {
             503,
           );
         }
-        // Best-effort NOTIFICATION, not the record of truth: the attribution
-        // is already committed on the row above (the identity audit is a
-        // different bounded context, so it cannot join that write), and a
-        // 500 here would leave an immutable published disclosure the client
-        // believes failed.
-        await getIdentityServices()
-          .audit.append({
-            actorUserId: auth.userId,
-            eventType: 'disclosure_change',
-            context: { setting: body.disclosure_id, new_value: `v${body.version}:${body.region}` },
-          })
-          .catch((error: unknown) => {
-            services.log('compliance.disclosure.audit_mirror_failed', {
-              disclosureId: body.disclosure_id,
-              message: error instanceof Error ? error.message : 'unknown',
-            });
-          });
         return c.json({ published_at: record.publishedAt }, 201);
       },
     );

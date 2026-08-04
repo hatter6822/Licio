@@ -42,7 +42,7 @@ import {
   removeBlock,
   removeMute,
 } from '../moderation/relations.js';
-import { submitReport } from '../moderation/reports.js';
+import { findIdempotentReplay, submitReport } from '../moderation/reports.js';
 import { getModerationServices } from '../moderation/services.js';
 import { buildSupportContact } from '../moderation/support.js';
 import { getPrivateRoomStubService } from '../private-rooms/service.js';
@@ -160,6 +160,23 @@ export function createTrustSafetyRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const request = c.req.valid('json');
           const mod = getModerationServices();
+          // A RETRY IS ANSWERED BEFORE ANY MUTABLE GATE.
+          //
+          // `submitReport` already replays a stored report ahead of its own
+          // mint-only gates, for exactly this reason — but the target-existence
+          // checks below run BEFORE it is ever called, and they read a world
+          // that moves. A listed-room report whose response was lost, retried
+          // after the owner delists or removes the record, met
+          // `target_not_found`: a P2P shell can never satisfy
+          // `roomVisibleToUser`, so an accepted report was reported as a
+          // failure, and the offline queue driving that retry has no way to
+          // tell a real rejection from this one. The stored row already
+          // settles what happened; nothing about the current world can change
+          // it.
+          const replay = await findIdempotentReplay(mod, auth.userId, request.local_operation_id);
+          if (replay) {
+            return c.json(reportCreatedResponseSchema.parse(replay.response), 200);
+          }
           // Resolve target existence (against a tombstone where applicable).  For
           // content, the resolver also yields the AUTHORITATIVE kind (story/
           // thread/contribution); we forward it so the case/report/event record

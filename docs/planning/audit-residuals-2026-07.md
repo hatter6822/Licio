@@ -726,6 +726,23 @@ ephemeral Redis stores counted too.  Each of those made it either silently blind
 to a domain or noisily wrong about correct code, and the second is worse: a gate
 that cries wolf is a gate people learn to skip.
 
+**The write allowlist failed OPEN, and eight handlers were behind it.**  Writes
+were matched by a VERB list, so a store method nobody had thought of read as a
+read and the handler read as clean — the gate reported success over the exact
+defect it advertises, in `/mfci/cases/:caseId/resolve` (`mfciCases.resolve`,
+`mfciRiskStates.set`) and in six `/config` endpoints.  Reads are named now and
+everything else on a service is a write, so an unrecognised verb is guarded from
+the moment it exists.  Writes are identified by RECEIVER — a member call whose
+root binding came from a `get*Services()`/`resolve*()` factory or a unit callback
+— with a name list kept for BARE calls only, because a route file hands services
+to projections and emitters far more often than to a raw writer and failing
+closed there alarms on correct code.
+
+Closing what it found needed one seam rather than eight edits: every workstream's
+`/config` endpoint writes the same `pwatt_config` table, so `IdentityTx.config`
+(built over the identity transaction in production) covers five of them, and the
+two domains owning their own config-store instance use their own transactors.
+
 **The unit one call away.**  `/mfa/totp/verify` spent a single-use recovery code with a `setAuth` and
 then called `finishMfa`, whose own unit recorded the verification — two innocent
 halves (a handler with a write and no append, a helper with an append properly

@@ -289,6 +289,28 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(map?.scan.complete).toBe(false);
   });
 
+  it('calls a window holding EXACTLY the scan ceiling complete', async () => {
+    // Reading exactly `LANDSCAPE_SCAN_CEILING` rows cannot distinguish a window
+    // that holds precisely that many from one that holds more, so an hour with
+    // exactly 1,000 candidates — every one of them examined — reported itself
+    // truncated and told a steward their complete map might be hiding half the
+    // hour. One row past the ceiling answers it; the extra row is never used as
+    // a candidate.
+    //
+    // Only the first 60 are public, so the node cap never fires and the whole
+    // candidate list is walked.
+    const rows: FakeStory[] = Array.from({ length: 1000 }, (_, i) =>
+      story(`${i.toString(16).padStart(8, '0')}-2222-4222-8222-222222222222`, 5000 - i, [
+        TOPIC_A?.id ?? '',
+      ]),
+    );
+    const restricted = rows.slice(60).map((row) => row.storyId);
+    const { events, ingestion } = services(rows, { omitFromList: restricted });
+    const map = await buildCivicMap(events, ingestion, NOW, async () => true);
+    expect(map?.scan.examined).toBe(1000);
+    expect(map?.scan.complete).toBe(true);
+  });
+
   it('calls a NODE-CAPPED window incomplete even when the batch was short', async () => {
     // The case between the two bounds: 101–199 active stories fill the 100-node
     // cap inside a batch that is itself shorter than the scan batch, so the walk

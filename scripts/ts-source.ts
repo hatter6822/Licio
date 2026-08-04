@@ -40,6 +40,8 @@ export interface Syntax {
   readonly expression?: Syntax;
   readonly tag?: Syntax;
   readonly arguments?: readonly Syntax[];
+  /** A function-ish node's declared parameters (`(tx) => …`). */
+  readonly parameters?: readonly Syntax[];
   readonly name?: Syntax;
   readonly propertyName?: Syntax;
   readonly initializer?: Syntax;

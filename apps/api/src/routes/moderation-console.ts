@@ -960,19 +960,25 @@ export function createModerationConsoleRoutes() {
           );
         }
         const changedKeys = Object.keys(patch);
-        for (const [key, value] of Object.entries(patch)) {
-          await storeModerationConfigValue(mod.configStore, key, value);
-        }
-        await mod.reloadConfig();
-        // Audit the change (keys only — values may include the malware-domain
-        // denylist; the keys touched are the accountability record).
-        await writeAudit(mod, {
-          actorUserId: actor.userId,
-          actorRole: actor.stewardRoles[0] ?? null,
-          action: 'config_update',
-          targetType: 'config',
-          notes: `keys: ${changedKeys.join(', ')}`,
+        // The keys and the record of who touched them are ONE unit — these are
+        // the denylists and thresholds that decide what the platform blocks, so
+        // a live change nothing accounts for is the same defect as an
+        // unrecorded enforcement. The cache reload follows the commit.
+        await mod.transactor.run(async (tx) => {
+          for (const [key, value] of Object.entries(patch)) {
+            await storeModerationConfigValue(tx.config, key, value);
+          }
+          // Keys only — values may include the malware-domain denylist; the keys
+          // touched are the accountability record.
+          await tx.audit({
+            actorUserId: actor.userId,
+            actorRole: actor.stewardRoles[0] ?? null,
+            action: 'config_update',
+            targetType: 'config',
+            notes: `keys: ${changedKeys.join(', ')}`,
+          });
         });
+        await mod.reloadConfig();
         return c.json(mod.config() as unknown as Record<string, unknown>);
       })
   );

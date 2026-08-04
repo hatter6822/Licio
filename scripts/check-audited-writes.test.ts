@@ -11,6 +11,7 @@ import { collectRouteFiles, runAuditedWriteGate } from './check-audited-writes.j
 /** Act, then audit: the write lands, the append fails, the record never exists. */
 const actThenAudit = `
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().post('/things/:id/freeze', async (c) => {
     await services.store.updateThing(c.req.param('id'), { frozen: true });
     await services.audit.append({ eventType: 'thing_frozen' });
@@ -22,6 +23,7 @@ export function createRoutes() {
 /** The same handler with both inside one unit. */
 const inUnit = `
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().post('/things/:id/freeze', async (c) => {
     await services.transact(async (tx) => {
       await tx.store.updateThing(c.req.param('id'), { frozen: true });
@@ -35,6 +37,7 @@ export function createRoutes() {
 /** A read that records that it happened — no durable change to lose. */
 const auditOnly = `
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().get('/things/:id/export', async (c) => {
     const rows = await services.store.listThings();
     await services.audit.append({ eventType: 'export_read' });
@@ -46,6 +49,7 @@ export function createRoutes() {
 /** The moderation spelling of a unit, and the free-function audit writer. */
 const moderationShape = `
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().post('/reports/:id/resolve', async (c) => {
     await moderation.transactor.run(async (tx) => {
       await tx.reports.applyAction(c.req.param('id'), 'resolved');
@@ -63,6 +67,7 @@ async function record(id: string) {
   await services.transact(async (tx) => tx.audit({ eventType: 'thing_frozen' }));
 }
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().post('/things/:id/freeze', async (c) => {
     await services.store.updateThing(c.req.param('id'), { frozen: true });
     await services.audit.append({ eventType: 'thing_frozen' });
@@ -99,9 +104,9 @@ describe('check:audited-writes', () => {
   it('points at the unguarded WRITE, which is the line to fix', () => {
     // Not the append: the append is where the defect becomes visible, the write
     // is where it is. `actThenAudit` writes on line 4 and audits on line 5, and
-    // a reviewer opening line 5 sees a correct-looking audit call.
+    // a reviewer opening line 6 sees a correct-looking audit call.
     const issues = runAuditedWriteGate(new Map([['things.ts', actThenAudit]]));
-    expect(issues[0]).toMatch(/^things\.ts:4 /);
+    expect(issues[0]).toMatch(/^things\.ts:5 /);
   });
 
   it('flags a write whose UNIT IS ONE CALL AWAY, in a same-file helper', () => {
@@ -117,6 +122,7 @@ async function finish(services, userId) {
   });
 }
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().post('/mfa/totp/verify', async (c) => {
     await services.store.setAuth(userId, { recoveryCodeHashes: remaining });
     await finish(services, userId);
@@ -141,6 +147,7 @@ async function finish(services, userId, consume) {
   });
 }
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().post('/mfa/totp/verify', async (c) => {
     const spent = await finish(services, userId, (tx) =>
       tx.store.consumeRecoveryCode(userId, matched),
@@ -163,6 +170,7 @@ async function finish(services, userId) {
   });
 }
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().post('/mfa/totp/verify', async (c) => finish(services, userId));
 }
 `;
@@ -172,6 +180,7 @@ export function createRoutes() {
   it('counts spending a single-use credential as a durable write', () => {
     const consumed = `
 export function createRoutes() {
+  const services = getThingServices();
   return new Hono().post('/mfa/totp/verify', async (c) => {
     await services.store.consumeRecoveryCode(userId, hash);
     await services.audit.append({ actorUserId: userId, eventType: 'mfa_verify' });
@@ -180,6 +189,41 @@ export function createRoutes() {
 }
 `;
     expect(runAuditedWriteGate(new Map([['auth-mfa.ts', consumed]]))).toHaveLength(1);
+  });
+
+  it('sees a service reached INLINE, without a local binding', () => {
+    // Writes are identified by receiver, so the receiver has to be recognised in
+    // both spellings: skipping the `const` was otherwise enough to leave the
+    // gate blind to a whole handler.
+    const inline = `
+export function createRoutes() {
+  return new Hono().post('/things/:id/freeze', async (c) => {
+    await getThingServices().store.updateThing(c.req.param('id'), { frozen: true });
+    await getIdentityServices().audit.append({ eventType: 'thing_frozen' });
+    return c.json({ ok: true });
+  });
+}
+`;
+    expect(runAuditedWriteGate(new Map([['things.ts', inline]]))).toHaveLength(1);
+  });
+
+  it('does not flag a READ, however unusual its verb’s neighbours', () => {
+    // The inversion makes an unrecognised verb a write, which is the safe
+    // default — but it must not turn every handler that reads and records into
+    // a finding, or the gate becomes noise.
+    const readsThenAudits = `
+export function createRoutes() {
+  const services = getThingServices();
+  return new Hono().post('/things/:id/export', async (c) => {
+    const rows = await services.store.listThings();
+    const one = await services.store.getThing(c.req.param('id'));
+    const n = await services.store.countThings();
+    await services.audit.append({ eventType: 'export_read' });
+    return c.json({ rows, one, n });
+  });
+}
+`;
+    expect(runAuditedWriteGate(new Map([['things.ts', readsThenAudits]]))).toEqual([]);
   });
 
   it('passes the LIVE route tree — no handler writes outside its unit', () => {

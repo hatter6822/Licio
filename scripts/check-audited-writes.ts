@@ -69,14 +69,66 @@ const ROUTES_DIR = resolve(ROOT, 'apps/api/src/routes');
  *  trail. A gate that cannot see a whole domain's audit calls reports that
  *  domain as clean. */
 const AUDIT_CALLS = [/(?:^|\.)[A-Za-z]*[Aa]udit\.append$/, /^writeAudit$/, /\bauditChain\b/];
-/** Calls that change durable state. `.append` is excluded — that IS the audit.
+/**
+ * READS, not writes — and everything else on a service is a WRITE.
  *
- *  `consume` earns its place the hard way: spending a single-use credential is
- *  as durable as any insert and rather less recoverable, and the verb was
- *  missing while `/mfa/totp/verify` burned a recovery code outside the unit
- *  that recorded the verification. */
-const WRITE_CALLS =
-  /\.(insert|insertIfNoneOpen|update|updateUser|upsert|create|createWithThread|remove|delete|purge|consume|credit|rebaseline|setAuth|applyAction|apply|delist|claim|reassign)[A-Za-z]*$/;
+ * This used to be the other way round: an allowlist of write verbs, which fails
+ * OPEN. A store method whose name nobody thought of read as a read, so the gate
+ * reported the handler clean — and it did, twice, over exactly the defect it
+ * advertises: `/mfci/cases/:caseId/resolve` called `mfciCases.resolve()` and
+ * `mfciRiskStates.set()` before a bare `identity.audit.append()`, and `/config`
+ * called `storeInvariantsConfigValue()` before its own. Neither verb was on the
+ * list, so both were invisible, and the commit that introduced the gate claimed
+ * a guarantee the gate did not deliver.
+ *
+ * Inverted, the failure mode inverts with it: an unrecognised verb is now a
+ * WRITE, so a new store method is guarded from the moment it exists and the cost
+ * of forgetting is a false alarm rather than a silent hole. The list stays
+ * deliberately tight — `resolve` is absent because `mfciCases.resolve` is a
+ * write, and a verb that is a read on one store and a write on another has to
+ * be treated as the dangerous one.
+ */
+const READ_METHODS =
+  /^(get|list|find|count|has|is|exists|load|read|reload|search|fetch|latest|active|peek|all)([A-Z]|$)/;
+
+/**
+ * Read methods whose VERB is ambiguous, named exactly rather than by prefix.
+ *
+ * `resolve` cannot join the prefix list — `mfciCases.resolve` is the write this
+ * whole inversion exists to catch — but `users.resolveMany` is a handle lookup,
+ * and `decisionLogs.query` is a read whose verb could equally have been a
+ * mutation elsewhere. Each entry is a measured exception, so the default stays
+ * "unrecognised ⇒ write" and every relaxation is a line someone had to add on
+ * purpose.
+ */
+const READ_EXCEPTIONS = new Set(['resolveMany', 'query', 'verifyChain', 'exportForAccount']);
+
+/**
+ * Free functions that write, by name — the ONE place a write allowlist remains.
+ *
+ * A member call names its receiver, so "is this domain state?" is answerable
+ * structurally and the rule can fail closed. A bare call does not: a route file
+ * hands services to projections (`toRoomSummary`), emitters
+ * (`emitPrivacyRequestEvent`) and helpers that already transact internally
+ * (`submitReport`) far more often than to a raw writer, so failing closed there
+ * produces alarms on correct code — and a gate that cries wolf is one people
+ * learn to skip. So the bare-call form is named, and `storeInvariantsConfigValue`
+ * (the `/config` false-green the review found) is why the list exists at all.
+ */
+const FREE_WRITE_FUNCTIONS =
+  /^(store|save|persist|write|apply|purge|anonymize|scrub|freeze|rebaseline|revoke|grant|resolveItemSafetyState)/;
+
+/**
+ * Bindings that hold a services/store object — the RECEIVER test that replaces
+ * the verb test.
+ *
+ * Structural rather than a name list: a local initialised from a
+ * `get*Services()` / `resolve*()` factory, plus the parameters of unit
+ * callbacks (`tx`, `stores`). Everything reached through one of those is domain
+ * state; everything else in a handler is Hono, zod, or local computation.
+ */
+const SERVICE_FACTORY = /^(get[A-Z][A-Za-z]*Services|resolve[A-Z][A-Za-z]*)$/;
+
 /** Opening a unit of work.
  *
  *  `runChainedUnit` is a free function rather than a method, and leaving it out
@@ -95,7 +147,20 @@ const UNIT_CALLS = /(\.transactor\.run|\.transact|\.runInUnit|^runChainedUnit)$/
  * different matter, and those are placed inside the unit after the append so an
  * append failure prevents them; see `finishMfa`.)
  */
-const EPHEMERAL_RECEIVERS = /\.(otp|challenges|policyCache|cache|metrics)\./;
+const EPHEMERAL_RECEIVERS = /\.(otp|challenges|policyCache|cache|metrics|broadcaster)\./;
+
+/**
+ * Members of a services object that are NOT stores.
+ *
+ * A services bundle carries its clock, its id source, its logger and its
+ * transactor beside the stores, and none of those hold domain state — `now()`
+ * and `uuid()` are pure, `log`/`metrics`/`alert` are observability, `mailer` is
+ * an outbound effect that must stay OUTSIDE a unit precisely because it cannot
+ * be rolled back. Without this the receiver test flags a handler for reading its
+ * own clock.
+ */
+const NON_STORE_MEMBERS =
+  /^(now|uuid|log|logger|metrics|alert|config|mailer|secretBox|rateLimit|transactor|transact)$|^on[A-Z]/;
 
 interface Finding {
   readonly file: string;
@@ -205,6 +270,100 @@ function onExitPathWithoutRecord(write: Syntax, helpers: ReadonlySet<string>): b
   return false;
 }
 
+/**
+ * The names in this file that hold a services/store object.
+ *
+ * `const invariants = resolveInvariants()`, `const forum = getForumServices()`,
+ * and the `tx`/`stores` parameter of every unit callback. Collected once per
+ * file; a shadowing local of the same name would only ever make the gate ask
+ * MORE questions, never fewer, which is the safe direction for a fail-closed
+ * rule.
+ */
+function serviceBindings(root: Syntax): Set<string> {
+  const names = new Set<string>(['tx', 'stores']);
+  for (const node of walk(root)) {
+    if (node.kind === SyntaxKind.VariableDeclaration) {
+      const init = node.initializer;
+      const name = node.name?.getText();
+      if (name === undefined || init?.kind !== SyntaxKind.CallExpression) continue;
+      const callee = init.expression?.getText() ?? '';
+      // `await getForumServices()` parses with the await outside; either way the
+      // initializer's callee is what names the factory.
+      if (SERVICE_FACTORY.test(callee)) names.add(name);
+      continue;
+    }
+    // The unit callback's parameter, whatever it is spelled.
+    if (node.kind !== SyntaxKind.CallExpression) continue;
+    if (!UNIT_CALLS.test(calleeText(node))) continue;
+    for (const arg of node.arguments ?? []) {
+      if (arg.kind !== SyntaxKind.ArrowFunction && arg.kind !== SyntaxKind.FunctionExpression) {
+        continue;
+      }
+      const first = arg.parameters?.[0]?.name?.getText();
+      if (first !== undefined) names.add(first);
+    }
+  }
+  return names;
+}
+
+/**
+ * The root identifier of `a.b.c` / `a.b.c(...)`, or '' if it is not a chain.
+ *
+ * A chain rooted in a FACTORY CALL resolves to the factory's name, so
+ * `getForumServices().rooms.insert(…)` — a handler reaching a service inline
+ * rather than through a local — is judged like `forum.rooms.insert(…)`. Without
+ * that, skipping the `const` was enough to leave the gate blind.
+ */
+function rootIdentifier(node: Syntax | undefined): string {
+  let at = node;
+  while (at !== undefined && at.kind === SyntaxKind.PropertyAccessExpression) at = at.expression;
+  if (at?.kind === SyntaxKind.CallExpression) {
+    const callee = at.expression?.getText() ?? '';
+    return SERVICE_FACTORY.test(callee) ? callee : '';
+  }
+  return at?.kind === SyntaxKind.Identifier ? (at.getText() ?? '') : '';
+}
+
+/**
+ * Is this call a DURABLE WRITE — a change to domain state?
+ *
+ * Two forms, both keyed on the receiver rather than the verb:
+ *   • `services.store.thing(...)` — a member call whose root binding holds a
+ *     service, whose final segment is not a read;
+ *   • `storeInvariantsConfigValue(store, …)` — a free function HANDED a service
+ *     or a store, which is the only way a route file can reach domain state
+ *     without naming it. `/config` did exactly this and the gate never saw it.
+ */
+function isDurableWrite(call: Syntax, services: ReadonlySet<string>): boolean {
+  const callee = calleeText(call);
+  if (callee === '') return false;
+  if (AUDIT_CALLS.some((pattern) => pattern.test(callee))) return false;
+  if (EPHEMERAL_RECEIVERS.test(callee)) return false;
+  if (isRouteRegistration(call)) return false;
+  if (UNIT_CALLS.test(callee)) return false;
+  const segments = callee.split('.');
+  const last = segments[segments.length - 1] ?? '';
+  if (segments.length > 1) {
+    const root = rootIdentifier(call.expression);
+    if (!services.has(root) && !SERVICE_FACTORY.test(root)) return false;
+    // `services.now()` is the clock, not a store.
+    if (segments.length === 2 && NON_STORE_MEMBERS.test(last)) return false;
+    if (segments.some((segment) => NON_STORE_MEMBERS.test(segment))) return false;
+    return !READ_METHODS.test(last) && !READ_EXCEPTIONS.has(last);
+  }
+  // A bare call: NAMED as a writer (see FREE_WRITE_FUNCTIONS) and handed a
+  // service or store, so ordinary projections and local helpers stay out.
+  if (!FREE_WRITE_FUNCTIONS.test(last)) return false;
+  const first = call.arguments?.[0];
+  if (first === undefined) return false;
+  // A service VALUE, not a reference to the factory that makes one:
+  // `authMiddleware(resolveIdentity)` hands over the function itself.
+  if (first.kind === SyntaxKind.CallExpression) {
+    return SERVICE_FACTORY.test(rootIdentifier(first.expression));
+  }
+  return services.has(rootIdentifier(first));
+}
+
 /** Every function-ish node in a source, by declared name. */
 function namedFunctions(root: Syntax): Map<string, Syntax> {
   const byName = new Map<string, Syntax>();
@@ -270,6 +429,7 @@ export function runAuditedWriteGate(files: Map<string, string>): string[] {
         // So the question is asked of the WRITE rather than of the append: this
         // handler records something, and here is a durable change of its that no
         // unit covers.
+        const services = serviceBindings(source.root);
         const helpers = namedFunctions(source.root);
         const auditingHelpers = new Set(
           [...helpers].filter(([, fn]) => auditsInsideItsOwnUnit(fn)).map(([name]) => name),
@@ -286,13 +446,8 @@ export function runAuditedWriteGate(files: Map<string, string>): string[] {
         };
         for (const write of walk(source.root)) {
           if (write.kind !== SyntaxKind.CallExpression) continue;
-          const callee = calleeText(write);
-          if (!WRITE_CALLS.test(callee)) continue;
-          if (EPHEMERAL_RECEIVERS.test(callee)) continue;
-          if (isRouteRegistration(write)) continue;
+          if (!isDurableWrite(write, services)) continue;
           if (onExitPathWithoutRecord(write, auditingHelpers)) continue;
-          // The audit is not the write it accounts for.
-          if (AUDIT_CALLS.some((pattern) => pattern.test(callee))) continue;
           if (insideUnit(write)) continue;
           // Handed INTO a helper's unit — the fix, not the defect.
           if (insideCallbackTo(write, auditingHelpers)) continue;
