@@ -2,7 +2,7 @@
 
 **Document status:** Draft design specification (revision v0.2)
 **Prepared date:** August 4, 2026
-**Last refined:** August 4, 2026 — revision 3: §34 open questions resolved (Q2–Q8 closed, Q1 tracked) — per-room mirror tiers, the compact-scoping seam, steward-dormancy declarations, and mirror-side notice-and-action land in v1
+**Last refined:** August 5, 2026 — revision 4: the §10.6 introduction-verification ceremony (two-channel peer-code comparison, the `pending_verification` state, permanent `node_id` across key succession). Revision 3 resolved the §34 open questions (Q2–Q8 closed, Q1 tracked): per-room mirror tiers, the compact-scoping seam, steward-dormancy declarations, and mirror-side notice-and-action
 **Target project:** [`hatter6822/Licio`](https://github.com/hatter6822/Licio)
 **Primary platform:** Licio server nodes (`apps/api` + `packages/lcap`), with operator consoles in the Licio PWA
 **Scope:** Bootstrap, continuous mirroring, and full remote participation for PUBLIC content between independently operated Licio instances, gated on a shared, content-addressed administration charter and sustained, chain-anchored, witnessed proof that the charter is actually enforced
@@ -565,9 +565,24 @@ The bounded period, declared per epoch transition, during which nodes on
 adjacent epochs of one lineage may still interoperate (§8.5).
 
 **TOFU (trust on first use)**
-Accepting a peer's identity/charter on first contact against operator-supplied
-pins, without a third-party proof. The bootstrap trust posture at small N
-(§10.1), hardened by pinning, chain anchoring, and later witnessing.
+Accepting whatever identity a party presents on first contact and warning only
+if it later changes. **This design does not do that**, and the distinction is
+load-bearing: the three pins (§10.1) are recorded *before* first contact, the
+first descriptor fetch is a verification against them rather than an
+acceptance, a mismatch on any pin refuses the peer, and there is no
+warn-and-continue path anywhere. The posture is a **pre-shared key
+fingerprint with an out-of-band comparison ceremony** (§10.6) — the thing TOFU
+is criticized for lacking. The term is kept in this vocabulary only to name
+what the design is not.
+
+**Introduction verification / verification code**
+The §10.6 ceremony: after pins are recorded and the handshake verifies, both
+consoles display a code derived from the two `node_id`s and the pinned
+lineage genesis, and the two operators compare it over a channel independent
+of the one that carried the pins. It converts a single-channel substitution
+of a `node_id` into an attack requiring control of two channels. The code is
+public-derived and not a secret; what it requires is **channel
+independence**, which is why it never travels between the nodes (§10.6).
 
 ---
 
@@ -725,7 +740,9 @@ A node's lifecycle:
 ```text
 solo ──(adopt charter epoch)──► charter-adopted
      ──(provision node key)───► identity-ready
-     ──(operator adds peer; handshake)──► peered (per-peer state machine, §10.3)
+     ──(operator adds peer; handshake)──► pending verification (§10.6)
+     ──(operators compare codes on a 2nd channel)──► peered
+                                (per-peer state machine, §10.3)
      ──(bootstrap per room)───► mirroring
      ──(steady state)─────────► sync + participation + admin events +
                                 checkpoints + witnessing + anchoring
@@ -1325,9 +1342,23 @@ Ed25519/MLS/HPKE; the two planes never share suites or keys).
   any rotatable operational secret — node identity must survive secret
   rotation. It is a root identity, handled accordingly (§35 risk register).
 - **Node id:** `node_id = "fnode-" + base32(sha256(cose(public_key)))[0..24]`
-  (lowercase RFC 4648 §6, unpadded — the CID alphabet). Self-certifying: a
-  peer that knows a `node_id` can verify any presented key against it, so the
-  operator pin (§10.1) is a short string, not a certificate exchange.
+  (lowercase RFC 4648 §6, unpadded — the CID alphabet), computed over the
+  node's **genesis** public key. 24 base32 characters carry 120 bits, so the
+  pin is a short string with full fingerprint strength — not a certificate
+  exchange, and not a truncation that needs an issuer to compensate for it.
+- **Identity is permanent; the signing key is not.** `node_id` names the
+  genesis key forever and does **not** change when the node rotates (§9.4) —
+  that is the entire point of the dual-proof promotion, which would be
+  pointless if every peer had to re-pin anyway. A peer holding only a
+  `node_id` verifies the *current* key one of two ways: it recomputes
+  directly (the un-rotated case), or it verifies the **succession chain** —
+  the ordered descriptors whose dual proofs walk from the presented key back
+  to a key whose fingerprint is the pinned `node_id`. Peers persist enough of
+  that chain to re-derive the binding; a presented key that neither
+  recomputes nor chains is refused (§10.2 step 1). Compromise is the case
+  this cannot cover — an attacker holding the genesis key can author a
+  succession chain to their own — which is exactly why §9.4 treats compromise
+  as an out-of-band re-pin rather than a rotation.
 - Horizontal replicas of one deployment share the key file; they are one
   node (§4).
 
@@ -1392,13 +1423,19 @@ trust decisions key on `node_id`.
   active key**, then a subsequent descriptor promoting the successor,
   **signed by both** (two proofs on one record — the multi-proof model). Peers
   accept a promotion only when the old key co-signs; the descriptor
-  `sequence` is monotone per node and peers MUST refuse regressions.
+  `sequence` is monotone per node and peers MUST refuse regressions. The
+  promoted descriptors are the **succession chain** of §9.1: `node_id` is
+  unchanged, no pin changes, and **no re-verification ceremony is required**
+  (§10.6) — the verification code binds identities, not current keys, so a
+  planned rotation leaves it untouched. Re-handshake still runs (§10.2).
 - **Compromise (old key unavailable or untrusted):** there is no cryptographic
   recovery — the operator re-pins out-of-band with each peer operator,
-  exactly like initial peering (§10.1), and peers SHOULD quarantine the old
-  identity immediately on notification. The anchored history bounds the
-  damage window by making post-hoc rewriting under the stolen key provably
-  contradict the chain. This limit is stated, not papered over (§3.12).
+  exactly like initial peering (§10.1), **including the §10.6 verification
+  ceremony**, because a new pin is a new introduction and inherits none of the
+  old one's assurance. Peers SHOULD quarantine the old identity immediately
+  on notification. The anchored history bounds the damage window by making
+  post-hoc rewriting under the stolen key provably contradict the chain. This
+  limit is stated, not papered over (§3.12).
 - Rotation and revocation events are audit-chained locally and visible to
   peers via descriptor sync; every peer state transition they trigger follows
   §10.3.
@@ -1533,10 +1570,20 @@ Peering is mutual, explicit, and operator-configured on both sides (decision
 
 The fetched descriptor and every subsequent handshake MUST match all three;
 any mismatch refuses the peer with a typed error naming the pin that failed.
-This is TOFU hardened to "trust on first *pin*": the out-of-band operator
-exchange is the root of pairwise trust at small N, and everything after it is
-verifiable. Peer creation, like every peer state transition, writes its audit
-row in the same unit (audited-writes).
+Nothing is ever accepted on first contact and nothing warns-and-continues:
+the pins precede contact, so the first fetch is a *verification*, not a
+trust decision (§4, "TOFU"). Peer creation, like every peer state
+transition, writes its audit row in the same unit (audited-writes).
+
+That leaves exactly one place where trust is not verifiable from data: **the
+out-of-band exchange itself**. An attacker who controls the channel carrying
+the introduction can hand each operator a `node_id` of their own choosing,
+and every downstream check then passes correctly against the wrong key. No
+protocol step can fix this, because name-to-key binding always bottoms out
+in either an out-of-band act or a trusted third party — and the third-party
+answers (a CA, a directory, transitive trust) are precisely what §0 and
+§33.8 rule out. What *can* be done is to make the attacker need **two**
+channels instead of one, which is §10.6.
 
 ### 10.2 Handshake
 
@@ -1562,7 +1609,9 @@ Request and response carry the same body shape:
 The receiving node verifies, in order, fail-closed at each step:
 
 1. Envelope signature by the presented descriptor's active key; descriptor
-   proof verifies; `node_id` recomputes from the key and equals the pin.
+   proof verifies; the presented key is bound to the pinned `node_id` — it
+   either recomputes to it directly, or the succession chain's dual proofs
+   walk from it back to a key that does (§9.1). Neither ⇒ refused.
 2. Lineage genesis equals the pin; the epoch chain walks (each CID fetched
    and verified lazily or from cache) from genesis to the presented epoch.
 3. The presented epoch's Knomosis anchor is confirmed at the pinned depth,
@@ -1579,15 +1628,25 @@ The receiving node verifies, in order, fail-closed at each step:
    negotiation (`packages/lcap/src/cose/suites.ts` shape): fixed preference
    order, fail-closed `no_common_suite`.
 
-Success moves the pair to `active` on both sides (each side records its own
-state machine; there is no shared state). Every handshake outcome —
-success or typed refusal — is recorded with its evidence.
+Success on a **first** introduction moves each side to `pending_verification`
+— everything above is verified against the pins, and the pins themselves are
+what §10.6 checks before any content flows. Success on a *re*-handshake of an
+already-verified peer (rotation, epoch change, quarantine release, resume,
+re-alignment) returns it to `active` directly: the introduction was verified
+once and the pins have not changed. Each side records its own state machine;
+there is no shared state. Every handshake outcome — success or typed refusal
+— is recorded with its evidence.
 
 ### 10.3 Peer state machine
 
 ```text
-configured ──handshake ok──► active
+configured ──handshake ok──► pending_verification
 configured ──handshake fail─► configured (typed error recorded; operator retries)
+
+pending_verification ──operator confirms the §10.6 code──► active
+pending_verification ──operator reports a mismatch───────► configured
+                                 (pins CLEARED; `peer_verification_mismatch`
+                                  finding recorded; §10.6)
 
 active ──tripwire (§21.1)───────────► quarantined      (automatic, fail-closed)
 active ──operator pause─────────────► paused
@@ -1601,7 +1660,15 @@ diverged    ──epochs re-align───► active (via fresh handshake)
 defederated ──(terminal; §21.5 re-admission = new configured entry, history retained)
 ```
 
-Semantics per state: `active` — full sync both directions. `paused` — no
+Semantics per state: `pending_verification` — the peer is authenticated
+against its pins and **nothing flows**: no sync, no exchange, no object
+serving to that peer, no participation in either direction. The only thing
+that has happened is a descriptor fetch and a handshake, and the only thing
+that can happen next is an operator act (§10.6). Because each side confirms
+independently, one side is briefly `active` while the other is still
+`pending_verification`; the active side's sync attempts get
+`peer_state_invalid` and MUST treat that as the expected window, not as a
+finding. `active` — full sync both directions. `paused` — no
 traffic either direction (operator hold). `quarantined` — **ingest from the
 peer stops entirely** (fail-closed); serving own public content to the peer
 continues by default (it is public; continuing to serve keeps a false-positive
@@ -1642,6 +1709,171 @@ auto-added. The compact is not globally enumerated anywhere — each node knows
 exactly the peers its operator configured. Witness and fork evidence spread
 only along configured edges (§20.3). Automated discovery is a rejected
 alternative with rationale (§33.8), not a deferral.
+
+### 10.6 Introduction verification (the peering ceremony)
+
+§10.1 leaves one gap that no amount of protocol closes: an attacker
+controlling the channel that carried the introduction substitutes a
+`node_id`, and every subsequent check passes — correctly — against the wrong
+key. This section makes that attack require **two** channels.
+
+#### 10.6.1 The verification code
+
+After the handshake succeeds and before the peer can become `active`, both
+consoles display the same two-part code, derived only from values both
+operators already hold:
+
+```text
+half(id)  = SHA-256( "licio-federation-pvc/1" ‖ 0x00 ‖
+                     genesis_charter_record_cid_bytes ‖ 0x00 ‖
+                     utf8(node_id) )                       [first 15 bytes]
+          → the 120-bit big-endian integer, rendered zero-padded to 37
+            decimal digits, displayed in groups of five (final group of two)
+
+code      = half(id_lo) ‖ newline ‖ half(id_hi)
+            where id_lo < id_hi by byte-wise comparison of the two node_ids
+```
+
+Seven properties, each load-bearing:
+
+1. **Order-independence.** Sorting the two `node_id`s before rendering is
+   what makes the two consoles agree: node A holds `(A, B)` and node B holds
+   `(B, A)`, and both must render identically or the comparison is
+   meaningless. (Signal's safety numbers sort the two identity keys for the
+   same reason.)
+2. **The halves are positionally bound, and that is a security property, not
+   a layout choice.** Hashing everything into one combined string would let
+   an attacker mount a *birthday* search: choose both impersonating keys
+   freely and look for any pair whose combined codes collide, at ~2^(n/2)
+   work. Rendering a separate half per party forces a **second-preimage**
+   search instead — the attacker must find a key whose half equals a
+   *specific* honest node's half, at ~2^n. Per-half length is therefore the
+   whole security parameter, and the construction buys a squaring of the
+   attacker's cost for free.
+3. **120 bits per half, and no short variant is offered.** The familiar
+   4-character SAS from ZRTP is safe *there* because it commits to an
+   **ephemeral** exchange under a prior commitment: nothing can be
+   precomputed, and the only grind available runs inside a live call. This
+   code commits to **long-lived identities**, which changes the economics
+   twice over. An attacker can precompute a table of candidate identities
+   indexed by their half and look one up the instant they intercept the
+   honest `node_id`; and because an introduction is asynchronous — an
+   email, a message thread — even a live grind gets hours or days rather
+   than the seconds a call allows. At 120 bits both routes cost ~2^120 (a
+   table that covers the space *is* the space); at 20 bits both are
+   trivial. That is why this specification ships a long code and no
+   convenient short one: the convenient version would be theater.
+4. **It binds the lineage, not just the parties.** The genesis CID is inside
+   each half, so an attacker who substitutes a hostile *charter* rather than
+   a hostile identity also produces a mismatch.
+5. **It binds identities, not current keys.** Because `node_id` is permanent
+   across rotation (§9.1), a planned key rotation does not change the code
+   and does not require another phone call — the operational property that
+   keeps the ceremony from becoming something people learn to skip.
+6. **It is recomputable offline.** The inputs are the three pins the
+   operator wrote down; `pnpm federation:verification-code <node_id_a>
+   <node_id_b> <genesis_cid>` (§26.3) recomputes it from a clean checkout
+   with no network. An operator can therefore check that their own console is
+   telling the truth, which matters precisely in the scenario where the node
+   might not be.
+7. **Each half is peer-independent, deliberately — with a stated cost.** A
+   half depends only on one `node_id` and the genesis, so an operator's own
+   half is the *same value in every one of their peerings*. The benefit is
+   human and worth a great deal in practice: an operator who has run the
+   ceremony a few times knows their own half on sight, so an impersonation
+   of **them** is caught before the other party even speaks. The cost is
+   amortization — an attacker impersonating one node to many peers needs one
+   second-preimage rather than one per target, saving a factor of N. Binding
+   the pair into each half would remove that factor and the recognizability
+   with it. At 120 bits a factor of N is nothing (a thousand targets is
+   2^110 work) and recognizability is real, so the trade is taken knowingly
+   rather than by omission.
+
+A console MAY additionally render the identical 15 bytes per half as a
+word sequence from a published list shipped as a static asset in
+`packages/federation` (alternating even/odd lists, the PGP biometric
+word-list shape, which catches transposition as well as substitution) for
+operators comparing by voice. Word renderings are **presentation only** — the
+same posture as doctrine translations (§8.1): never charter content, never
+digested, never authoritative, and always labelled with which encoding is on
+screen, so that two operators reading different encodings at each other
+recognize it immediately instead of mistaking incomparability for agreement.
+
+#### 10.6.2 The ceremony
+
+1. Both operators complete §10.1 pinning; both handshakes succeed; both peers
+   sit at `pending_verification`.
+2. Each console displays the code, the encoding in use, and the instruction
+   to compare **the entire code, both halves, in the displayed order**.
+   Comparing one half is not half a check — it leaves the other party's half
+   unverified, which is the half an attacker impersonating *them* controls.
+3. The operators compare it over a channel **independent of the one that
+   carried the pins**. The console asks which channel carried the pins and
+   which carried the comparison, records both as typed values
+   (`in_person` · `voice` · `video` · `signed_message` · `existing_verified_channel`
+   · `other`, plus an optional free-text note), and requires an explicit
+   affirmation that the two were distinct.
+   - The single most likely operator error is pasting the code back into the
+     same thread that carried the introduction. That is not a second channel
+     and the ceremony is void; the console says so in the mandatory copy, at
+     the point of confirmation rather than in documentation.
+   - The affirmation is recorded, not machine-checked, and the spec says so
+     plainly: a node cannot verify what channel two humans used. What it can
+     do is make the claim explicit, attributable, and auditable — which is
+     what an affirmation is for.
+4. **Match** → the operator confirms; the peer moves to `active`; the
+   transition is audit-chained with the confirming actor, the timestamp, the
+   full code digest (so the confirmation is re-checkable later), both channel
+   values, and the note.
+5. **Mismatch** → the peer returns to `configured` with its **pins cleared**
+   and a `peer_verification_mismatch` finding recorded (§20.5). Clearing is
+   deliberate: the overwhelmingly likely cause is a transcription error, and
+   the correct response to both that and a real substitution is to obtain the
+   pins again rather than to retry against values that may already be the
+   attacker's. Repeated mismatches on one peer entry surface as an escalated
+   console warning — a typo twice is a typo; a typo five times is a signal.
+
+#### 10.6.3 The code never travels between the nodes
+
+The two nodes MUST NOT exchange the code, in any record, envelope, header,
+or response, on any plane. The reason is **channel independence, not
+confidentiality**: the code is derived entirely from public values, so
+publishing it harms nothing — but a code transmitted over the federation
+transport is a code the attacker in the middle relays verbatim, and the
+comparison then proves that the attacker can copy bytes. The ceremony's
+entire value is that the comparison happens somewhere the attacker is not.
+
+`check:federation-schema-egress` (§30) enforces this structurally: no
+federation wire schema may carry a verification-code field. The gate can see
+a field name; it cannot see an operator pasting a code into the wrong window,
+which is why point 3 above is a recorded affirmation rather than a check.
+
+#### 10.6.4 When the ceremony repeats
+
+| Event | Re-verify? | Why |
+|---|---|---|
+| Planned key rotation (§9.4) | **No** | `node_id` is unchanged, so the code is unchanged (§9.1). The dual-proof succession chain is the cryptographic evidence; a phone call would add nothing. |
+| Key compromise → out-of-band re-pin (§9.4) | **Yes** | The pin itself changes. A new pin is a new introduction and inherits none of the old one's assurance. |
+| Charter epoch transition (§8.5) | **No** | The code binds the lineage *genesis*, which epochs never change. |
+| Leaving/joining a compact (§9.6) | **Yes** | A different genesis is a different lineage; every half changes. |
+| Quarantine release · pause resume · divergence re-alignment | **No** | Re-handshake only; the pins and the introduction behind them are untouched. |
+| Re-admission after defederation (§21.5) | **Yes**, by construction | Re-admission is a fresh `configured` entry with new pins (§21.5), so it re-enters this section with no special-casing. |
+
+#### 10.6.5 What this does and does not buy
+
+It buys: substituting a `node_id` now requires controlling both the
+introduction channel and the comparison channel, at the moment of the
+comparison, without either operator noticing a mismatch. Against a code with
+120 bits per half, forging a colliding identity instead of relaying is not an
+available shortcut.
+
+It does not buy: protection against two operators who use the same channel
+twice and affirm otherwise; protection against an operator who confirms
+without comparing; or any assurance about who the peer operator *is* as a
+person — the ceremony binds a key to whoever was on the other end of the
+second channel, which is a stronger claim than the first channel alone made
+and a weaker one than identity. Those are honest limits (§3.12), not gaps to
+be closed by adding protocol.
 
 ---
 
@@ -2439,6 +2671,13 @@ across everything mirrored from anywhere.
   above; the canonical-language label (§8.1, Q5); and the reserved
   compact-attribution key (§9.6, Q3). The words "deleted everywhere" are
   prohibited vocabulary (§3.12).
+- The same SSOT carries the **operator-facing** honesty strings under their
+  own namespace: the §10.6 ceremony instructions, the compare-both-halves
+  wording, and the same-channel warning — which must render at the point of
+  confirmation, not in a runbook nobody has open. Operator copy is held to
+  the identical discipline (i18n-keyed, copy-linted) for the same reason
+  member copy is: a warning that exists only in documentation is a warning
+  that was not given.
 
 ### 17.4 Attention and PWAtt
 
@@ -2876,10 +3115,17 @@ receipt) · `sla_breach_pattern` (receipts chronically late) ·
 `local_hide_rate` (mirror-side hides of the peer's content trending high,
 §19.5) · `refusal_rate` (ingest invalid-ratio, §23.2) ·
 `lineage_dormant` (no anchored steward act within the declared continuity
-window, §8.5).
+window, §8.5) · `peer_verification_mismatch` (an operator reported that the
+§10.6 codes did not match).
 
 Findings are evidence objects with severities, not verdicts. What they
-trigger is §21. Most are peer-scoped; `lineage_dormant` is scoped to the
+trigger is §21 — except `peer_verification_mismatch`, which is deliberately
+inert there: it is evidence about the *introduction channel*, recorded
+against a peer entry that never reached `active` and may not even be the
+party the operator intended, so it feeds no tripwire and accuses nobody. It
+exists to be visible in the record, and to make a second occurrence on the
+same entry legible as more than a typo. Most other findings are peer-scoped;
+`lineage_dormant` is scoped to the
 lineage rather than to any peer (its `peer_id` is null, §25), because a
 dormant steward is a fact about the charter every member observes
 identically — it is never evidence against the peer who happens to surface
@@ -2952,10 +3198,12 @@ dropped unapplied (their origin's authority ended).
 
 ### 21.5 Re-admission
 
-A defederated peer MAY be re-added later as a fresh `configured` entry (new
-pins, new handshake). History is never rewritten: the prior peer row, its
+A defederated peer MAY be re-added later as a fresh `configured` entry — new
+pins, new handshake, and a new §10.6 verification, since a fresh entry
+re-enters that path by construction and inherits none of the prior
+introduction's assurance. History is never rewritten: the prior peer row, its
 findings, and its audit trail remain, and the new row references them. The
-protocol imposes no cooling-off period; that is operator judgment.
+protocol imposes no cooling-off period; that is operator judgment (§34 Q2).
 
 ---
 
@@ -3167,6 +3415,13 @@ global-window bounded, and audit-chained like every other mutation.
   management (§10.1); `POST /v1/federation/peers/:id/{pause,resume,
   quarantine,release,defederate}` — §10.3/§21 transitions (defederate
   requires reason category + rationale).
+- `GET /v1/federation/peers/:id/verification` — the §10.6 code for a
+  `pending_verification` peer, its encoding, and the comparison instructions;
+  `POST .../verification/confirm` (match → `active`; requires both channel
+  values and the distinct-channels affirmation) and
+  `POST .../verification/mismatch` (→ `configured`, pins cleared, finding
+  recorded). Both audit-chained in-unit with the full code digest, so a
+  confirmation is re-checkable long after the call ended.
 - `GET /v1/federation/status` — per-peer state, frontiers, staleness, budget
   usage, storage accounting.
 - `GET /v1/federation/charter` · `POST /v1/federation/charter/adopt` — §8.5
@@ -3226,7 +3481,8 @@ expensive to remove later. New tables, with their load-bearing constraints:
 
 | Table | Key columns and constraints |
 |---|---|
-| `federation_peers` | `peer_id` uuid PK; `node_id` text UNIQUE; `display_domain`, `base_url`; `pinned_genesis_cid`; `state` enum (`configured/handshaking/active/paused/quarantined/diverged/defederated`); `state_reason` jsonb (typed evidence refs); `descriptor_sequence` bigint; `added_by_ref` (opaque actor ref); prior-identity ref for §21.5 re-admission |
+| `federation_peers` | `peer_id` uuid PK; `node_id` text UNIQUE; `display_domain`, `base_url`; `pinned_genesis_cid`; `state` enum (`configured/handshaking/pending_verification/active/paused/quarantined/diverged/defederated`); `state_reason` jsonb (typed evidence refs); `descriptor_sequence` bigint; `added_by_ref` (opaque actor ref); prior-identity ref for §21.5 re-admission; §10.6 verification columns — `verified_at`, `verified_by_ref`, `verification_code_digest`, `pin_channel` + `comparison_channel` (typed), `channel_note`, `mismatch_count` int; CHECK: `state = 'active'` requires `verified_at` NOT NULL, so an unverified peer cannot reach a syncing state through any code path |
+| `federation_key_succession` | §9.1/§9.4: the persisted succession chain per peer — `descriptor_cid` PK; `peer_id`; `sequence`; superseded + promoted key fingerprints; both proof refs. What lets a peer bind a rotated key back to the pinned `node_id` without a re-pin |
 | `federation_charter_adoptions` | `epoch_cid` text PK; `lineage_genesis_cid`; `epoch_number` int; `adopted_at`; `adopted_by_ref`; partial unique enforcing one active adoption; insert-only |
 | `federation_mirror_rooms` | `mirror_room_id` uuid PK; `peer_id` FK→`federation_peers`; `origin_room_id`; descriptor fields + `descriptor_sequence`; `frozen` bool; `local_hidden_state`; `mirror_tier` enum (`full/recent/text_only/none`) + `recent_window_days` int (CHECK: non-null iff tier is `recent`) + `unfetched_leaf_count` bigint (§16.6, §12.3); `tree_size` bigint + `checkpoint_cid` (anti-rollback floor); UNIQUE `(peer_id, origin_room_id)` |
 | `federation_mirror_stories` | `mirror_story_id` uuid PK; room ref by disposition — `mirror_room_id` FK for `mirrored` rows, soft local `room_id` uuid for `hosted_remote` rows (§18.1; CHECK: exactly one set); `origin_story_id`; `record_cid` UNIQUE; author triple (nullable post-tombstone); content columns (§16.2); `origin_hidden_state` / `local_hidden_state`; `scan_hold` bool; `search_tsv` generated + GIN; indexes on `(mirror_room_id, origin_created_at)`, `(room_id, origin_created_at)`, and `(peer_id, origin_author_id)` (tombstone application path) |
@@ -3273,7 +3529,9 @@ packages/federation/            -- @licio/federation (NEW): the pure core
 │                                  shared by gate + runtime
 ├── src/identity/               -- node_id/compact_id derivation, descriptor
 │                                  and rotation rules
-├── src/peering/                -- handshake + peer state machines (pure)
+├── src/peering/                -- handshake + peer state machines (pure),
+│                                  the §10.6 verification-code derivation and
+│                                  its renderings (+ the word-list asset)
 ├── src/tiers/                  -- the §16.6 tier vocabulary + fetch planner
 │                                  (tier + room state → lanes), pure
 ├── src/sla/                    -- severity→SLA math, cadence floors
@@ -3336,7 +3594,12 @@ key; `--anchor` for the secp256k1 anchoring key, §9.7) ·
 `scripts/check-charter-integrity.ts` (§8.8) ·
 `scripts/check-federation-schema-egress.ts`, `check-federation-flag.ts`,
 `check-federation-core-isolation.ts`, `check-federation-reenforcement.ts`
-(§30) · `pnpm federation:rebuild-projections` (§16.1) — each gate in the
+(§30) · `pnpm federation:rebuild-projections` (§16.1) ·
+`scripts/federation-verification-code.ts`
+(`pnpm federation:verification-code <node_id_a> <node_id_b> <genesis_cid>` —
+recomputes the §10.6 code offline from a clean checkout, so an operator can
+check their console against the specification rather than against itself) —
+each gate in the
 house shape: SPDX + doctrine header, AST-based scan via `scripts/ts-source.ts`
 where applicable, empty-scan-set fails, importable-by-test tail, co-located
 `.test.ts` proving the gate bites.
@@ -3508,14 +3771,24 @@ vector tradition: charter epoch canonical LDC bytes ↔ JSON twin ↔ CID
 (including the reference genesis, §8.6); node_id/compact_id derivations;
 envelope sign/verify vectors (including a cross-compact AAD failure case and
 a high-S rejection); checkpoint recompute vectors; floor-diff cases (each
-weakening class detected; acknowledged transitions pass). Two independent
+weakening class detected; acknowledged transitions pass); **§10.6
+verification-code vectors** — the same pair in both argument orders yields
+byte-identical output (the sort), a different genesis yields a different
+code, the digit and word renderings encode the same 15 bytes per half, and
+the `pnpm federation:verification-code` script reproduces the console's
+value from the pins alone. Two independent
 implementations of the charter validator (the gate and the runtime share one
 module, so the vectors are what pin its behavior over time).
 
 ### 29.2 Unit and property tests
 
 Exhaustive transition tables for the peer and adoption state machines (every
-`(state, input)` pair asserted, including invalid ones); property tests for
+`(state, input)` pair asserted, including invalid ones — the
+`pending_verification` row included, where the assertion that no sync,
+serving, or participation input is accepted is the point of the state);
+**key-succession properties** (a rotated key binds to the pinned `node_id`
+through the chain; a chain missing a dual proof, regressing in sequence, or
+rooted at the wrong fingerprint does not); property tests for
 **projection determinism** — replaying any CAS prefix through §15 yields
 byte-identical projections (the `federation:rebuild-projections` guarantee);
 frontier-diff and pending-target-queue properties (out-of-order delivery
@@ -3534,7 +3807,11 @@ Postgres service and boots two full in-process service graphs — two nodes,
 real Drizzle stores, real migration chain — federating over in-process HTTP.
 Covered end-to-end: keygen (both keys) → charter adoption against a local
 anchor-registry fixture (the pinned `local` environment with a stub chain —
-sentinel pins are legal there) → peering → bootstrap to checkpoint head →
+sentinel pins are legal there) → peering **including the §10.6 ceremony**
+(both nodes compute the code independently and the test asserts equality
+across the pair, then confirms; a companion case asserts that a peer left at
+`pending_verification` serves and syncs nothing) → bootstrap to checkpoint
+head →
 steady-state delta → **a remote member's comment AND story-with-media
 submission accepted, receipted, and visible on both nodes** → moderation of
 the remote content with outcome + relayed appeal round-trip → admin-event
@@ -3593,8 +3870,15 @@ volume → per-author and per-peer budgets hold and `quota_abuse` trips; an
 epoch lengthening a steward-continuity window without acknowledgment →
 refused as a floor weakening (§8.8 item 6); a notice flood without
 proof-of-work → bounded by the global window with no client address read
-(§19.4). Every §20.5 finding type has at least one test that manufactures
-it.
+(§19.4); **a full man-in-the-middle introduction** — a third node
+substituting its own `node_id` to both sides, relaying every subsequent
+protocol act faithfully so that all three pins verify and the handshake
+succeeds on both edges — asserted to produce **different §10.6 codes on the
+two honest consoles**, which is the only place in the suite where the
+detection is a human act and the test's job is to prove the machine put the
+right thing in front of them; and a rotated key presented without its
+succession chain → refused (§9.1). Every §20.5 finding type has at least one
+test that manufactures it.
 
 ### 29.6 The solo guarantee
 
@@ -3615,7 +3899,7 @@ bites):
 | Gate | Enforces |
 |---|---|
 | `check:charter-integrity` | §8.8: reference-lineage artifacts decode, digests recompute from `docs/policy/*` + shared constants, header↔JSON version equality, bounds cover the tunable key set, floor constants match code, floor-weakening diffs are acknowledged (incl. the mirror-tier floor and the continuity windows), grace/vocabulary coherence, steward-continuity + mirror-tier-floor fields present and in-vocabulary (item 10) |
-| `check:federation-schema-egress` | §22.2: no attention/applause/address/identity token in any federation schema tree (shared token SSOTs + federation additions) — including the §19.4 notice schemas, where `notifier_contact` must be absent from every record shape that can reach the wire |
+| `check:federation-schema-egress` | §22.2: no attention/applause/address/identity token in any federation schema tree (shared token SSOTs + federation additions) — including the §19.4 notice schemas, where `notifier_contact` must be absent from every record shape that can reach the wire, and the §10.6 verification code, which must appear in no wire schema at all (channel independence, §10.6.3) |
 | `check:federation-flag` | §27.2: every `/api/federation/*` route behind the mode gate + envelope middleware; every `/v1/federation/*` mutation behind session + MFA + `admin` RBAC (the `check:governance-kyc` structural pattern), with the single §19.4 public notice route named explicitly and asserted to carry its **substitute** controls (Origin check, proof-of-work, global fixed window, audit-chained transactor) — a named exemption that proves the substitute controls is a gate; one that merely skips the route is a hole |
 | `check:federation-core-isolation` | §16.3: no module under `apps/api/src/federation/` or `packages/federation/` imports the core content schema write paths or emits INSERT/UPDATE against `stories`/`threads`/`contributions`/`rooms`/`users`/`uploads`; the §6.4 boot assertion that off-mode mounts nothing; **plus the §9.6 compact-scoping leg** — every `federation_*` table declares `compact_id NOT NULL` and every PK/UNIQUE over it includes that column (§25) |
 | `check:federation-reenforcement` | §15: the peer ingest path routes through every pipeline stage (marker set over `reenforce.ts` + the routes, the `private-p2p-gates` thin-wrapper pattern) |
@@ -3889,6 +4173,30 @@ peer exists.
   `RelayQuotaConfig` shape; want-shaping and pack-admission integration
   seams; `quota_abuse` and `refusal_rate` signal emission (consumed by
   V.9.5).
+- **WS-V.4.6 — Introduction verification** (§10.6, §24.2). The code
+  derivation as a **pure module** in `packages/federation/src/peering/`
+  (sorted halves, domain-separated, 120 bits each) with its conformance
+  vectors and both renderings + the word-list asset; the
+  `pending_verification` state and its inert semantics (V.4.1's transition
+  table extends here); the console screen — code, encoding label, the
+  compare-both-halves instruction, the two channel selectors, and the
+  distinct-channels affirmation — plus the confirm/mismatch routes with
+  audit-in-unit; pin-clearing and the `peer_verification_mismatch` finding on
+  mismatch; the `CHECK` that `active` requires `verified_at`;
+  `pnpm federation:verification-code`; the `check:federation-schema-egress`
+  extension asserting the code appears in no wire schema; and the
+  mandatory-copy entries (§17.3), including the same-channel warning at the
+  point of confirmation. *Depends on V.4.1 and V.4.3. It blocks nothing
+  downstream except that no peer can reach `active` without it — which is
+  the design, not an ordering accident.*
+- **WS-V.4.7 — Key succession** (§9.1, §9.4). The `federation_key_succession`
+  store and the chain verifier binding a rotated key back to the pinned
+  `node_id`, so planned rotation needs neither a re-pin nor a repeat
+  ceremony; refusals for a missing dual proof, a sequence regression, and a
+  chain rooted at the wrong fingerprint; the compromise path (re-pin +
+  re-ceremony) documented as the manual procedure it is. *Pairs with V.1.4,
+  which owns the publishing half of rotation; this card owns the verifying
+  half, and §10.2 step 1 is only true once both have landed.*
 
 ### WS-V.5 — Sync
 
@@ -4221,7 +4529,11 @@ identifiers, not an execution sequence — the planning document's per-card
 - V.3.5 → V.4.4, V.5.1, V.7.1 (the mode predicate gates every mount and
   registration).
 - V.4.2 → V.5.1 (envelope middleware before the peer mount);
-  V.4.5 → V.5.2 (budget attribution on the serving paths).
+  V.4.5 → V.5.2 (budget attribution on the serving paths);
+  V.4.1 + V.4.3 → V.4.6 (the ceremony extends the state machine and gates the
+  handshake's success edge); V.1.4 ↔ V.4.7 (the publishing and verifying
+  halves of rotation MUST share fixtures — a rotation the publisher emits and
+  the verifier rejects is the failure this pairing exists to catch).
 - V.2 pack fixtures → V.6.2 (the pipeline develops against exported packs
   in parallel with V.4/V.5); V.6.6 → V.5.6 (the bootstrap orchestrator is
   the integration point — nothing projects until the full stage chain
@@ -4295,6 +4607,11 @@ slices land, with any unchecked residue honestly annotated
 - [ ] A zero-frontier bootstrap converges to checkpoint head and is resumable at any interruption point. (Twin-node scenario + E2E; WS-V.5.6.)
 - [ ] A withheld leaf without a covering admin event surfaces as a finding. (§12.5 tests; WS-V.2.7.)
 - [ ] A proof minted in another compact fails verification structurally. (The AAD conformance vector; WS-V.1.2.)
+- [ ] No peer can reach `active` without a recorded introduction verification — enforced by the state machine AND a database CHECK, not by console flow. (Transition table + migration constraint; WS-V.4.6.)
+- [ ] A relaying man-in-the-middle that passes all three pins and both handshakes produces **different** verification codes on the two honest consoles. (Adversarial MITM fixture; WS-V.4.6.)
+- [ ] The verification code appears in no federation wire schema. (`check:federation-schema-egress`; WS-V.4.6.)
+- [ ] `pnpm federation:verification-code` reproduces the console's code from the pins alone. (Conformance vector; WS-V.4.6.)
+- [ ] A planned key rotation binds to the pinned `node_id` through its succession chain and needs no re-pin; a chain with a missing dual proof, a sequence regression, or the wrong root is refused. (Succession property tests; WS-V.4.7.)
 - [ ] A checkpoint regressing below the stored floor is refused. (Adversarial fixture; WS-V.6.7.)
 - [ ] Every tier fetches the control lane in full, and room status reports `complete@<tier>` with its un-fetched count. (Per-tier fixtures; WS-V.5.7.)
 - [ ] No read path fetches an un-mirrored object: every member-facing render of un-mirrored content runs against a peer client that fails on any request. (§16.6 rule 3 / §22.4 test; WS-V.5.7.)
@@ -4541,6 +4858,39 @@ determination; electorate freezing assumes one membership registry; and a
 compromised or lazy peer would become a citizenship mint for real-money
 governance. Participation is content; citizenship is local (§7.3).
 
+### 33.18 A short (ZRTP-style) verification code — rejected
+
+The obvious ergonomic improvement to §10.6 is a four-character code of the
+kind ZRTP made familiar. It is unavailable here, and the reason generalizes:
+ZRTP's SAS commits to an **ephemeral** Diffie-Hellman exchange under a prior
+commitment, so nothing can be precomputed and the only grind available runs
+*inside the live call*. This code commits to **long-lived identities**, which
+both admits precomputation (a table of candidate identities indexed by their
+half, consulted the moment an honest `node_id` is intercepted) and stretches
+the live window from seconds to however long an asynchronous introduction can
+be delayed. A four-character code loses to either, and the ceremony would
+then confirm the attacker's substitution rather than detect it — worse than
+no ceremony, because it would be believed.
+
+The same reasoning rejects hashing both parties into one combined short
+string: separate, positionally-bound halves turn a birthday search (~2^(n/2))
+into a second-preimage search (~2^n), and that factor is not available to
+trade away for a shorter read. What is offered instead is the word rendering
+(§10.6.1) — the same bits, easier to say out loud — because the honest way to
+make a ceremony easier is better encoding, never fewer bits.
+
+### 33.19 A certificate authority or node directory for identity — rejected
+
+The standard fix for out-of-band introduction is a third party that vouches:
+a CA, a registry, a keyserver, a web of trust. Every variant reintroduces the
+gatekeeper this specification exists to remove — federation eligibility is
+keyed on policy equivalence and attested enforcement, never on operator
+identity, allowlists, or anyone's say-so (§0, §33.8). It would also solve the
+wrong problem: the compact does not need to know *who* an operator is, only
+that a key is the one the other operator meant. A CA answers the first
+question at the cost of a dependency; the §10.6 ceremony answers the second
+with none.
+
 ---
 
 ## 34. Open questions
@@ -4595,7 +4945,8 @@ are not blocked behind a contract deployment.
 | Node key compromise | Forged records/checkpoints as the victim node | Rotation with dual-proof promotion (§9.4); out-of-band re-pin recovery; anchored history; peers' anti-rollback floors bound rewriting; accepted residual: a window of forgeable *new* records until peers are notified |
 | Correlated moderation blind spots (same charter ⇒ same gaps everywhere) | A charter-level defect replicates compact-wide | The charter is versioned and fixable by epoch; nodes retain local tunables and local-hide; heterogeneous LLM lanes (§8.4) keep enforcement *implementations* diverse even under one rulebook |
 | Epoch-transition fracture (operators fail to adopt in time) | Unintended defederation | Grace windows with vocabulary compatibility (§8.5); console countdown surfaces; divergence recorded without accusation and reversible on re-alignment (§10.3) |
-| Seed compromise at N=1 (poisoned first bootstrap) | A new node mirrors a hostile corpus | Three-way pinning limits impersonation (§10.1); re-enforcement bounds content harm; checkpoints + anchored roots make later history rewriting provable; accepted residual: TOFU is TOFU — stated, not hidden (§7.3) |
+| Seed compromise at N=1 (poisoned first bootstrap) | A new node mirrors a hostile corpus | Three-way pinning limits impersonation (§10.1); re-enforcement bounds content harm; checkpoints + anchored roots make later history rewriting provable; the charter pin arrives with signed source (§8.6), which is a stronger channel than the identity pin gets |
+| Substituted `node_id` in the out-of-band introduction | An operator peers with an impersonator; every subsequent check passes against the wrong key | The §10.6 two-channel ceremony: 120-bit-per-half codes compared over a channel independent of the pin exchange, positionally bound so forgery is second-preimage rather than birthday work; `active` gated on a recorded confirmation at both the state-machine and database level; accepted residual — an operator who uses one channel twice, or confirms without comparing, defeats it, and no protocol can tell (§10.6.5) |
 | Transparency log outage | Adoption delays; attestation findings pile up | Log is evidence, not liveness (§8.7); sync unaffected; adoption waits; sustained absence is itself a surfaced signal |
 | Re-enforcement CPU cost (scan/derive on every mirrored object) | Ingest lag on modest hardware | Bounded worker budgets + protocol backpressure (§23.4); lanes put text before media (§13.2); shadow mode measures before members see anything (§27.2) |
 | Witness sparsity at N=2 (a pair cannot cross-witness meaningfully) | Equivocation detection weakened at launch scale | Consistency proofs + the anti-rollback floor + chain anchoring carry the property pairwise — the chain is the third witness a pair lacks (§12.4, §8.7); witnessing strengthens automatically as edges are added |
@@ -4754,15 +5105,24 @@ them equal). Fractional values are decimal strings (§8.1):
 ```text
 B.1  Peering (operators Ana on node A, Bo on node B)
 
-Ana ── out-of-band ──► Bo        exchange node_ids + base URLs + genesis CID
+Ana ── channel 1 ────► Bo        exchange node_ids + base URLs + genesis CID
 Ana: console "add peer"          pins {url_B, node_id_B, genesis_cid}
 Bo:  console "add peer"          pins {url_A, node_id_A, genesis_cid}
-A ── GET  /descriptor ─────► B   verify sig, node_id recomputes, pins match
+A ── GET  /descriptor ─────► B   verify sig, key binds to pinned node_id
+                                 (recompute, or succession chain §9.1)
 A ── GET  /charter/:cid* ──► B   walk epoch chain to pinned genesis (cached)
 A ── chain read (own pin) ─► ⛓   epoch anchor confirmed at depth (§8.7)
 A ── POST /handshake ──────► B   envelope; epoch equal; anchor verified;
                                  suites negotiate; B verifies symmetrically
-A ◄─────── handshake ok ─────    both record peer state = active (audited)
+A ◄─────── handshake ok ─────    both record state = pending_verification
+                                 (nothing flows; §10.3)
+both consoles: code = half(node_id_lo) ‖ half(node_id_hi)      (§10.6)
+Ana ── channel 2 ────► Bo        read the WHOLE code aloud; Bo compares
+                                 (channel 2 MUST NOT be channel 1)
+Ana, Bo: console "confirm"       match ⇒ active, audited with the code
+                                 digest + both channel values (audited)
+                                 mismatch ⇒ configured, pins CLEARED,
+                                 peer_verification_mismatch finding
 
 B.2  Bootstrap (B mirrors A)
 
