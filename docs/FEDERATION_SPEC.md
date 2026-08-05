@@ -2,7 +2,7 @@
 
 **Document status:** Draft design specification (revision v0.2)
 **Prepared date:** August 4, 2026
-**Last refined:** August 5, 2026 — revision 4: the §10.6 introduction-verification ceremony (two-channel peer-code comparison, the `pending_verification` state, permanent `node_id` across key succession). Revision 3 resolved the §34 open questions (Q2–Q8 closed, Q1 tracked): per-room mirror tiers, the compact-scoping seam, steward-dormancy declarations, and mirror-side notice-and-action
+**Last refined:** August 5, 2026 — revision 5: Q1 closed — expertise is node-local and is never recognized across nodes (§33.20); **§34 holds no open questions**. Revision 4 added the §10.6 introduction-verification ceremony (two-channel peer-code comparison, the `pending_verification` state, permanent `node_id` across key succession); revision 3 resolved Q2–Q8 (per-room mirror tiers, the compact-scoping seam, steward-dormancy declarations, mirror-side notice-and-action)
 **Target project:** [`hatter6822/Licio`](https://github.com/hatter6822/Licio)
 **Primary platform:** Licio server nodes (`apps/api` + `packages/lcap`), with operator consoles in the Licio PWA
 **Scope:** Bootstrap, continuous mirroring, and full remote participation for PUBLIC content between independently operated Licio instances, gated on a shared, content-addressed administration charter and sustained, chain-anchored, witnessed proof that the charter is actually enforced
@@ -954,6 +954,12 @@ The protocol does NOT provide, and the UI must never imply:
 - **Member-level identity portability.** Attribution is node-attested
   (§11.8); accounts do not move between nodes. A remote member participates
   *through* their home account, they never acquire a foreign one.
+- **Remote expertise.** A member never satisfies another node's
+  `experts_and_stewards` posting policy (§18.1, §33.20). Expert standing is
+  a node-local grant — the platform `expert` role and room stewardship,
+  decided by `userMayPostTopLevel` against a local user row — and a remote
+  author has no such row here by the point above. This is permanent, not a
+  version limit.
 - **Federated citizenship.** Remote members participate in content;
   governance, treasury, and KYC standing never cross nodes (decision 28).
   There is no cross-node vote, no cross-node treasury access, and no
@@ -2638,8 +2644,13 @@ across everything mirrored from anywhere.
   through the member's own node (§18), and it says so: a submission shows
   its honest lifecycle (`sending → awaiting <display_domain> → live` /
   `held` / `refused (<reason>)`), never an optimistic fake-live state. A
-  posting-policy refusal (e.g. an `experts_and_stewards` room) is shown
-  before composing, not after.
+  posting-policy refusal is shown **before** composing, not after — and for
+  an expert-gated room the copy states the reason as the permanent fact it
+  is ("Posting here is limited to `<display_domain>`'s own experts and
+  stewards"), never as a pending capability. Words implying a future
+  unlock — "not yet", "coming soon", "request access" — are prohibited
+  vocabulary here for the same reason "deleted everywhere" is below: the
+  UI must not promise what the design has permanently declined (§33.20).
 - Author attribution renders as `handle@display_domain` with the node's
   verified `node_id` in the hover/detail affordance (display domains are
   presentation; §9.3) — identically for a remote author shown on the
@@ -2734,9 +2745,10 @@ everything else in this section:
 The write surfaces (decision 16): comments, corrections, debate-arena
 positions (as a party, §11.3), and story submissions including media. Room
 policy applies as it would locally: a private room refuses (nothing private
-federates, §3.3), a frozen room refuses, an `experts_and_stewards` room
-refuses remote authors in v1 (`posting_policy_refused` — §34 Q1 tracks
-whether remote expertise can ever be recognized).
+federates, §3.3), a frozen room refuses, and an `experts_and_stewards` room
+refuses remote authors **permanently** (`posting_policy_refused`) — not as a
+v1 limit but as doctrine (§33.20): expertise is node-local standing, and
+standing does not federate (§3.2, §7.3).
 
 ### 18.2 Submission lifecycle
 
@@ -2846,7 +2858,9 @@ budget-capped at A — and buys nothing in ranking anywhere (§3.2).
 
 No foreign accounts (the member never authenticates to A); no cross-node
 sessions or cookies (the envelope is node-to-node); no wallet linkage
-(§33.15); no governance or treasury reach (decision 28); no
+(§33.15); no governance or treasury reach (decision 28); **no expert or
+steward standing on A** — an expert-gated room refuses remote authors
+permanently, and no attestation creates an exception (§33.20); no
 mirror-side writes (the mirror surface hosts the composer; the write
 routes home, §4 Mirror); no browser-to-foreign-node traffic under any
 circumstance, verified by the E2E network capture (§29.4).
@@ -3395,7 +3409,11 @@ Error vocabulary (typed, closed): `federation_disabled`, `unknown_peer`,
 `budget_exceeded` (with `retry_after_ms`), `not_found` (never
 distinguishing withheld from absent), `payload_too_large`,
 `vocabulary_unknown`, `posting_policy_refused` (room policy excludes the
-submitter, stated before composition where possible),
+submitter — always stated **before** composition for a mirrored room, since
+the room descriptor carries the posting policy (§11.4) and the composer reads
+it locally; a policy changed since the last sync can still refuse at the
+content home, and that refusal is shown with its reason rather than as a
+generic failure),
 `participation_refused` (carrying the §15 refusal reason),
 `wrong_authority` (an admin event signed by a node not authoritative for
 its type, §19.1).
@@ -3865,8 +3883,12 @@ or wrong-scope anchor → refused; a `wrong_authority` admin event (a content
 home issuing a tombstone, an author home issuing a takedown) → refused and
 receipted as `invalid_event`; a participation submission skipping
 pre-enforcement (oversized body, unstripped media) → refused with the
-refusal charged to the author home's ratio; a bot-farm flood at valid
-volume → per-author and per-peer budgets hold and `quota_abuse` trips; an
+refusal charged to the author home's ratio; a submission into an
+`experts_and_stewards` room carrying a fabricated expert claim → refused
+**twice over**, since the `fed/1` schemas are `.strict()` and have no field
+to carry the claim at all, and the posting-policy check refuses the
+submission regardless of what accompanied it (§33.20); a bot-farm flood at
+valid volume → per-author and per-peer budgets hold and `quota_abuse` trips; an
 epoch lengthening a steward-continuity window without acknowledgment →
 refused as a floor weakening (§8.8 item 6); a notice flood without
 proof-of-work → bounded by the global window with no client address read
@@ -4443,7 +4465,10 @@ end to end (decisions 16, 25–27, 29; §18):
   `/participation/submit` + `/participation/blob` routes: envelope,
   per-peer and per-`(peer, origin_author)` budgets, full §15 re-enforcement,
   synchronous typed verdicts; `posting_policy_refused` evaluated against
-  the room's real posting policy.
+  the room's real posting policy, with the expert-gate case asserted as
+  **doctrine** (§33.20): a remote submission into an `experts_and_stewards`
+  room is refused whatever role or attestation it carries, and the test
+  enumerates the attestation shapes that must not create an exception.
 - **WS-V.11.4 — Acceptance and hosting** (§11.8, §16). Accepted submissions
   committed to the room log + receipted in one unit; projected as
   `hosted_remote` content through the same projection pipeline; served,
@@ -4648,6 +4673,7 @@ slices land, with any unchecked residue honestly annotated
 - [ ] The author-home tombstone anonymizes the author's hosted-remote content at every content home. (Twin-node both-directions authority test; WS-V.11.9.)
 - [ ] Per-`(peer, origin_author)` and per-peer participation budgets enforce, and the charter anti-bot floor validates. (Adversarial bot-farm fixture + `check:charter-integrity` item 9; WS-V.11.3/V.0.6.)
 - [ ] Two identical stories — one local, one hosted-remote — rank identically under identical local attention. (Neutrality twin group; WS-V.7.2.)
+- [ ] A remote submission into an `experts_and_stewards` room is refused regardless of any role claim or attestation it carries, and the composer states the refusal before composition rather than after. (Doctrine tests over the attestation shapes + composer pre-check; WS-V.11.3/11.10, §33.20.)
 
 ### Attestation and defederation
 
@@ -4891,29 +4917,62 @@ that a key is the one the other operator meant. A CA answers the first
 question at the cost of a dependency; the §10.6 ceremony answers the second
 with none.
 
+### 33.20 Remote expertise recognition — rejected
+
+Letting a remote member satisfy an `experts_and_stewards` posting policy has
+two conceivable shapes, and both are refused permanently.
+
+**Author-home attestation** — B asserts "this member is an expert" in the
+submission and A honours it because the charter matches. This is standing
+crossing a node boundary, which §3.2 forbids and decision 28 forbids again in
+the participation channel: a peer would become a mint for posting rights in
+*other* communities' expert-gated rooms, and the mint's quality would be
+invisible to the room that bears the consequence. The charter guarantees
+common *rules*; it has never guaranteed that two nodes vet people the same
+way, and expert vetting is exactly where operators legitimately differ.
+
+**Content-home vetting** — A's stewards grant a specific remote author expert
+standing locally. This one is not a doctrine violation, it is a structural
+impossibility that would have to be built around. Expert standing here is the
+platform `expert` RBAC role plus room stewardship, resolved by
+`userMayPostTopLevel` (`apps/api/src/forum/rooms.ts`) **against a local user
+row** — and a remote author has no user row on the content home, because
+accounts never move between nodes (§7.3). Granting it would mean inventing a
+parallel grant space keyed on `(peer_node_id, origin_author_id)`: a second
+standing system shadowing RBAC, with its own revocation, its own audit
+surface, and its own answer to what happens when the author's home node
+defederates. That is a large amount of machinery whose entire purpose is to
+reproduce, badly, the thing a local account already is.
+
+The refusal is therefore doctrine, and it is cheap: `posting_policy_refused`
+is evaluated before composition (§17.3), so a remote member never writes
+something only to lose it. What remains fully available to them is every
+other write surface — comments, corrections, debate positions, and story
+submissions into rooms that admit all members (§18.1) — which is the great
+majority of the compact's rooms and all of its conversation.
+
+The honest limit (§3.12): a genuine subject-matter expert on node B cannot
+post top-level in node A's expert-gated room, however qualified they are.
+The remedy is the ordinary one — they hold an account on A, vetted by A, like
+any other expert A recognizes — and that is not a workaround, it is what
+"A's community vets its own experts" means.
+
 ---
 
 ## 34. Open questions
 
-Revision 3 resolved Q2–Q8; each resolution is recorded in the section that
-owns it, and this list is the index. **Q1 remains open** — deliberately, as
-a tracked post-launch decision rather than an unnoticed gap.
+**No questions remain open.** This section is the resolution register: every
+question this specification raised is answered, each answer is recorded in
+the section that owns it, and the table below is the index. A question is
+listed here only so that a later reader finds the reasoning rather than
+re-deriving it — none of these is a pending decision, and none should be
+re-opened without a change in the facts that decided it.
 
-### Open
+### Resolved in revision 5
 
-1. **Q1 — Remote expertise.** Can a remote member ever satisfy an
-   `experts_and_stewards` posting policy, and if so, whose determination
-   counts — the content home's own vetting of the remote author, an
-   author-home attestation of expert status, or never? **v1 refuses**
-   (`posting_policy_refused`, §18): safe, visibly asymmetric, and no
-   mechanism is built either way. The question touches the same
-   standing-vs-content boundary as decision 28 — an author-home attestation
-   of expertise would be standing crossing a node boundary, which §3.2
-   forbids, while content-home vetting of a named remote author would not —
-   so the answer is a real design decision, not a default to be arrived at
-   incidentally. **Revisit** when a compact member actually runs an
-   expert-gated room whose subject-matter community spans nodes; until then
-   the refusal costs nothing that exists.
+| # | Question | Resolution | Where it lives |
+|---|---|---|---|
+| Q1 | Remote expertise in `experts_and_stewards` rooms | **Never — expertise is node-local.** A remote member does not satisfy another node's expert-gated posting policy, permanently and by doctrine rather than by version. Author-home attestation would be standing crossing a node boundary (§3.2, decision 28), turning a peer into a mint for posting rights in other communities' rooms. Content-home vetting has nowhere to live: expert standing is the platform `expert` RBAC role plus room stewardship resolved against a **local user row**, and a remote author has none, because accounts never move between nodes (§7.3). Every other write surface stays open to them. | §7.3, §17.3, §18.1, §33.20 |
 
 ### Resolved in revision 3
 
