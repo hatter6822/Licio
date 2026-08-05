@@ -2,7 +2,7 @@
 
 **Document status:** Draft design specification (revision v0.2)
 **Prepared date:** August 4, 2026
-**Last refined:** August 4, 2026 — revision 2: Knomosis-anchored proof, default-ON crypto posture, full remote participation
+**Last refined:** August 5, 2026 — revision 5: Q1 closed — expertise is node-local and is never recognized across nodes (§33.20); **§34 holds no open questions**. Revision 4 added the §10.6 introduction-verification ceremony (two-channel peer-code comparison, the `pending_verification` state, permanent `node_id` across key succession); revision 3 resolved Q2–Q8 (per-room mirror tiers, the compact-scoping seam, steward-dormancy declarations, mirror-side notice-and-action)
 **Target project:** [`hatter6822/Licio`](https://github.com/hatter6822/Licio)
 **Primary platform:** Licio server nodes (`apps/api` + `packages/lcap`), with operator consoles in the Licio PWA
 **Scope:** Bootstrap, continuous mirroring, and full remote participation for PUBLIC content between independently operated Licio instances, gated on a shared, content-addressed administration charter and sustained, chain-anchored, witnessed proof that the charter is actually enforced
@@ -446,8 +446,16 @@ member writes route through the participation channel (§18) to the
 content home.
 
 **Mirror set**
-The subset of a peer's public rooms a node mirrors. Default: all of them.
-Operators MAY exclude rooms (§14.5).
+The subset of a peer's public rooms a node mirrors, with the **tier** it
+mirrors each at. Default: all rooms at `full` (§14.5).
+
+**Mirror tier**
+How much of a mirrored room a node carries: `full`, `recent`, `text_only`,
+or `none` (§16.6). The control lane — checkpoints, descriptors, and
+administrative events — is never narrowed by a tier, so a tiered mirror
+keeps every verification and enforcement duty; the tier decides only which
+content leaves it fetches. The charter declares a floor (§8.2 row 8), and a
+node's per-tier room counts are disclosed in its descriptor (§9.3).
 
 **Provenance**
 The per-object record of where a mirrored object came from: origin node,
@@ -557,9 +565,24 @@ The bounded period, declared per epoch transition, during which nodes on
 adjacent epochs of one lineage may still interoperate (§8.5).
 
 **TOFU (trust on first use)**
-Accepting a peer's identity/charter on first contact against operator-supplied
-pins, without a third-party proof. The bootstrap trust posture at small N
-(§10.1), hardened by pinning, chain anchoring, and later witnessing.
+Accepting whatever identity a party presents on first contact and warning only
+if it later changes. **This design does not do that**, and the distinction is
+load-bearing: the three pins (§10.1) are recorded *before* first contact, the
+first descriptor fetch is a verification against them rather than an
+acceptance, a mismatch on any pin refuses the peer, and there is no
+warn-and-continue path anywhere. The posture is a **pre-shared key
+fingerprint with an out-of-band comparison ceremony** (§10.6) — the thing TOFU
+is criticized for lacking. The term is kept in this vocabulary only to name
+what the design is not.
+
+**Introduction verification / verification code**
+The §10.6 ceremony: after pins are recorded and the handshake verifies, both
+consoles display a code derived from the two `node_id`s and the pinned
+lineage genesis, and the two operators compare it over a channel independent
+of the one that carried the pins. It converts a single-channel substitution
+of a `node_id` into an attack requiring control of two channels. The code is
+public-derived and not a secret; what it requires is **channel
+independence**, which is why it never travels between the nodes (§10.6).
 
 ---
 
@@ -658,6 +681,12 @@ that is the required direction (never deleting the seam):
 8. **Remote participation, end to end** — the write-through-home channel,
    participation records, outcomes, relayed appeals/reports, and the WS-J
    targeting extension for federation-plane content (§18).
+9. **A public notice-and-action intake** (§19.4). Reporting today requires an
+   account: WS-J intake is member-scoped by construction. A node serving
+   content it does not home needs a path for a non-member to notify it, so
+   §19.4 adds the session-less, proof-of-work-bounded intake and its
+   statement-of-reasons path — the one federation surface that is
+   deliberately open to people who are not members of anything.
 
 ### 5.4 Relationship to other specifications and workstreams
 
@@ -711,7 +740,9 @@ A node's lifecycle:
 ```text
 solo ──(adopt charter epoch)──► charter-adopted
      ──(provision node key)───► identity-ready
-     ──(operator adds peer; handshake)──► peered (per-peer state machine, §10.3)
+     ──(operator adds peer; handshake)──► pending verification (§10.6)
+     ──(operators compare codes on a 2nd channel)──► peered
+                                (per-peer state machine, §10.3)
      ──(bootstrap per room)───► mirroring
      ──(steady state)─────────► sync + participation + admin events +
                                 checkpoints + witnessing + anchoring
@@ -923,6 +954,12 @@ The protocol does NOT provide, and the UI must never imply:
 - **Member-level identity portability.** Attribution is node-attested
   (§11.8); accounts do not move between nodes. A remote member participates
   *through* their home account, they never acquire a foreign one.
+- **Remote expertise.** A member never satisfies another node's
+  `experts_and_stewards` posting policy (§18.1, §33.20). Expert standing is
+  a node-local grant — the platform `expert` role and room stewardship,
+  decided by `userMayPostTopLevel` against a local user row — and a remote
+  author has no such row here by the point above. This is permanent, not a
+  version limit.
 - **Federated citizenship.** Remote members participate in content;
   governance, treasury, and KYC standing never cross nodes (decision 28).
   There is no cross-node vote, no cross-node treasury access, and no
@@ -957,6 +994,18 @@ carry policy numbers:
   machine block (§8.2). The charter commits to artifacts by digest rather than
   by inlining them, so the human-readable doctrine documents remain the
   reviewable source and the charter stays small.
+- **English is canonical; translations are presentation** (Q5 resolved, §34).
+  Doctrine artifacts and every charter-carried string are English-canonical,
+  and the digest binds those bytes. A translated doctrine presentation is an
+  ordinary i18n resource in a node's own client — never charter content,
+  never digested, never attested, and never authoritative. It renders under
+  a standing label ("translated presentation of the canonical English text")
+  with the canonical text one affordance away, and the mandatory-copy SSOT
+  (§17.3) owns that label like any other honesty string. The consequence is
+  the point: because no translation is charter content, a node may ship any
+  translation at any quality without touching its epoch, and a bad
+  translation can never fork a compact or delay a doctrine change behind N
+  languages. The charter therefore carries no translation map (§8.4).
 
 ### 8.2 The charter core inventory
 
@@ -974,8 +1023,8 @@ deliberately excluded (§8.4).
 | 5 | Compliance policy **content** per region: feature cells, asset flags, age-gate policy, KYC policy, disclosure digests — excluding node-local provenance (`policy_id`, `legal_approval_ref`, `effective_at`, actor refs) | `jurisdictionFeaturePolicySchema` rows (`packages/shared/src/schemas/jurisdiction.ts`), authored by counsel through the WS-N console; **zero populated today**, so the v0.1 reference charter carries an empty map plus the pinned rule that enabling any cell requires node-side counsel approval | `compliance`: `{region_policies: map, enable_requires_counsel: true}` |
 | 6 | The UGC profile: Markdown-lite grammar version, sanitizer profile (`licio-ugc`), `MAX_UGC_INPUT_LENGTH`, comment body cap, the `submission_metadata` discriminated-union version, upload content-type allowlist and size caps | `packages/shared/src/ugc/*`, `schemas/story.ts`, `packages/db/src/schema/upload.ts` | `ugc_profile`: inlined pins |
 | 7 | The attention doctrine pin: SPEC §22.1 aggregate schema version (the eleven fields and bucket boundaries) and the affirmation that no rawer form may exist on any wire | `packages/shared/src/schemas/attention.ts` | `attention_profile`: `{aggregate_schema_version, digest}` |
-| 8 | Federation protocol pins: protocol version, record vocabulary version, allowed COSE suites, admin-event SLA table, enforcement-checkpoint cadence bounds, default grace window, sync limit floors, mirror-share bound (§17.1), participation SLAs and budget floors (§18), the anti-bot floor (decision 29), and the **anchoring declaration** — chain id, anchor contract address, confirmation depth, interval bounds, minimum deployment environment (§8.7) | This document; `packages/lcap/src/cose/suites.ts`; `apps/api/src/knomosis/pin.config.json` (venue consistency) | `federation`: inlined (§8.5, §19.2, §20.1, §23) |
-| 9 | Lineage metadata: lineage display name, epoch number, predecessor CID, effective date, adoption deadline, steward keys, steward anchoring identity | New | `lineage`, `steward` (§8.5–§8.7) |
+| 8 | Federation protocol pins: protocol version, record vocabulary version, allowed COSE suites, admin-event SLA table, enforcement-checkpoint cadence bounds, default grace window, sync limit floors, mirror-share bound (§17.1), participation SLAs and budget floors (§18), the anti-bot floor (decision 29), the **mirror-tier floor** (§23.3 — the minimum availability a compact member promises), and the **anchoring declaration** — chain id, anchor contract address, confirmation depth, interval bounds, minimum deployment environment (§8.7) | This document; `packages/lcap/src/cose/suites.ts`; `apps/api/src/knomosis/pin.config.json` (venue consistency) | `federation`: inlined (§8.5, §19.2, §20.1, §23) |
+| 9 | Lineage metadata: lineage display name, epoch number, predecessor CID, effective date, adoption deadline, steward keys, steward anchoring identity, the **steward-continuity declaration** (§8.5) | New | `lineage`, `steward` (§8.5–§8.7) |
 
 Two consequences of digest-of-the-machine-block:
 
@@ -1051,6 +1100,14 @@ Excluded from matching, disclosed in the node descriptor (§9.3):
 - **Node-local compliance provenance**: `legal_approval_ref`, counsel actor
   refs, timestamps — the *content* of a policy matches; who approved it on
   which node does not.
+- **Doctrine translations** (§8.1, Q5): which languages a node presents its
+  doctrine in, and how good those translations are, is a node-local product
+  decision. Two nodes serving the same canonical bytes in different
+  languages run the same charter.
+- **Mirror tier per room within the charter's floor** (§23.3): *that* a node
+  meets the compact's availability floor is charter-matched; *which* rooms
+  it carries above the floor is operator posture, disclosed in the
+  descriptor (§9.3).
 
 Excluded from both matching and disclosure: secrets, keys, user data,
 anything §22.1 forbids on the wire.
@@ -1110,12 +1167,55 @@ expulsion, carrying no accusation. Declining an epoch is a legitimate,
 first-class outcome; a fork on genuine policy divergence is the mechanism
 working honestly (decision 7).
 
+**Steward continuity and dormancy** (Q6 resolved, §34). A lineage whose
+steward disappears cannot author epochs, and without a declared convention
+the members left holding it must argue about *when* that became true — at
+exactly the moment trust is lowest. Every epoch therefore declares its own
+liveness expectation:
+
+```jsonc
+"steward_continuity": {
+  "liveness_interval_days": 180,   // steward MUST publish an anchored act within this window
+  "dormancy_grace_days": 30        // added before the lineage is called dormant
+}
+```
+
+- A **steward act** is either a new epoch or a `federation_charter_liveness`
+  record (§11.1) — a minimal steward-signed statement naming the current
+  epoch CID and an issue time — and it counts only once **anchored** at the
+  pinned depth (§8.7), so liveness is witnessed by the same chain the epochs
+  are, not asserted on a steward-controlled surface.
+- A lineage is **dormant** when no steward act has been anchored within
+  `liveness_interval_days + dormancy_grace_days` of the last one. Dormancy
+  is computed independently by every node from data it already holds and
+  verifies; two honest nodes cannot disagree about it.
+- **Dormancy transfers no authority.** It creates no successor, promotes no
+  key, and changes no adopted epoch — nodes keep enforcing the epoch they
+  adopted, and the compact keeps working indefinitely. What dormancy
+  provides is a *shared, checkable basis* for founding a successor lineage
+  under §8.6: "epoch 4 declared 180 + 30 days; the last anchored steward act
+  was T; now exceeds T + 210" is arithmetic over anchored facts, not a
+  contested claim about whether someone is coming back.
+- The federation console surfaces the countdown continuously (not only after
+  it expires) and raises a `lineage_dormant` finding (§20.5) when it does,
+  so the condition is visible long before it matters.
+- Because a **longer** interval is what lets a dead steward go unnoticed,
+  lengthening `liveness_interval_days` or `dormancy_grace_days` is a
+  floor-weakening diff requiring explicit acknowledgment (§8.8 item 6).
+
+Listing successor keys an epoch early (above) remains the *preferred*
+continuity path and is unaffected: dormancy is the backstop for the case
+where no usable successor key exists, which is precisely the case a
+convention has to cover.
+
 ### 8.6 Lineages and open founding
 
 The charter is data, not code (decision 6). Any operator MAY author a genesis
 epoch and found a new lineage; nodes adopting it form their own compact,
 disjoint from every other compact by construction (§9.6). The protocol,
-schemas, gates, and consoles are lineage-agnostic.
+schemas, gates, and consoles are lineage-agnostic. Founding is always
+available; what a declared dormancy (§8.5) adds is agreement about *when* it
+became the only path, so a succession fork is orderly rather than a race.
 
 v0.1 ships exactly one **reference lineage**, stewarded by the Licio
 maintainer, whose genesis is checked into the repository at
@@ -1204,9 +1304,10 @@ reference-lineage artifacts on every PR:
 6. **Floor-weakening diff detection** against the predecessor epoch: removing
    a reserved action, raising the escalation ceiling, lengthening an SLA,
    shrinking the prohibited-use list, widening a tunable bound, relaxing the
-   anti-bot floor, or lowering the anchoring environment floor fails
-   *unless* named in `acknowledged_floor_changes` — weakening must be
-   explicit, reviewable, and signed, never incidental.
+   anti-bot floor, lowering the anchoring environment floor, lowering the
+   **mirror-tier floor** (§23.3), or lengthening a **steward-continuity
+   window** (§8.5) fails *unless* named in `acknowledged_floor_changes` —
+   weakening must be explicit, reviewable, and signed, never incidental.
 7. Grace/vocabulary coherence: a transition with `grace_window_days > 0` must
    be vocabulary-compatible (§8.5).
 8. The `federation.anchoring` declaration is well-formed and
@@ -1217,6 +1318,11 @@ reference-lineage artifacts on every PR:
 9. The anti-bot floor is present and complete (decision 29): proof-of-work
    signup required, behavioral damping required, participation budget floors
    present for every participation class.
+10. The **steward-continuity declaration** (§8.5) is present with both
+    windows inside the charter's own bounds, and the **mirror-tier floor**
+    (§23.3) names a tier in the closed tier vocabulary. Both are required
+    fields: an epoch that omits either does not validate, so "no declared
+    convention" cannot re-emerge by omission.
 
 **At runtime** — the same validation module (pure, shared between the gate and
 `apps/api`) runs at adoption time (§8.5) and at handshake time against a
@@ -1242,9 +1348,23 @@ Ed25519/MLS/HPKE; the two planes never share suites or keys).
   any rotatable operational secret — node identity must survive secret
   rotation. It is a root identity, handled accordingly (§35 risk register).
 - **Node id:** `node_id = "fnode-" + base32(sha256(cose(public_key)))[0..24]`
-  (lowercase RFC 4648 §6, unpadded — the CID alphabet). Self-certifying: a
-  peer that knows a `node_id` can verify any presented key against it, so the
-  operator pin (§10.1) is a short string, not a certificate exchange.
+  (lowercase RFC 4648 §6, unpadded — the CID alphabet), computed over the
+  node's **genesis** public key. 24 base32 characters carry 120 bits, so the
+  pin is a short string with full fingerprint strength — not a certificate
+  exchange, and not a truncation that needs an issuer to compensate for it.
+- **Identity is permanent; the signing key is not.** `node_id` names the
+  genesis key forever and does **not** change when the node rotates (§9.4) —
+  that is the entire point of the dual-proof promotion, which would be
+  pointless if every peer had to re-pin anyway. A peer holding only a
+  `node_id` verifies the *current* key one of two ways: it recomputes
+  directly (the un-rotated case), or it verifies the **succession chain** —
+  the ordered descriptors whose dual proofs walk from the presented key back
+  to a key whose fingerprint is the pinned `node_id`. Peers persist enough of
+  that chain to re-derive the binding; a presented key that neither
+  recomputes nor chains is refused (§10.2 step 1). Compromise is the case
+  this cannot cover — an attacker holding the genesis key can author a
+  succession chain to their own — which is exactly why §9.4 treats compromise
+  as an out-of-band re-pin rather than a rotation.
 - Horizontal replicas of one deployment share the key file; they are one
   node (§4).
 
@@ -1287,7 +1407,11 @@ A signed record, `federation_node_descriptor`, published at
     "llm_lanes": { "moderation": { "provider": "local", "model": "Qwen/Qwen3Guard-Gen-4B" },
                    "adjudication": { "provider": "local", "model": "Qwen/Qwen3.6-27B" } },
     "feature_flags": { "cryptoEnabled": false, "governanceEnabled": false },
-    "mirror_policy": { "default": "all_public_rooms", "excluded_room_count": 0 }
+    "mirror_policy": {                 // §23.3 — availability posture, in aggregate
+      "default_tier": "full",          // the tier new rooms get
+      "floor_tier": "text_only",       // the charter floor this node is bound by
+      "room_tier_counts": { "full": 42, "recent": 0, "text_only": 3, "none": 1 }
+    }
   },
   "issued_at_ms": 1791234567000
 }
@@ -1305,13 +1429,19 @@ trust decisions key on `node_id`.
   active key**, then a subsequent descriptor promoting the successor,
   **signed by both** (two proofs on one record — the multi-proof model). Peers
   accept a promotion only when the old key co-signs; the descriptor
-  `sequence` is monotone per node and peers MUST refuse regressions.
+  `sequence` is monotone per node and peers MUST refuse regressions. The
+  promoted descriptors are the **succession chain** of §9.1: `node_id` is
+  unchanged, no pin changes, and **no re-verification ceremony is required**
+  (§10.6) — the verification code binds identities, not current keys, so a
+  planned rotation leaves it untouched. Re-handshake still runs (§10.2).
 - **Compromise (old key unavailable or untrusted):** there is no cryptographic
   recovery — the operator re-pins out-of-band with each peer operator,
-  exactly like initial peering (§10.1), and peers SHOULD quarantine the old
-  identity immediately on notification. The anchored history bounds the
-  damage window by making post-hoc rewriting under the stolen key provably
-  contradict the chain. This limit is stated, not papered over (§3.12).
+  exactly like initial peering (§10.1), **including the §10.6 verification
+  ceremony**, because a new pin is a new introduction and inherits none of the
+  old one's assurance. Peers SHOULD quarantine the old identity immediately
+  on notification. The anchored history bounds the damage window by making
+  post-hoc rewriting under the stolen key provably contradict the chain. This
+  limit is stated, not papered over (§3.12).
 - Rotation and revocation events are audit-chained locally and visible to
   peers via descriptor sync; every peer state transition they trigger follows
   §10.3.
@@ -1352,19 +1482,46 @@ consequences are structural, not policy:
 - A **solo node** (no adopted charter) has no compact_id, mints no federation
   records, and refuses all federation traffic — federation OFF is the default
   posture (§27).
-- **One compact per node** in v0.1. Multi-compact membership is deferred
-  (§33.13, §34 Q3); nothing in the record model precludes it (bodies are
-  proof-independent — see next point), but its product semantics are unsettled.
+- **One compact per node** in v0.1, with the seam kept open (Q3 resolved,
+  §34): multi-compact membership, if it ever arrives, is a **node-level**
+  property — one node, two compacts — not "run a second node." Nothing in
+  the record model precludes it (bodies are proof-independent — see next
+  point), and its product semantics stay unsettled until a second lineage
+  actually exists (§33.13), so v1 ships single-compact behaviour over
+  compact-aware structure:
+  - **Every `federation_*` table carries `compact_id`** and every uniqueness
+    constraint includes it (§25). In v1 the column holds one constant value,
+    which is the point: it is the projection-layer twin of the AAD namespace
+    the records already carry, so the store layer cannot acquire a
+    single-compact assumption that a later migration would have to unpick.
+    `check:federation-core-isolation` enforces the column and the constraint
+    shape (§30) — the seam is structural, not a convention someone remembers.
+  - **Provenance UI reserves a compact axis** (§17.3): the mandatory-copy
+    SSOT carries the compact-attribution key from the start, rendered only
+    when a node has adopted more than one compact — which never happens in
+    v1. Reserving the key costs one unused string; retrofitting attribution
+    into shipped provenance copy costs a re-translation of every locale.
+  - Nothing else is built for it: no per-compact mirror sets, no second
+    descriptor, no doubled attestation duties. Those are the unsettled
+    semantics, and they stay unbuilt.
 - **Changing compacts** re-mints proofs, not content: record CIDs exclude
   proof bytes by construction (`packages/lcap/src/cid/`), so a node leaving
   one compact and joining another re-signs its export corpus under the new
   AAD while every `record_cid` — and thus every provenance reference —
   remains stable. Re-proofing is a bounded batch job (one signature per
   record), not a data migration.
-- The node's device-facing LCAP plane (`LCAP_NETWORK_ID`) is a separate
-  namespace in v0.1 and unaffected. Unifying the device plane and the
-  federation plane under the compact namespace is an open question (§34 Q4)
-  with device-certificate implications this spec does not prejudge.
+- The node's device-facing LCAP plane (`LCAP_NETWORK_ID`) is a **permanently
+  separate namespace** (Q4 resolved, §34). The two planes are not unified,
+  now or later. The cost of unification is that every device certificate in
+  the offline plane would have to be reissued whenever the node's compact
+  membership changed — a member-visible, member-blocking event caused by an
+  operator-plane decision members took no part in — and the benefit (one
+  record set instead of two) is an implementation convenience, not a product
+  or trust property. Keeping them separate also keeps their failure modes
+  independent: a compact that fractures does not disturb a single phone's
+  offline corpus, and an offline-plane namespace change does not re-mint a
+  federation proof. Changing compacts therefore re-signs the export corpus
+  (above) and touches no device at all.
 
 ### 9.7 The anchoring key
 
@@ -1419,10 +1576,20 @@ Peering is mutual, explicit, and operator-configured on both sides (decision
 
 The fetched descriptor and every subsequent handshake MUST match all three;
 any mismatch refuses the peer with a typed error naming the pin that failed.
-This is TOFU hardened to "trust on first *pin*": the out-of-band operator
-exchange is the root of pairwise trust at small N, and everything after it is
-verifiable. Peer creation, like every peer state transition, writes its audit
-row in the same unit (audited-writes).
+Nothing is ever accepted on first contact and nothing warns-and-continues:
+the pins precede contact, so the first fetch is a *verification*, not a
+trust decision (§4, "TOFU"). Peer creation, like every peer state
+transition, writes its audit row in the same unit (audited-writes).
+
+That leaves exactly one place where trust is not verifiable from data: **the
+out-of-band exchange itself**. An attacker who controls the channel carrying
+the introduction can hand each operator a `node_id` of their own choosing,
+and every downstream check then passes correctly against the wrong key. No
+protocol step can fix this, because name-to-key binding always bottoms out
+in either an out-of-band act or a trusted third party — and the third-party
+answers (a CA, a directory, transitive trust) are precisely what §0 and
+§33.8 rule out. What *can* be done is to make the attacker need **two**
+channels instead of one, which is §10.6.
 
 ### 10.2 Handshake
 
@@ -1448,7 +1615,9 @@ Request and response carry the same body shape:
 The receiving node verifies, in order, fail-closed at each step:
 
 1. Envelope signature by the presented descriptor's active key; descriptor
-   proof verifies; `node_id` recomputes from the key and equals the pin.
+   proof verifies; the presented key is bound to the pinned `node_id` — it
+   either recomputes to it directly, or the succession chain's dual proofs
+   walk from it back to a key that does (§9.1). Neither ⇒ refused.
 2. Lineage genesis equals the pin; the epoch chain walks (each CID fetched
    and verified lazily or from cache) from genesis to the presented epoch.
 3. The presented epoch's Knomosis anchor is confirmed at the pinned depth,
@@ -1465,15 +1634,25 @@ The receiving node verifies, in order, fail-closed at each step:
    negotiation (`packages/lcap/src/cose/suites.ts` shape): fixed preference
    order, fail-closed `no_common_suite`.
 
-Success moves the pair to `active` on both sides (each side records its own
-state machine; there is no shared state). Every handshake outcome —
-success or typed refusal — is recorded with its evidence.
+Success on a **first** introduction moves each side to `pending_verification`
+— everything above is verified against the pins, and the pins themselves are
+what §10.6 checks before any content flows. Success on a *re*-handshake of an
+already-verified peer (rotation, epoch change, quarantine release, resume,
+re-alignment) returns it to `active` directly: the introduction was verified
+once and the pins have not changed. Each side records its own state machine;
+there is no shared state. Every handshake outcome — success or typed refusal
+— is recorded with its evidence.
 
 ### 10.3 Peer state machine
 
 ```text
-configured ──handshake ok──► active
+configured ──handshake ok──► pending_verification
 configured ──handshake fail─► configured (typed error recorded; operator retries)
+
+pending_verification ──operator confirms the §10.6 code──► active
+pending_verification ──operator reports a mismatch───────► configured
+                                 (pins CLEARED; `peer_verification_mismatch`
+                                  finding recorded; §10.6)
 
 active ──tripwire (§21.1)───────────► quarantined      (automatic, fail-closed)
 active ──operator pause─────────────► paused
@@ -1487,7 +1666,15 @@ diverged    ──epochs re-align───► active (via fresh handshake)
 defederated ──(terminal; §21.5 re-admission = new configured entry, history retained)
 ```
 
-Semantics per state: `active` — full sync both directions. `paused` — no
+Semantics per state: `pending_verification` — the peer is authenticated
+against its pins and **nothing flows**: no sync, no exchange, no object
+serving to that peer, no participation in either direction. The only thing
+that has happened is a descriptor fetch and a handshake, and the only thing
+that can happen next is an operator act (§10.6). Because each side confirms
+independently, one side is briefly `active` while the other is still
+`pending_verification`; the active side's sync attempts get
+`peer_state_invalid` and MUST treat that as the expected window, not as a
+finding. `active` — full sync both directions. `paused` — no
 traffic either direction (operator hold). `quarantined` — **ingest from the
 peer stops entirely** (fail-closed); serving own public content to the peer
 continues by default (it is public; continuing to serve keeps a false-positive
@@ -1529,6 +1716,171 @@ exactly the peers its operator configured. Witness and fork evidence spread
 only along configured edges (§20.3). Automated discovery is a rejected
 alternative with rationale (§33.8), not a deferral.
 
+### 10.6 Introduction verification (the peering ceremony)
+
+§10.1 leaves one gap that no amount of protocol closes: an attacker
+controlling the channel that carried the introduction substitutes a
+`node_id`, and every subsequent check passes — correctly — against the wrong
+key. This section makes that attack require **two** channels.
+
+#### 10.6.1 The verification code
+
+After the handshake succeeds and before the peer can become `active`, both
+consoles display the same two-part code, derived only from values both
+operators already hold:
+
+```text
+half(id)  = SHA-256( "licio-federation-pvc/1" ‖ 0x00 ‖
+                     genesis_charter_record_cid_bytes ‖ 0x00 ‖
+                     utf8(node_id) )                       [first 15 bytes]
+          → the 120-bit big-endian integer, rendered zero-padded to 37
+            decimal digits, displayed in groups of five (final group of two)
+
+code      = half(id_lo) ‖ newline ‖ half(id_hi)
+            where id_lo < id_hi by byte-wise comparison of the two node_ids
+```
+
+Seven properties, each load-bearing:
+
+1. **Order-independence.** Sorting the two `node_id`s before rendering is
+   what makes the two consoles agree: node A holds `(A, B)` and node B holds
+   `(B, A)`, and both must render identically or the comparison is
+   meaningless. (Signal's safety numbers sort the two identity keys for the
+   same reason.)
+2. **The halves are positionally bound, and that is a security property, not
+   a layout choice.** Hashing everything into one combined string would let
+   an attacker mount a *birthday* search: choose both impersonating keys
+   freely and look for any pair whose combined codes collide, at ~2^(n/2)
+   work. Rendering a separate half per party forces a **second-preimage**
+   search instead — the attacker must find a key whose half equals a
+   *specific* honest node's half, at ~2^n. Per-half length is therefore the
+   whole security parameter, and the construction buys a squaring of the
+   attacker's cost for free.
+3. **120 bits per half, and no short variant is offered.** The familiar
+   4-character SAS from ZRTP is safe *there* because it commits to an
+   **ephemeral** exchange under a prior commitment: nothing can be
+   precomputed, and the only grind available runs inside a live call. This
+   code commits to **long-lived identities**, which changes the economics
+   twice over. An attacker can precompute a table of candidate identities
+   indexed by their half and look one up the instant they intercept the
+   honest `node_id`; and because an introduction is asynchronous — an
+   email, a message thread — even a live grind gets hours or days rather
+   than the seconds a call allows. At 120 bits both routes cost ~2^120 (a
+   table that covers the space *is* the space); at 20 bits both are
+   trivial. That is why this specification ships a long code and no
+   convenient short one: the convenient version would be theater.
+4. **It binds the lineage, not just the parties.** The genesis CID is inside
+   each half, so an attacker who substitutes a hostile *charter* rather than
+   a hostile identity also produces a mismatch.
+5. **It binds identities, not current keys.** Because `node_id` is permanent
+   across rotation (§9.1), a planned key rotation does not change the code
+   and does not require another phone call — the operational property that
+   keeps the ceremony from becoming something people learn to skip.
+6. **It is recomputable offline.** The inputs are the three pins the
+   operator wrote down; `pnpm federation:verification-code <node_id_a>
+   <node_id_b> <genesis_cid>` (§26.3) recomputes it from a clean checkout
+   with no network. An operator can therefore check that their own console is
+   telling the truth, which matters precisely in the scenario where the node
+   might not be.
+7. **Each half is peer-independent, deliberately — with a stated cost.** A
+   half depends only on one `node_id` and the genesis, so an operator's own
+   half is the *same value in every one of their peerings*. The benefit is
+   human and worth a great deal in practice: an operator who has run the
+   ceremony a few times knows their own half on sight, so an impersonation
+   of **them** is caught before the other party even speaks. The cost is
+   amortization — an attacker impersonating one node to many peers needs one
+   second-preimage rather than one per target, saving a factor of N. Binding
+   the pair into each half would remove that factor and the recognizability
+   with it. At 120 bits a factor of N is nothing (a thousand targets is
+   2^110 work) and recognizability is real, so the trade is taken knowingly
+   rather than by omission.
+
+A console MAY additionally render the identical 15 bytes per half as a
+word sequence from a published list shipped as a static asset in
+`packages/federation` (alternating even/odd lists, the PGP biometric
+word-list shape, which catches transposition as well as substitution) for
+operators comparing by voice. Word renderings are **presentation only** — the
+same posture as doctrine translations (§8.1): never charter content, never
+digested, never authoritative, and always labelled with which encoding is on
+screen, so that two operators reading different encodings at each other
+recognize it immediately instead of mistaking incomparability for agreement.
+
+#### 10.6.2 The ceremony
+
+1. Both operators complete §10.1 pinning; both handshakes succeed; both peers
+   sit at `pending_verification`.
+2. Each console displays the code, the encoding in use, and the instruction
+   to compare **the entire code, both halves, in the displayed order**.
+   Comparing one half is not half a check — it leaves the other party's half
+   unverified, which is the half an attacker impersonating *them* controls.
+3. The operators compare it over a channel **independent of the one that
+   carried the pins**. The console asks which channel carried the pins and
+   which carried the comparison, records both as typed values
+   (`in_person` · `voice` · `video` · `signed_message` · `existing_verified_channel`
+   · `other`, plus an optional free-text note), and requires an explicit
+   affirmation that the two were distinct.
+   - The single most likely operator error is pasting the code back into the
+     same thread that carried the introduction. That is not a second channel
+     and the ceremony is void; the console says so in the mandatory copy, at
+     the point of confirmation rather than in documentation.
+   - The affirmation is recorded, not machine-checked, and the spec says so
+     plainly: a node cannot verify what channel two humans used. What it can
+     do is make the claim explicit, attributable, and auditable — which is
+     what an affirmation is for.
+4. **Match** → the operator confirms; the peer moves to `active`; the
+   transition is audit-chained with the confirming actor, the timestamp, the
+   full code digest (so the confirmation is re-checkable later), both channel
+   values, and the note.
+5. **Mismatch** → the peer returns to `configured` with its **pins cleared**
+   and a `peer_verification_mismatch` finding recorded (§20.5). Clearing is
+   deliberate: the overwhelmingly likely cause is a transcription error, and
+   the correct response to both that and a real substitution is to obtain the
+   pins again rather than to retry against values that may already be the
+   attacker's. Repeated mismatches on one peer entry surface as an escalated
+   console warning — a typo twice is a typo; a typo five times is a signal.
+
+#### 10.6.3 The code never travels between the nodes
+
+The two nodes MUST NOT exchange the code, in any record, envelope, header,
+or response, on any plane. The reason is **channel independence, not
+confidentiality**: the code is derived entirely from public values, so
+publishing it harms nothing — but a code transmitted over the federation
+transport is a code the attacker in the middle relays verbatim, and the
+comparison then proves that the attacker can copy bytes. The ceremony's
+entire value is that the comparison happens somewhere the attacker is not.
+
+`check:federation-schema-egress` (§30) enforces this structurally: no
+federation wire schema may carry a verification-code field. The gate can see
+a field name; it cannot see an operator pasting a code into the wrong window,
+which is why point 3 above is a recorded affirmation rather than a check.
+
+#### 10.6.4 When the ceremony repeats
+
+| Event | Re-verify? | Why |
+|---|---|---|
+| Planned key rotation (§9.4) | **No** | `node_id` is unchanged, so the code is unchanged (§9.1). The dual-proof succession chain is the cryptographic evidence; a phone call would add nothing. |
+| Key compromise → out-of-band re-pin (§9.4) | **Yes** | The pin itself changes. A new pin is a new introduction and inherits none of the old one's assurance. |
+| Charter epoch transition (§8.5) | **No** | The code binds the lineage *genesis*, which epochs never change. |
+| Leaving/joining a compact (§9.6) | **Yes** | A different genesis is a different lineage; every half changes. |
+| Quarantine release · pause resume · divergence re-alignment | **No** | Re-handshake only; the pins and the introduction behind them are untouched. |
+| Re-admission after defederation (§21.5) | **Yes**, by construction | Re-admission is a fresh `configured` entry with new pins (§21.5), so it re-enters this section with no special-casing. |
+
+#### 10.6.5 What this does and does not buy
+
+It buys: substituting a `node_id` now requires controlling both the
+introduction channel and the comparison channel, at the moment of the
+comparison, without either operator noticing a mismatch. Against a code with
+120 bits per half, forging a colliding identity instead of relaying is not an
+available shortcut.
+
+It does not buy: protection against two operators who use the same channel
+twice and affirm otherwise; protection against an operator who confirms
+without comparing; or any assurance about who the peer operator *is* as a
+person — the ceremony binds a key to whoever was on the other end of the
+second channel, which is a stronger claim than the first channel alone made
+and a weaker one than identity. Those are honest limits (§3.12), not gaps to
+be closed by adding protocol.
+
 ---
 
 ## 11. Federation record plane
@@ -1544,6 +1896,7 @@ object can never diverge). The v1 vocabulary (`federation.record_vocabulary:
 | Kind | Scope | Signed by | Purpose |
 |---|---|---|---|
 | `federation_charter` | lineage | charter steward key(s) | One charter epoch (§8) |
+| `federation_charter_liveness` | lineage | charter steward key(s) | A steward's periodic "still here" statement — current epoch CID + issue time, counted only once anchored (§8.5) |
 | `federation_node_descriptor` | node stream | node key | Identity, endpoints, adopted epoch, disclosures (§9.3) |
 | `federation_room_descriptor` | room log | node key | A homed public room's shell: name, description, charter text, join model, posting policy, lens names, created_at (§11.4) |
 | `federation_story` | room log | content-home node key — or the **author-home** node key for a remote submission, accepted by the content home (§11.8, §18) | One public story's immutable content facts (§11.2) |
@@ -1787,6 +2140,16 @@ every room in the mirror set at its checkpoint head, node stream at head —
 nothing enumerable is missing, and the enumeration itself (the room
 directory, §24.2) is signed.
 
+Completeness is **tier-relative and says which tier** (§16.6). Because the
+control lane is never narrowed, every mirrored room reaches its checkpoint
+head at every tier — the log is complete, and so is verification. What the
+tier decides is which leaves the node fetched behind that head, so a room's
+status is `complete@full`, `complete@recent`, or `complete@text_only`, and
+the un-fetched count is displayed alongside it. A mirror can always answer
+"am I missing something I meant to have?" — which is the property this
+section exists to give, and the one an unstated selective tier would have
+destroyed.
+
 ### 12.4 Mirror verification duties and anti-rollback
 
 A mirror MUST, per synced log:
@@ -1840,13 +2203,17 @@ let rot.
    Cross-room state exists before any room content does.
 2. **Room directory.** Page through `GET /rooms` (§24.2): signed listing of
    the peer's homed public rooms — `origin_room_id`, descriptor record CID,
-   latest checkpoint CID. Construct the mirror set (default: all; operator
-   exclusions, §14.5).
+   latest checkpoint CID. Construct the mirror set by assigning each room a
+   **tier** (§16.6) — default `default_tier` for all; the operator adjusts
+   per room here or later (§14.5), with the projected byte cost per tier
+   shown before the run starts.
 3. **Per room, in lane order** (the LCAP lane doctrine, reused): C0 control
    (checkpoint chain, admin events) → room descriptor → T1 text records
    (stories, then comments) → M3 media blocks. First bytes are the most
    valuable bytes (OFFLINE_SPEC §3.4), and a mirror interrupted mid-room is
-   left with verified text before pixels.
+   left with verified text before pixels. The room's tier narrows which
+   lanes run — C0 always, T1/M3 per §16.6 — which is why the lane order and
+   the tier vocabulary are the same shape.
 4. **Verify while fetching** per §12.4; **re-enforce every object** per §15
    before any projection write. Records failing re-enforcement are refused
    with recorded reasons (§15.3) — refusal never blocks the rest of the log.
@@ -1854,8 +2221,10 @@ let rot.
    arrived (out-of-order fetch) go to a pending-target queue and apply on
    arrival; a target that never arrives resolves as a withheld leaf (§12.5).
 6. **Completion.** A room is bootstrapped when the local frontier equals the
-   verified checkpoint head and the pending queues are empty; the node is
-   bootstrapped when every mirror-set room and the node stream are. The
+   verified checkpoint head, its tier's lanes are drained, and the pending
+   queues are empty — reported as `complete@<tier>` with the un-fetched
+   count (§12.3); the node is bootstrapped when every mirror-set room and
+   the node stream are. The
    console shows per-room progress, bytes, refusal counts, and verification
    stats throughout; bootstrap is pausable and resumable at any point
    (frontiers are durable; everything is idempotent by CID).
@@ -1924,13 +2293,23 @@ same URL or story independently) are not conflicts at all: both exist, each
 homed where it was created, related by the mirror-aware dedup linkage
 (§15.2) — never merged, never deduplicated away.
 
-### 14.5 Mirror-set changes
+### 14.5 Mirror-set and tier changes
 
-Excluding a room stops its sync; existing projections are **kept** by default
-(operator MAY drop them; provenance rows make either safe). Re-including — or
-widening after a narrow bootstrap — backfills exactly like §13 for that room.
-The current mirror policy is disclosed in the descriptor (§9.3), so "we
-mirror all public rooms of our peers" is a checkable claim, not a vibe.
+Setting a room to tier `none` stops its sync; existing projections are
+**kept** by default (operator MAY drop them; provenance rows make either
+safe). Raising a tier — re-including, widening a `recent` window, adding
+media to a `text_only` room, or widening after a narrow bootstrap —
+backfills exactly like §13 for that room, in bulk and on operator action
+(§16.6 rule 3: never on a member's read). Lowering a tier stops fetching the
+lanes it drops and offers an explicit, byte-quantified prune of what those
+lanes already hold; declining the prune is legitimate and leaves the node
+holding more than its tier promises, which is the safe direction.
+
+Every tier change is audit-chained with its before/after and its byte
+delta, and the resulting posture is disclosed in the descriptor (§9.3) as
+per-tier room counts — so "we mirror all public rooms of our peers, media
+included" is a checkable claim, not a vibe, and so is the more modest claim
+a smaller operator makes instead.
 
 ### 14.6 Time
 
@@ -2050,14 +2429,17 @@ the house rule that one fact must not live in two authoritative stores.
 ### 16.2 Projection tables
 
 Sketched here; normative DDL in §25. All timestamps `instant()`
-(`timestamptz(3)`); all tables prefixed `federation_`; soft refs to core
-tables only where noted (never FKs into content tables):
+(`timestamptz(3)`); all tables prefixed `federation_`; **all carry
+`compact_id`** with every uniqueness constraint scoped by it (§9.6, the Q3
+seam); soft refs to core tables only where noted (never FKs into content
+tables):
 
 - `federation_mirror_rooms` — local mirror-room UUID, peer id,
   `origin_room_id`, descriptor fields (name, description, charter text, join
   model, posting policy), descriptor sequence, `frozen`, `local_hidden_state`,
-  sync frontier (`tree_size`, checkpoint CID — the anti-rollback floor,
-  §12.4.4).
+  **`mirror_tier` + `recent_window_days`** (§16.6), sync frontier
+  (`tree_size`, checkpoint CID — the anti-rollback floor, §12.4.4), and the
+  per-tier un-fetched counts backing `complete@<tier>` (§12.3).
 - `federation_mirror_stories` — local UUID, room ref by disposition
   (mirror-room ref for mirrored rows; soft local-room ref for hosted-remote
   rows, §18.1),
@@ -2073,7 +2455,11 @@ tables only where noted (never FKs into content tables):
   states, `search_tsv`.
 - `federation_mirror_media` — local UUID, owning record ref, `block_cid`,
   content type, byte size, alt text, `scan_state`, storage ref (S3 key or
-  blob-row fallback, the existing upload-store pattern).
+  blob-row fallback, the existing upload-store pattern). Under a tier that
+  does not carry media (§16.6), the row still exists with
+  `scan_state = 'not_mirrored'` and a null storage ref: the §11.5 block
+  descriptor arrived on the control lane, so the mirror can render the
+  labelled absence (§17.3) without ever having held the bytes.
 - `federation_object_provenance` — one row per record **presented** (admitted,
   held, or refused): peer, record CID, log + position (when
   inclusion-verified), **disposition** (`mirrored` | `hosted_remote` —
@@ -2123,6 +2509,72 @@ mass-apply `local_hidden_state`, selective byte deletion). Nothing new
 arrives (state machine, §10.3). The console's defederation flow ends on the
 bulk-review screen, so "review what they left behind" is the paved path, not
 an afterthought.
+
+### 16.6 Mirror tiers
+
+Full mirroring of everything is honest at single-digit node counts and
+becomes a lie at some larger one — an operator who cannot afford the bytes
+will otherwise quietly exclude rooms, or worse, quietly evict, and
+"mirrored" stops meaning anything. v1 therefore ships the selective tier
+rather than waiting for the pressure (Q7 resolved, §34): **every mirrored
+room carries an explicit tier, and the tier is a disclosed fact, not an
+implementation detail.**
+
+The vocabulary is closed, per `(peer, room)`, and maps onto the LCAP lane
+doctrine the sync plane already speaks (C0 control, T1 text, M3 media —
+OFFLINE_SPEC §3.4; the device-side `StorageMode` prefetch policy in
+`apps/web/src/lcap/storage-modes.ts` is the same idea one plane down):
+
+| Tier | C0 control | T1 text | M3 media | Meaning |
+|---|---|---|---|---|
+| `full` | all | all | all | The v0.1 behaviour and the default. |
+| `recent` | all | within `recent_window_days` | within `recent_window_days` | A live window; older leaves are known to exist and are not fetched. |
+| `text_only` | all | all | never | The complete conversation, no bytes. |
+| `none` | — | — | — | Not mirrored (the former mirror-set exclusion, now a tier value rather than a separate flag). |
+
+Four rules make the tier honest rather than merely cheaper:
+
+1. **The control lane is never narrowed.** At every tier except `none`, C0
+   syncs in full: the checkpoint chain, the room descriptor, and every
+   administrative event. A tiered mirror therefore keeps its §12.4
+   verification duties, its anti-rollback floor, and its §19 application and
+   receipt duties intact — the tier reduces what a node *stores*, never what
+   it *checks* or *honours*. An admin event whose target was never fetched
+   receipts `target_never_mirrored`, which the §19.3 vocabulary already
+   carries; tiering makes that outcome ordinary rather than exceptional, and
+   it remains a receipt, not a silence.
+2. **Un-mirrored is visible, never invented.** The mirror knows what it did
+   not fetch — the log leaves and the §11.5 media block descriptors are in
+   the control lane — so an un-mirrored object renders as a labelled absence
+   with a link to the origin (§17.3), never as a gap the member has to infer.
+   Nothing un-mirrored is a ranking or search candidate, because nothing
+   un-mirrored has a projection row (§16.1).
+3. **No on-demand backfill. Ever.** Fetching an object because a local member
+   tried to view it would tell the origin what this node's members read —
+   exactly the readership leak §22.4 forbids, reintroduced through a
+   convenience. Tier changes backfill or prune in **bulk, on operator
+   action**, decorrelated from any member's activity (the §14.5 re-inclusion
+   path). This is the constraint that makes tiers safe, and it is the reason
+   an un-mirrored object is a labelled absence rather than a lazy load.
+4. **Tiers narrow fetching, never trigger eviction.** There is still no
+   automatic eviction of admitted content (§23.3). Lowering a room's tier is
+   an explicit operator act whose byte effect is stated before it is applied
+   and audited after; storage pressure makes a node **stop fetching and say
+   so**, never silently drop what it already advertised.
+
+**The charter floor.** The compact's `federation.mirror_tier_floor` (§8.2 row
+8) names the weakest tier a member may apply to a room it mirrors at all, so
+"member of this compact" implies a known availability floor rather than an
+unknown one. The reference genesis sets it to `text_only`: text always
+mirrors, media is the operator's call. The honest limit, stated because it
+is a real one: the floor governs *how* a mirrored room is mirrored, not *how
+many* rooms are — a node may set rooms to `none`, and what keeps that
+visible is the descriptor's per-tier room counts (§9.3), not the floor.
+
+**Defaults.** `default_tier: full` for a node with room to spare; the
+operator picks per room at bootstrap (§13.2) and changes it any time
+(§14.5). A node that never touches the setting behaves exactly as v0.1
+specified.
 
 ---
 
@@ -2192,8 +2644,13 @@ across everything mirrored from anywhere.
   through the member's own node (§18), and it says so: a submission shows
   its honest lifecycle (`sending → awaiting <display_domain> → live` /
   `held` / `refused (<reason>)`), never an optimistic fake-live state. A
-  posting-policy refusal (e.g. an `experts_and_stewards` room) is shown
-  before composing, not after.
+  posting-policy refusal is shown **before** composing, not after — and for
+  an expert-gated room the copy states the reason as the permanent fact it
+  is ("Posting here is limited to `<display_domain>`'s own experts and
+  stewards"), never as a pending capability. Words implying a future
+  unlock — "not yet", "coming soon", "request access" — are prohibited
+  vocabulary here for the same reason "deleted everywhere" is below: the
+  UI must not promise what the design has permanently declined (§33.20).
 - Author attribution renders as `handle@display_domain` with the node's
   verified `node_id` in the hover/detail affordance (display domains are
   presentation; §9.3) — identically for a remote author shown on the
@@ -2202,15 +2659,36 @@ across everything mirrored from anywhere.
 - Story/comment cards from mirrors carry a compact provenance chip (`via
   <display_domain>`); the story page's detail view exposes the full
   provenance record (origin ids, record CID, ingest verdicts) for the
-  curious — verifiability is a product feature, not a debug screen.
+  curious — verifiability is a product feature, not a debug screen. The chip
+  reserves a compact-attribution slot (§9.6, the Q3 seam) that renders only
+  when a node has adopted more than one compact — never in v1, and never a
+  string added to shipped copy after the fact.
+- **Un-mirrored content is labelled, not hidden** (§16.6). A room below the
+  `full` tier renders its absences honestly: media as a placeholder ("Not
+  mirrored here — view on `<display_domain>`" with the origin link), older
+  content in a `recent` room as an end-of-window marker with the same link.
+  The room banner states the tier in plain words ("This node mirrors
+  discussion from `<display_domain>`; images and video are not copied
+  here"). The member never sees a silent gap, and never triggers a fetch by
+  looking (rule 3) — the link is their own browser going to the origin, an
+  ordinary outbound navigation they chose.
 - Mandatory copy (the PRIVATE_SPEC §20-style SSOT, i18n-keyed, copy-linted):
   the mirror banner; the moderation-authority explainer ("Posts here are
   moderated by `<display_domain>` under the shared charter; your appeal
   rights travel with your post" — decision 27); the pending-state copy
-  above; and the deletion honesty line wherever mirrored-content removal is
+  above; the deletion honesty line wherever mirrored-content removal is
   discussed ("Removal is applied across the compact within `<SLA>`; copies
-  outside the compact are beyond Licio's reach"). The words "deleted
-  everywhere" are prohibited vocabulary (§3.12).
+  outside the compact are beyond Licio's reach"); the tier-absence strings
+  above; the canonical-language label (§8.1, Q5); and the reserved
+  compact-attribution key (§9.6, Q3). The words "deleted everywhere" are
+  prohibited vocabulary (§3.12).
+- The same SSOT carries the **operator-facing** honesty strings under their
+  own namespace: the §10.6 ceremony instructions, the compare-both-halves
+  wording, and the same-channel warning — which must render at the point of
+  confirmation, not in a runbook nobody has open. Operator copy is held to
+  the identical discipline (i18n-keyed, copy-linted) for the same reason
+  member copy is: a warning that exists only in documentation is a warning
+  that was not given.
 
 ### 17.4 Attention and PWAtt
 
@@ -2267,9 +2745,10 @@ everything else in this section:
 The write surfaces (decision 16): comments, corrections, debate-arena
 positions (as a party, §11.3), and story submissions including media. Room
 policy applies as it would locally: a private room refuses (nothing private
-federates, §3.3), a frozen room refuses, an `experts_and_stewards` room
-refuses remote authors in v1 (`posting_policy_refused` — §34 Q1 tracks
-whether remote expertise can ever be recognized).
+federates, §3.3), a frozen room refuses, and an `experts_and_stewards` room
+refuses remote authors **permanently** (`posting_policy_refused`) — not as a
+v1 limit but as doctrine (§33.20): expertise is node-local standing, and
+standing does not federate (§3.2, §7.3).
 
 ### 18.2 Submission lifecycle
 
@@ -2379,7 +2858,9 @@ budget-capped at A — and buys nothing in ranking anywhere (§3.2).
 
 No foreign accounts (the member never authenticates to A); no cross-node
 sessions or cookies (the envelope is node-to-node); no wallet linkage
-(§33.15); no governance or treasury reach (decision 28); no
+(§33.15); no governance or treasury reach (decision 28); **no expert or
+steward standing on A** — an expert-gated room refuses remote authors
+permanently, and no attestation creates an exception (§33.20); no
 mirror-side writes (the mirror surface hosts the composer; the write
 routes home, §4 Mirror); no browser-to-foreign-node traffic under any
 circumstance, verified by the E2E network capture (§29.4).
@@ -2476,6 +2957,40 @@ failure) are findings on the *issuer*.
   one action with compact-wide, receipt-proven effect.
 - **The honest limit** (§3.12) appears in every user-facing surface that
   touches this flow, in the mandatory-copy SSOT (§17.3).
+
+**Notice-and-action intake, built at every node** (Q8 resolved, §34).
+Whether a mirror operating in the EU needs its own DSA Art. 16 notice
+mechanism for mirrored content, or whether the receipted referral above plus
+local-hide discharges it, is a counsel question this specification cannot
+answer. It does not need to: the intake is cheap, it is never *wrong* to
+have, and the failure mode of not having it is a compliance gap discovered
+after launch. **Every node therefore ships both**, and the counsel answer
+later decides only which one the node points at in its terms — not what it
+has to go build.
+
+- **The intake is open to any notifier**, not only to members: a public
+  `POST /v1/federation/notices` (§24.2) accepting a notice about any content
+  this node serves, mirrored or hosted-remote. Because notifiers are
+  unauthenticated and this platform never reads a client network address
+  (§3.10, SPEC §19.1), the surface is bounded by a global fixed window plus
+  the existing proof-of-work challenge (`identity/pow-captcha.ts`) — the same
+  identity-free posture as sign-up, reused rather than reinvented.
+- **It produces three things in one unit**: a real report in this node's own
+  WS-J queue (the machinery that already handles mirrored-content reports,
+  §16.4), a relayed `federation_report` to the authoritative controller
+  (§18), and a tracked notice row carrying its own SLA and outcome.
+- **The notifier gets a statement of reasons from *this* node** about what
+  *this* node did — local hide, no action, or referral-only — with an
+  acknowledgment receipt at intake. That statement is about local action
+  only, and says so: what the content home decides arrives later, through
+  the same channel, and is a separate outcome.
+- **Notifier contact details are node-local and never federate.** The
+  relayed `federation_report` carries the complaint and the target, never
+  the notifier's identity or contact information — §22.1 closes the wire in
+  both directions, and a notice mechanism is not an exception to it. Storing
+  the contact details locally is what lets this node answer the notifier;
+  sending them would make every peer a controller of a person who chose to
+  contact one node.
 
 ### 19.5 Interplay with local moderation
 
@@ -2612,10 +3127,24 @@ within its interval window, §8.7) ·
 receipt) · `sla_breach_pattern` (receipts chronically late) ·
 `withheld_uncovered` (§12.5) · `fork_evidence` (equivocation, any plane) ·
 `local_hide_rate` (mirror-side hides of the peer's content trending high,
-§19.5) · `refusal_rate` (ingest invalid-ratio, §23.2).
+§19.5) · `refusal_rate` (ingest invalid-ratio, §23.2) ·
+`lineage_dormant` (no anchored steward act within the declared continuity
+window, §8.5) · `peer_verification_mismatch` (an operator reported that the
+§10.6 codes did not match).
 
 Findings are evidence objects with severities, not verdicts. What they
-trigger is §21.
+trigger is §21 — except `peer_verification_mismatch`, which is deliberately
+inert there: it is evidence about the *introduction channel*, recorded
+against a peer entry that never reached `active` and may not even be the
+party the operator intended, so it feeds no tripwire and accuses nobody. It
+exists to be visible in the record, and to make a second occurrence on the
+same entry legible as more than a typo. Most other findings are peer-scoped;
+`lineage_dormant` is scoped to the
+lineage rather than to any peer (its `peer_id` is null, §25), because a
+dormant steward is a fact about the charter every member observes
+identically — it is never evidence against the peer who happens to surface
+it, and it feeds no tripwire (§21.1). Nothing about a dormant lineage
+justifies quarantining anyone.
 
 ---
 
@@ -2683,10 +3212,12 @@ dropped unapplied (their origin's authority ended).
 
 ### 21.5 Re-admission
 
-A defederated peer MAY be re-added later as a fresh `configured` entry (new
-pins, new handshake). History is never rewritten: the prior peer row, its
+A defederated peer MAY be re-added later as a fresh `configured` entry — new
+pins, new handshake, and a new §10.6 verification, since a fresh entry
+re-enters that path by construction and inherits none of the prior
+introduction's assurance. History is never rewritten: the prior peer row, its
 findings, and its audit trail remain, and the new row references them. The
-protocol imposes no cooling-off period; that is operator judgment.
+protocol imposes no cooling-off period; that is operator judgment (§34 Q2).
 
 ---
 
@@ -2754,6 +3285,17 @@ touching a peer node. Mirrored media is locally stored and locally served;
 sync is schedule-driven; there is no per-item fetch-on-view. The E2E suite
 asserts a browsed mirror generates zero cross-node requests.
 
+**Mirror tiers do not weaken this, and are shaped by it** (§16.6 rule 3).
+The obvious design for a tiered mirror — fetch the object when someone tries
+to view it — is exactly this leak, reintroduced as a convenience: the origin
+would learn which of its content a peer's members read, item by item, in
+real time. So it does not exist. Un-mirrored content is a labelled absence
+with a link the member's own browser follows if they choose (an ordinary
+outbound navigation, not this node acting on their reading), and tier raises
+backfill in bulk on operator action. WS-V.5.7 ships the enforcing test: every
+member-facing render path for un-mirrored content runs against a peer client
+that fails on any request at all.
+
 ### 22.5 No cross-node analytics
 
 No readership reporting, no aggregate "your content reached N nodes" beyond
@@ -2804,13 +3346,20 @@ ratio counts §15 refusals (stages 1–6); budget refusals count separately
 
 ### 23.3 Storage
 
-Full-mirror storage grows with the compact (decision 14, honest cost). v0.1
-ships: per-peer and per-room storage accounting in the console; operator
-alert thresholds; mirror-set exclusion as the pressure valve; and byte
-deletion via admin events and bulk review. There is **no automatic eviction
-of admitted mirror content** — availability is the point, and silent eviction
-would make "mirrored" an unreliable claim. Refused/held object bytes and
-orphaned blocks are garbage-collected on a schedule.
+Mirror storage grows with the compact (decision 14, honest cost). v1 ships:
+per-peer and per-room storage accounting in the console; operator alert
+thresholds; **per-room mirror tiers (§16.6) as the primary pressure valve**,
+charter-floored so a cheaper posture is still a stated one; and byte
+deletion via admin events and bulk review.
+
+There is **no automatic eviction of admitted mirror content** — availability
+is the point, and silent eviction would make "mirrored" an unreliable claim.
+The tiers do not weaken that rule; they are what makes it survivable. A tier
+decides what a node fetches *going forward*, an operator decides explicitly
+and with the byte cost shown whether to prune what a lowered tier already
+holds (§14.5), and a node under storage pressure stops fetching and says so
+rather than quietly dropping what it advertised. Refused/held object bytes
+and orphaned blocks are garbage-collected on a schedule, as before.
 
 ### 23.4 CPU and re-enforcement load
 
@@ -2860,7 +3409,11 @@ Error vocabulary (typed, closed): `federation_disabled`, `unknown_peer`,
 `budget_exceeded` (with `retry_after_ms`), `not_found` (never
 distinguishing withheld from absent), `payload_too_large`,
 `vocabulary_unknown`, `posting_policy_refused` (room policy excludes the
-submitter, stated before composition where possible),
+submitter — always stated **before** composition for a mirrored room, since
+the room descriptor carries the posting policy (§11.4) and the composer reads
+it locally; a policy changed since the last sync can still refuse at the
+content home, and that refusal is shown with its reason rather than as a
+generic failure),
 `participation_refused` (carrying the §15 refusal reason),
 `wrong_authority` (an admin event signed by a node not authoritative for
 its type, §19.1).
@@ -2869,12 +3422,24 @@ its type, §19.1).
 
 Standard first-party plane: session + MFA-verified + `admin` RBAC + CSRF,
 every mutation audit-chained in-unit (`check:audited-writes` applies — no
-allowlist, as everywhere):
+allowlist, as everywhere). Exactly one route departs from that posture and
+does so by design — the public notice intake (§19.4) — which is why
+`check:federation-flag` names it explicitly and asserts the *substitute*
+controls rather than merely skipping it (§30): session-less like
+`/v1/auth/*`, CSRF-token-exempt but Origin-checked, proof-of-work and
+global-window bounded, and audit-chained like every other mutation.
 
 - `GET/POST /v1/federation/peers`, `GET /v1/federation/peers/:id` — pin
   management (§10.1); `POST /v1/federation/peers/:id/{pause,resume,
   quarantine,release,defederate}` — §10.3/§21 transitions (defederate
   requires reason category + rationale).
+- `GET /v1/federation/peers/:id/verification` — the §10.6 code for a
+  `pending_verification` peer, its encoding, and the comparison instructions;
+  `POST .../verification/confirm` (match → `active`; requires both channel
+  values and the distinct-channels affirmation) and
+  `POST .../verification/mismatch` (→ `configured`, pins cleared, finding
+  recorded). Both audit-chained in-unit with the full code digest, so a
+  confirmation is re-checkable long after the call ended.
 - `GET /v1/federation/status` — per-peer state, frontiers, staleness, budget
   usage, storage accounting.
 - `GET /v1/federation/charter` · `POST /v1/federation/charter/adopt` — §8.5
@@ -2882,8 +3447,16 @@ allowlist, as everywhere):
   renders an epoch diff (incl. floor-change acknowledgments) for review.
 - `GET /v1/federation/findings` — §20.5 evidence timeline;
   `GET /v1/federation/peers/:id/content` + bulk-review mutations — §16.5.
-- `GET /v1/federation/bootstrap/:peerId` — §13.2 progress;
-  `POST .../mirror-set` — room include/exclude.
+- `GET /v1/federation/bootstrap/:peerId` — §13.2 progress (per-room
+  `complete@<tier>` with un-fetched counts); `POST .../mirror-set` — per-room
+  tier assignment (§16.6), previewing the byte delta before applying and
+  audit-chaining the change with it.
+- `GET /v1/federation/lineage` — the §8.5 continuity view: last anchored
+  steward act, the declared windows, the dormancy countdown.
+- `POST /v1/federation/notices` — **public** (no session; global fixed
+  window + proof-of-work, never a client address, §19.4); `GET/POST
+  /v1/federation/notices/:id` (admin) — the queue, its SLA, and the
+  statement of reasons back to the notifier.
 - `GET /v1/federation/anchoring` — anchoring key address, gas balance,
   last-confirmed root, interval health; `POST .../anchoring/rotate-address`
   — the §9.7 rotation flow.
@@ -2912,16 +3485,27 @@ Migrations are hand-authored SQL + journal entries (the house rule; never
 `db:generate`), every timestamp is `instant()` (`timestamptz(3)`), and
 identifier lengths respect the 63-byte gate. Soft refs (bare uuid/text, no
 FK) point at core entities where noted — the same isolation discipline the
-financial schema uses. New tables, with their load-bearing constraints:
+financial schema uses.
+
+**One constraint applies to every table below and is not repeated per row:
+each carries `compact_id text NOT NULL`, and every UNIQUE constraint and
+primary key named below is scoped by it** (§9.6, the Q3 seam) — so
+`federation_peers.node_id` is `UNIQUE (compact_id, node_id)`,
+`federation_mirror_stories.record_cid` is `UNIQUE (compact_id, record_cid)`,
+and so on. In v1 the column holds one constant value per node;
+`check:federation-core-isolation` fails a table or constraint that omits it
+(§30), because a single-compact assumption is easy to add silently and
+expensive to remove later. New tables, with their load-bearing constraints:
 
 | Table | Key columns and constraints |
 |---|---|
-| `federation_peers` | `peer_id` uuid PK; `node_id` text UNIQUE; `display_domain`, `base_url`; `pinned_genesis_cid`; `state` enum (`configured/handshaking/active/paused/quarantined/diverged/defederated`); `state_reason` jsonb (typed evidence refs); `descriptor_sequence` bigint; `added_by_ref` (opaque actor ref); prior-identity ref for §21.5 re-admission |
+| `federation_peers` | `peer_id` uuid PK; `node_id` text UNIQUE; `display_domain`, `base_url`; `pinned_genesis_cid`; `state` enum (`configured/handshaking/pending_verification/active/paused/quarantined/diverged/defederated`); `state_reason` jsonb (typed evidence refs); `descriptor_sequence` bigint; `added_by_ref` (opaque actor ref); prior-identity ref for §21.5 re-admission; §10.6 verification columns — `verified_at`, `verified_by_ref`, `verification_code_digest`, `pin_channel` + `comparison_channel` (typed), `channel_note`, `mismatch_count` int; CHECK: `state = 'active'` requires `verified_at` NOT NULL, so an unverified peer cannot reach a syncing state through any code path |
+| `federation_key_succession` | §9.1/§9.4: the persisted succession chain per peer — `descriptor_cid` PK; `peer_id`; `sequence`; superseded + promoted key fingerprints; both proof refs. What lets a peer bind a rotated key back to the pinned `node_id` without a re-pin |
 | `federation_charter_adoptions` | `epoch_cid` text PK; `lineage_genesis_cid`; `epoch_number` int; `adopted_at`; `adopted_by_ref`; partial unique enforcing one active adoption; insert-only |
-| `federation_mirror_rooms` | `mirror_room_id` uuid PK; `peer_id` FK→`federation_peers`; `origin_room_id`; descriptor fields + `descriptor_sequence`; `frozen` bool; `local_hidden_state`; `tree_size` bigint + `checkpoint_cid` (anti-rollback floor); UNIQUE `(peer_id, origin_room_id)` |
+| `federation_mirror_rooms` | `mirror_room_id` uuid PK; `peer_id` FK→`federation_peers`; `origin_room_id`; descriptor fields + `descriptor_sequence`; `frozen` bool; `local_hidden_state`; `mirror_tier` enum (`full/recent/text_only/none`) + `recent_window_days` int (CHECK: non-null iff tier is `recent`) + `unfetched_leaf_count` bigint (§16.6, §12.3); `tree_size` bigint + `checkpoint_cid` (anti-rollback floor); UNIQUE `(peer_id, origin_room_id)` |
 | `federation_mirror_stories` | `mirror_story_id` uuid PK; room ref by disposition — `mirror_room_id` FK for `mirrored` rows, soft local `room_id` uuid for `hosted_remote` rows (§18.1; CHECK: exactly one set); `origin_story_id`; `record_cid` UNIQUE; author triple (nullable post-tombstone); content columns (§16.2); `origin_hidden_state` / `local_hidden_state`; `scan_hold` bool; `search_tsv` generated + GIN; indexes on `(mirror_room_id, origin_created_at)`, `(room_id, origin_created_at)`, and `(peer_id, origin_author_id)` (tombstone application path) |
 | `federation_mirror_comments` | `mirror_comment_id` uuid PK; story ref by disposition — `mirror_story_id` FK for comments under mirrored stories, soft local `story_id` uuid for hosted-remote comments under this node's own stories (§18.1; CHECK: exactly one set); `parent_record_cid`; `depth` CHECK ≤ cap; `record_cid` UNIQUE; `superseded_by_record_cid`; author triple; `body`; `search_tsv`; same hidden-state pair |
-| `federation_mirror_media` | `mirror_media_id` uuid PK; owner record ref; `block_cid`; `content_type` CHECK (charter allowlist); `byte_size` CHECK; `scan_state`; `storage_ref` (S3 key or blob fallback — the upload-store pattern) |
+| `federation_mirror_media` | `mirror_media_id` uuid PK; owner record ref; `block_cid`; `content_type` CHECK (charter allowlist); `byte_size` CHECK; `scan_state` (incl. `not_mirrored`, §16.6); `storage_ref` (S3 key or blob fallback — the upload-store pattern; CHECK: null iff `scan_state = 'not_mirrored'`) |
 | `federation_object_provenance` | `record_cid` PK per peer (`UNIQUE (peer_id, record_cid)`); log id + position (when verified); `verdict` (`admitted/held/refused`); `refusal_reason`; timestamps — the bulk-review index (§16.5) |
 | `federation_admin_events_applied` | `event_cid` PK; `peer_id`; `event_type`; target refs; `received_at`; `sla_deadline`; `applied_at`; `outcome`; index on `(peer_id, applied_at)` |
 | `federation_receipts` | `receipt_cid` PK; `direction` (`issued/received`); `event_cid`; `peer_id`; `outcome`; `applied_at_claim` |
@@ -2930,7 +3514,9 @@ financial schema uses. New tables, with their load-bearing constraints:
 | `federation_participation_outbox` | author-home side: `submission_record_cid` PK; target peer + room; member soft ref; state (`pending/relayed/accepted/held/refused/expired`); verdict payload; timestamps; index on `(user_id, state)` for the member's own pending view |
 | `federation_transit_media` | author-home side: `block_cid` PK; owning submission ref; bytes ref (S3/blob); `expires_at` (TTL, swept); deleted on verdict |
 | `federation_anchor_roots` | `root` PK; interval window; leaf count; manifest record CID; chain tx ref; `confirmed_at_depth` bool; UNIQUE `(node_id, interval_start)` |
-| `federation_findings` | `finding_id` uuid PK; `peer_id`; `finding_type` (closed enum, §20.5); `severity`; `evidence` jsonb (CID refs); `created_at`; `resolved_at` |
+| `federation_findings` | `finding_id` uuid PK; `peer_id` **nullable** (null for lineage-scoped findings — `lineage_dormant`, §20.5); `finding_type` (closed enum, §20.5); `severity`; `evidence` jsonb (CID refs); `created_at`; `resolved_at`; CHECK: `peer_id` null iff the type is lineage-scoped, so a peer-scoped finding can never lose its subject |
+| `federation_content_notices` | §19.4 notice-and-action intake: `notice_id` uuid PK; target (record CID + projection ref); `notifier_contact` jsonb (**node-local, never on the wire**); `submitted_at`; `sla_deadline`; `local_outcome` (`local_hidden`/`no_action`/`referred_only`); `statement_of_reasons_at`; `relayed_report_cid` (the §18 referral); `local_report_id` soft ref into the WS-J queue; index on `(local_outcome, sla_deadline)` |
+| `federation_charter_liveness` | §8.5 steward acts observed: `liveness_record_cid` PK; `lineage_genesis_cid`; `epoch_cid`; `issued_at_ms`; `anchor_root`; `confirmed_at_depth` bool — the dormancy computation reads the latest confirmed row and nothing else |
 | `federation_audit` | The node's federation audit chain — `lib/hash-chain.ts` over one global chain: `entry_id`, `action_type`, `details` (canonical), `actor_ref` (opaque), `prev_hash`/`integrity_hash`, with the fork-proof partial-unique pair (migration-0082 precedent) |
 
 The CAS (`lcap_objects`) is reused unchanged for record/block bytes. Every
@@ -2956,11 +3542,16 @@ packages/federation/            -- @licio/federation (NEW): the pure core
 ├── src/schemas/                -- zod record schemas (fed/1), charter schema,
 │                                  envelope schema, finding vocabulary
 ├── src/charter/                -- canonicalization, digest rules, epoch-chain
-│                                  validation, floor-diff detection (§8.8) —
-│                                  ONE validator shared by gate + runtime
+│                                  validation, floor-diff detection (§8.8),
+│                                  dormancy computation (§8.5) — ONE validator
+│                                  shared by gate + runtime
 ├── src/identity/               -- node_id/compact_id derivation, descriptor
 │                                  and rotation rules
-├── src/peering/                -- handshake + peer state machines (pure)
+├── src/peering/                -- handshake + peer state machines (pure),
+│                                  the §10.6 verification-code derivation and
+│                                  its renderings (+ the word-list asset)
+├── src/tiers/                  -- the §16.6 tier vocabulary + fetch planner
+│                                  (tier + room state → lanes), pure
 ├── src/sla/                    -- severity→SLA math, cadence floors
 ├── src/attest/                 -- checkpoint recompute/consistency checks,
 │                                  finding derivation (pure)
@@ -2979,6 +3570,8 @@ apps/api/src/federation/        -- the impure half
 ├── reenforce.ts                -- the §15 pipeline
 ├── sync.ts                     -- peer client + server glue over LCAP sync
 ├── admin-events.ts             -- §19 emit/apply/receipts (transactors)
+├── notices.ts                  -- §19.4 public notice intake: local report +
+│                                  relayed referral + notice row, one unit
 ├── attestation.ts              -- §20 checkpoints/witnesses/findings
 ├── quarantine.ts               -- §21 tripwires + transitions
 ├── stores.ts / in-memory-*.ts / drizzle-*.ts
@@ -3019,7 +3612,12 @@ key; `--anchor` for the secp256k1 anchoring key, §9.7) ·
 `scripts/check-charter-integrity.ts` (§8.8) ·
 `scripts/check-federation-schema-egress.ts`, `check-federation-flag.ts`,
 `check-federation-core-isolation.ts`, `check-federation-reenforcement.ts`
-(§30) · `pnpm federation:rebuild-projections` (§16.1) — each gate in the
+(§30) · `pnpm federation:rebuild-projections` (§16.1) ·
+`scripts/federation-verification-code.ts`
+(`pnpm federation:verification-code <node_id_a> <node_id_b> <genesis_cid>` —
+recomputes the §10.6 code offline from a clean checkout, so an operator can
+check their console against the specification rather than against itself) —
+each gate in the
 house shape: SPDX + doctrine header, AST-based scan via `scripts/ts-source.ts`
 where applicable, empty-scan-set fails, importable-by-test tail, co-located
 `.test.ts` proving the gate bites.
@@ -3069,7 +3667,16 @@ federation.checkpointCadenceHours  int, charter-bounded           default 24 (§
 federation.anchorIntervalHours     int, charter-bounded           default 24 (§8.7)
 federation.budgets.*               §23.1 knobs incl. participation conservative defaults
 federation.tripwires.*             §21.1 thresholds               conservative defaults
+federation.defaultMirrorTier       tier enum, charter-floored     default 'full' (§16.6)
+federation.defaultRecentWindowDays int, bounded [7, 3650]         default 90  (§16.6)
+federation.notices.powDifficulty   int, bounded                   default = the signup PoW value (§19.4)
 ```
+
+The two tier keys are clamped by the adopted charter's `mirror_tier_floor`
+the same way the `moderation.*` tunables are clamped by their bounds (§8.3):
+a stored tier below the floor is treated as an invalid stored value —
+reported via `onInvalid`, floor kept — so a node can never serve under a
+weaker availability posture than its compact declares.
 
 Mode semantics:
 
@@ -3167,7 +3774,9 @@ counsel populates the matrix.
   mirrored it.
 - **Reference-lineage steward continuity** — steward key succession is
   in-band (an epoch lists successor keys, §8.5); steward *disappearance* is
-  §34 Q6.
+  the declared dormancy window in the same section, after which §8.6
+  founding proceeds on an uncontested basis. Neither path interrupts a
+  running compact: nodes keep enforcing the epoch they adopted.
 
 ---
 
@@ -3180,19 +3789,33 @@ vector tradition: charter epoch canonical LDC bytes ↔ JSON twin ↔ CID
 (including the reference genesis, §8.6); node_id/compact_id derivations;
 envelope sign/verify vectors (including a cross-compact AAD failure case and
 a high-S rejection); checkpoint recompute vectors; floor-diff cases (each
-weakening class detected; acknowledged transitions pass). Two independent
+weakening class detected; acknowledged transitions pass); **§10.6
+verification-code vectors** — the same pair in both argument orders yields
+byte-identical output (the sort), a different genesis yields a different
+code, the digit and word renderings encode the same 15 bytes per half, and
+the `pnpm federation:verification-code` script reproduces the console's
+value from the pins alone. Two independent
 implementations of the charter validator (the gate and the runtime share one
 module, so the vectors are what pin its behavior over time).
 
 ### 29.2 Unit and property tests
 
 Exhaustive transition tables for the peer and adoption state machines (every
-`(state, input)` pair asserted, including invalid ones); property tests for
+`(state, input)` pair asserted, including invalid ones — the
+`pending_verification` row included, where the assertion that no sync,
+serving, or participation input is accepted is the point of the state);
+**key-succession properties** (a rotated key binds to the pinned `node_id`
+through the chain; a chain missing a dual proof, regressing in sequence, or
+rooted at the wrong fingerprint does not); property tests for
 **projection determinism** — replaying any CAS prefix through §15 yields
 byte-identical projections (the `federation:rebuild-projections` guarantee);
 frontier-diff and pending-target-queue properties (out-of-order delivery
 converges); SLA math; bounds clamps (out-of-bounds stored values never go
-live); withheld-leaf resolution (§12.5 covered/uncovered).
+live); withheld-leaf resolution (§12.5 covered/uncovered); **tier-plan
+properties** (§16.6 — the control lane is in every non-`none` plan; raising
+a tier only ever adds to the fetch set, so a tier change cannot orphan a
+projection); and **dormancy determinism** (§8.5 — same anchored facts, same
+verdict, across arbitrary clock skew inside the envelope bound).
 
 ### 29.3 Gated twin-node integration suites
 
@@ -3202,13 +3825,25 @@ Postgres service and boots two full in-process service graphs — two nodes,
 real Drizzle stores, real migration chain — federating over in-process HTTP.
 Covered end-to-end: keygen (both keys) → charter adoption against a local
 anchor-registry fixture (the pinned `local` environment with a stub chain —
-sentinel pins are legal there) → peering → bootstrap to checkpoint head →
+sentinel pins are legal there) → peering **including the §10.6 ceremony**
+(both nodes compute the code independently and the test asserts equality
+across the pair, then confirms; a companion case asserts that a peer left at
+`pending_verification` serves and syncs nothing) → bootstrap to checkpoint
+head →
 steady-state delta → **a remote member's comment AND story-with-media
 submission accepted, receipted, and visible on both nodes** → moderation of
 the remote content with outcome + relayed appeal round-trip → admin-event
 application with receipt round-trip → author-tombstone from the author home
 applied at the content home → enforcement checkpoint issuance, anchoring,
 and witnessing → tripwire quarantine → defederation with retained content.
+Two tiered legs run alongside it (§16.6): node B mirrors one room at
+`text_only` and one at `recent`, and the suite asserts both reach
+`complete@<tier>` with correct un-fetched counts, that an admin event for an
+un-fetched target receipts `target_never_mirrored`, and that raising the
+tier backfills exactly the missing lanes. A notice filed at B about
+mirrored content (§19.4) produces B's local report, the relayed referral
+into A's real queue, and B's own statement of reasons — with the notifier's
+contact details asserted absent from every byte that crossed the wire.
 Store-contract tests run every federation store against both adapters (the
 `lcap-store-contract` parameterized shape).
 
@@ -3248,9 +3883,24 @@ or wrong-scope anchor → refused; a `wrong_authority` admin event (a content
 home issuing a tombstone, an author home issuing a takedown) → refused and
 receipted as `invalid_event`; a participation submission skipping
 pre-enforcement (oversized body, unstripped media) → refused with the
-refusal charged to the author home's ratio; a bot-farm flood at valid
-volume → per-author and per-peer budgets hold and `quota_abuse` trips.
-Every §20.5 finding type has at least one test that manufactures it.
+refusal charged to the author home's ratio; a submission into an
+`experts_and_stewards` room carrying a fabricated expert claim → refused
+**twice over**, since the `fed/1` schemas are `.strict()` and have no field
+to carry the claim at all, and the posting-policy check refuses the
+submission regardless of what accompanied it (§33.20); a bot-farm flood at
+valid volume → per-author and per-peer budgets hold and `quota_abuse` trips; an
+epoch lengthening a steward-continuity window without acknowledgment →
+refused as a floor weakening (§8.8 item 6); a notice flood without
+proof-of-work → bounded by the global window with no client address read
+(§19.4); **a full man-in-the-middle introduction** — a third node
+substituting its own `node_id` to both sides, relaying every subsequent
+protocol act faithfully so that all three pins verify and the handshake
+succeeds on both edges — asserted to produce **different §10.6 codes on the
+two honest consoles**, which is the only place in the suite where the
+detection is a human act and the test's job is to prove the machine put the
+right thing in front of them; and a rotated key presented without its
+succession chain → refused (§9.1). Every §20.5 finding type has at least one
+test that manufactures it.
 
 ### 29.6 The solo guarantee
 
@@ -3270,10 +3920,10 @@ bites):
 
 | Gate | Enforces |
 |---|---|
-| `check:charter-integrity` | §8.8: reference-lineage artifacts decode, digests recompute from `docs/policy/*` + shared constants, header↔JSON version equality, bounds cover the tunable key set, floor constants match code, floor-weakening diffs are acknowledged, grace/vocabulary coherence |
-| `check:federation-schema-egress` | §22.2: no attention/applause/address/identity token in any federation schema tree (shared token SSOTs + federation additions) |
-| `check:federation-flag` | §27.2: every `/api/federation/*` route behind the mode gate + envelope middleware; every `/v1/federation/*` mutation behind session + MFA + `admin` RBAC (the `check:governance-kyc` structural pattern) |
-| `check:federation-core-isolation` | §16.3: no module under `apps/api/src/federation/` or `packages/federation/` imports the core content schema write paths or emits INSERT/UPDATE against `stories`/`threads`/`contributions`/`rooms`/`users`/`uploads`; plus the §6.4 boot assertion that off-mode mounts nothing |
+| `check:charter-integrity` | §8.8: reference-lineage artifacts decode, digests recompute from `docs/policy/*` + shared constants, header↔JSON version equality, bounds cover the tunable key set, floor constants match code, floor-weakening diffs are acknowledged (incl. the mirror-tier floor and the continuity windows), grace/vocabulary coherence, steward-continuity + mirror-tier-floor fields present and in-vocabulary (item 10) |
+| `check:federation-schema-egress` | §22.2: no attention/applause/address/identity token in any federation schema tree (shared token SSOTs + federation additions) — including the §19.4 notice schemas, where `notifier_contact` must be absent from every record shape that can reach the wire, and the §10.6 verification code, which must appear in no wire schema at all (channel independence, §10.6.3) |
+| `check:federation-flag` | §27.2: every `/api/federation/*` route behind the mode gate + envelope middleware; every `/v1/federation/*` mutation behind session + MFA + `admin` RBAC (the `check:governance-kyc` structural pattern), with the single §19.4 public notice route named explicitly and asserted to carry its **substitute** controls (Origin check, proof-of-work, global fixed window, audit-chained transactor) — a named exemption that proves the substitute controls is a gate; one that merely skips the route is a hole |
+| `check:federation-core-isolation` | §16.3: no module under `apps/api/src/federation/` or `packages/federation/` imports the core content schema write paths or emits INSERT/UPDATE against `stories`/`threads`/`contributions`/`rooms`/`users`/`uploads`; the §6.4 boot assertion that off-mode mounts nothing; **plus the §9.6 compact-scoping leg** — every `federation_*` table declares `compact_id NOT NULL` and every PK/UNIQUE over it includes that column (§25) |
 | `check:federation-reenforcement` | §15: the peer ingest path routes through every pipeline stage (marker set over `reenforce.ts` + the routes, the `private-p2p-gates` thin-wrapper pattern) |
 | `check:federation-adversarial` | §29.5 (named vitest file, the `check:adversarial` pattern) |
 
@@ -3328,7 +3978,13 @@ adapter, the hand-authored migration + journal entry, and the parameterized
 contract test against both adapters in the same slice (`check:prod-parity`
 makes anything less a CI failure); **(b) route slices are audited** — a card
 introducing a mutating route ships its transactor so the durable change and
-its audit row commit in one unit (`check:audited-writes` has no allowlist).
+its audit row commit in one unit (`check:audited-writes` has no allowlist);
+**(c) tables are compact-scoped** — every `federation_*` table a card creates
+declares `compact_id NOT NULL` and scopes its PK/UNIQUE constraints by it
+(§9.6, §25). Convention (c) is the Q3 seam and applies from the first table
+onward, which is earlier than the gate that enforces it (V.6.9) — the cards
+between are held to it by review, and V.6.9's self-test includes a fixture
+for each table that landed before it.
 
 ### WS-V.0 — Specification, charter artifact-ization, and the reference lineage
 
@@ -3370,15 +4026,39 @@ administration surface becomes fully artifact-ized and digest-stable.
   `licio-reference`: JSON twin + canonical LDC bytes + CID vector under
   `docs/federation/charters/licio-reference/`; the complete tunable-bounds
   enumeration for every governed `moderation.*` key (each bound a reviewed
-  decision); the anti-bot floor (decision 29); the steward key and the
-  `federation.anchoring` declaration (§8.7). *Depends on the §27.4
-  precursor: the genesis digests `CRYPTO_FEATURE_MATRIX` post-flip.*
+  decision); the anti-bot floor (decision 29); the mirror-tier floor (§16.6)
+  and the steward-continuity windows (§8.5), each a reviewed decision like
+  the bounds; the steward key and the `federation.anchoring` declaration
+  (§8.7). *Depends on the §27.4 precursor (the genesis digests
+  `CRYPTO_FEATURE_MATRIX` post-flip) **and on V.0.8** — the anchoring
+  declaration must name a venue that exists.*
 - **WS-V.0.7 — `check:charter-integrity`** (§8.8, §30). The CI wrapper over
   V.0.5 plus the tree-recompute half: doctrine digests recompute from
   `docs/policy/*`, vocabulary digests from the shared constants, header↔JSON
   version equality, bounds-coverage completeness. House gate shape with a
   co-located self-test proving it bites on each violation class; wired into
   `package.json` + the ci.yml `lint` job.
+- **WS-V.0.8 — The anchor contract and the compact's anchoring venue**
+  (§8.7, §9.7). The one card in WS-V.0 whose deliverable is partly outside
+  this repository, split out for exactly that reason: the genesis charter
+  must declare a chain id, an anchor contract address, and a confirmation
+  depth, and today `apps/api/src/knomosis/pin.config.json` carries only the
+  `local` deployment with all-zero sentinels — which `check:knomosis-pins`
+  correctly refuses above `local`. Deliverables: (1) the minimal append-only
+  `anchor(scope, root)` registry contract — no funds, no transfers, no other
+  methods (§8.7) — authored and reviewed in the Knomosis contract repository
+  and referenced here by pinned commit + ABI manifest hash, exactly as the
+  gateway contract already is (this monorepo stays pure TypeScript and gains
+  no Solidity toolchain); (2) its testnet deployment; (3) the `pin.config.json`
+  testnet deployment row with real values and a `confirmation_depth` sourced
+  from `docs/knomosis/finality-validation-memo.md` (a provisional value there
+  is launch-blocking for testnet promotion, per that file's own rule); (4)
+  the `check:knomosis-pins` charter↔pin consistency leg (§30) with fixtures
+  for the mismatch, the sentinel-above-`local`, and the
+  below-the-environment-floor cases. Blocks V.0.6, V.3.4, and V.9.1;
+  everything else in WS-V.0 is venue-independent and proceeds in parallel.
+  Decision 23's environment ladder means this card ships a **testnet** venue;
+  raising the floor to `capped_production` is the F2 epoch, not this card.
 
 ### WS-V.1 — Node identity and key provisioning
 
@@ -3479,6 +4159,16 @@ peer exists.
   `featureFlagsSchema` + `FAIL_CLOSED_FLAGS` (MUST default false); the
   off/shadow/active semantics as a pure predicate consumed by every later
   mount/registration card.
+- **WS-V.3.6 — Lineage liveness and dormancy** (§8.5, Q6). The
+  `federation_charter_liveness` record kind + store; the steward-side
+  publish path (the maintainer's own lineage tooling, anchored through
+  V.3.4); the peer-side dormancy computation as a **pure function** of
+  (declared windows, last anchored steward act, now) with property tests
+  proving two nodes holding the same anchored facts cannot disagree; the
+  console countdown surfaced continuously; the `lineage_dormant` finding
+  (lineage-scoped, `peer_id` null) minted at expiry and asserted by test to
+  feed **no** tripwire and quarantine **nobody**. *Depends on V.3.4 for the
+  anchoring reads.*
 
 ### WS-V.4 — Peering
 
@@ -3505,6 +4195,30 @@ peer exists.
   `RelayQuotaConfig` shape; want-shaping and pack-admission integration
   seams; `quota_abuse` and `refusal_rate` signal emission (consumed by
   V.9.5).
+- **WS-V.4.6 — Introduction verification** (§10.6, §24.2). The code
+  derivation as a **pure module** in `packages/federation/src/peering/`
+  (sorted halves, domain-separated, 120 bits each) with its conformance
+  vectors and both renderings + the word-list asset; the
+  `pending_verification` state and its inert semantics (V.4.1's transition
+  table extends here); the console screen — code, encoding label, the
+  compare-both-halves instruction, the two channel selectors, and the
+  distinct-channels affirmation — plus the confirm/mismatch routes with
+  audit-in-unit; pin-clearing and the `peer_verification_mismatch` finding on
+  mismatch; the `CHECK` that `active` requires `verified_at`;
+  `pnpm federation:verification-code`; the `check:federation-schema-egress`
+  extension asserting the code appears in no wire schema; and the
+  mandatory-copy entries (§17.3), including the same-channel warning at the
+  point of confirmation. *Depends on V.4.1 and V.4.3. It blocks nothing
+  downstream except that no peer can reach `active` without it — which is
+  the design, not an ordering accident.*
+- **WS-V.4.7 — Key succession** (§9.1, §9.4). The `federation_key_succession`
+  store and the chain verifier binding a rotated key back to the pinned
+  `node_id`, so planned rotation needs neither a re-pin nor a repeat
+  ceremony; refusals for a missing dual proof, a sequence regression, and a
+  chain rooted at the wrong fingerprint; the compromise path (re-pin +
+  re-ceremony) documented as the manual procedure it is. *Pairs with V.1.4,
+  which owns the publishing half of rotation; this card owns the verifying
+  half, and §10.2 step 1 is only true once both have landed.*
 
 ### WS-V.5 — Sync
 
@@ -3534,6 +4248,22 @@ peer exists.
   progress surface (`GET /v1/federation/bootstrap/:peerId`); a bootstrap is
   the same code path as steady state with zero frontiers — asserted by a
   test that diffs the two paths' call graphs.
+- **WS-V.5.7 — Mirror tiers** (§16.6, §12.3, §13.2, §14.5, Q7). The closed
+  tier vocabulary and its lane mapping as a pure planner (tier + room state
+  → which lanes to fetch), so "what does this tier fetch" is testable
+  without a peer; the `mirror_tier`/`recent_window_days`/
+  `unfetched_leaf_count` columns and their CHECKs; tier-relative
+  `complete@<tier>` reporting; the tier-change flow (`POST .../mirror-set`)
+  with byte-delta preview, audit-in-unit, bulk backfill on raise and
+  explicit opt-in prune on lower; the descriptor's per-tier room counts
+  (§9.3). Three assertions carry the card: the control lane is fetched in
+  full at every tier (fixture per tier); an admin event for an un-fetched
+  target receipts `target_never_mirrored` rather than queueing forever;
+  and — the one that matters most — **no code path fetches an object in
+  response to a read**, proven by a test that drives every member-facing
+  render path for un-mirrored content against a peer client that fails the
+  test on any request (§16.6 rule 3, §22.4). *Depends on V.5.6; V.6.4 reads
+  the tier for media.*
 
 ### WS-V.6 — Re-enforcement and the mirror plane
 
@@ -3610,6 +4340,14 @@ behind the full stage chain.
   through signals → aggregates → PWAtt untouched, and extend the
   no-raw-egress E2E assertion to a mirrored-story session. Any code change
   this card *needs* is a design smell to escalate, not to patch.
+- **WS-V.7.8 — Tier-absence and compact-axis UI** (§17.3, §16.6). The
+  labelled-absence renderings (media placeholder with the origin link, the
+  `recent`-window end marker, the tier sentence in the room banner) and
+  their mandatory-copy entries; the canonical-language label (§8.1, Q5); the
+  reserved compact-attribution key on the provenance chip, rendered only
+  above one adopted compact (§9.6, Q3) and covered by a test that it never
+  renders in a single-compact node. Lands with V.7.6, whose copy SSOT it
+  extends; *depends on V.5.7 for the tier state it renders.*
 
 ### WS-V.8 — Administrative events and data rights
 
@@ -3637,6 +4375,18 @@ behind the full stage chain.
 - **WS-V.8.6 — SLA accounting** (§19.2). Receipt-latency rollups
   (`applied_within_sla`/`applied_late`) feeding the enforcement checkpoint
   (V.9.1) and the `sla_breach_pattern` finding.
+- **WS-V.8.7 — Notice-and-action intake** (§19.4, §24.2, Q8). The public
+  `POST /v1/federation/notices` route — session-less, Origin-checked,
+  proof-of-work + global-fixed-window bounded, never reading a client
+  address (`no-client-address` scope extension) — and its transactor
+  emitting, in **one unit**, the local WS-J report, the relayed
+  `federation_report`, and the `federation_content_notices` row; the admin
+  queue with its SLA; the acknowledgment and the statement of reasons back
+  to the notifier, scoped to *this node's* local action and worded so
+  (§17.3 copy). Two assertions are the point of the card: the notifier's
+  contact details appear in no record shape that can reach the wire
+  (`check:federation-schema-egress` fixture), and `check:federation-flag`
+  proves the route's substitute controls rather than skipping it (§30).
 
 ### WS-V.9 — Attestation, quarantine, and defederation
 
@@ -3715,7 +4465,10 @@ end to end (decisions 16, 25–27, 29; §18):
   `/participation/submit` + `/participation/blob` routes: envelope,
   per-peer and per-`(peer, origin_author)` budgets, full §15 re-enforcement,
   synchronous typed verdicts; `posting_policy_refused` evaluated against
-  the room's real posting policy.
+  the room's real posting policy, with the expert-gate case asserted as
+  **doctrine** (§33.20): a remote submission into an `experts_and_stewards`
+  room is refused whatever role or attestation it carries, and the test
+  enumerates the attestation shapes that must not create an exception.
 - **WS-V.11.4 — Acceptance and hosting** (§11.8, §16). Accepted submissions
   committed to the room log + receipted in one unit; projected as
   `hosted_remote` content through the same projection pipeline; served,
@@ -3754,11 +4507,17 @@ one layer proceed in parallel):
 ```text
 Layer P   §27.4 precursor change-set                              (before anything Knomosis-touching;
                                                                    V.0.6's genesis digests depend on it)
-Layer 0   V.0  charter artifacts, package, validator, genesis, gate
+Layer P'  V.0.8 anchor contract + testnet venue + pin row         (partly outside this repo; blocks
+                                                                   V.0.6, V.3.4, V.9.1 — start it first,
+                                                                   it has the longest external latency)
+Layer 0   V.0  charter artifacts, package, validator, genesis, gate  (V.0.1–.0.5, .0.7 are venue-independent
+                                                                   and proceed while V.0.8 is in flight)
 Layer 1   V.1  node identity + keys   V.3  charter runtime        (both fan out of V.0; V.3.4 anchoring
-                                                                   client needs Layer P + V.1.1's key)
+                                                                   client needs Layer P + P' + V.1.1's key;
+                                                                   V.3.6 dormancy after V.3.4)
 Layer 2   V.2  export + logs          V.4  peering                (V.2 after V.1.5; V.4 console after V.3.5)
-Layer 3   V.5  sync                                               (after V.2, V.3.5, V.4)
+Layer 3   V.5  sync                                               (after V.2, V.3.5, V.4; V.5.7 tiers after
+                                                                   V.5.6)
 Layer 3'  V.6  re-enforcement                                     (schemas from V.0.3, pack fixtures from
                                                                    V.2 — parallel with V.4/V.5; the
                                                                    integration point is V.5.6 + V.6.6)
@@ -3780,14 +4539,26 @@ identifiers, not an execution sequence — the planning document's per-card
 - **V.3.4 precedes V.3.2** (adoption requires the transparency-log client);
   **V.3.5 is order-free** within V.3 (it needs only V.0.3 and the existing
   config-store machinery, and everything mount-shaped waits on it).
+- **V.0.8 → V.0.6** (the genesis cannot declare a venue that does not
+  exist), **V.0.8 → V.3.4** (the anchoring client reads the pinned
+  deployment), **V.0.8 → V.9.1** (attestation roots anchor there). Nothing
+  else in WS-V.0 depends on it.
 - V.0.3 → V.1.2 (the identity derivations live in the package);
   V.0.5 + V.0.6 → V.3.2 (adoption validates against the shared validator
-  and the pinned genesis).
+  and the pinned genesis); V.3.4 → V.3.6 (dormancy is computed from
+  anchored acts).
+- V.5.6 → V.5.7 (tiers narrow a fetch plan that must first exist);
+  V.5.7 → V.6.4 (the media stage reads the room's tier) and V.5.7 → V.7.8
+  (the UI renders the tier state).
 - V.1.5 → V.2.6 (checkpoint issuance needs the provisioned signer).
 - V.3.5 → V.4.4, V.5.1, V.7.1 (the mode predicate gates every mount and
   registration).
 - V.4.2 → V.5.1 (envelope middleware before the peer mount);
-  V.4.5 → V.5.2 (budget attribution on the serving paths).
+  V.4.5 → V.5.2 (budget attribution on the serving paths);
+  V.4.1 + V.4.3 → V.4.6 (the ceremony extends the state machine and gates the
+  handshake's success edge); V.1.4 ↔ V.4.7 (the publishing and verifying
+  halves of rotation MUST share fixtures — a rotation the publisher emits and
+  the verifier rejects is the failure this pairing exists to catch).
 - V.2 pack fixtures → V.6.2 (the pipeline develops against exported packs
   in parallel with V.4/V.5); V.6.6 → V.5.6 (the bootstrap orchestrator is
   the integration point — nothing projects until the full stage chain
@@ -3806,15 +4577,18 @@ identifiers, not an execution sequence — the planning document's per-card
 
 ### Rollout phases
 
-- **Phase F0 — populate the plane** (precursor + V.0–V.2, solo). The
-  posture flip lands; the charter is artifact-stable; the node maintains
-  its signed public export. No peering exists; everything is independently
-  valuable (§5.3).
+- **Phase F0 — populate the plane** (precursor + V.0 incl. V.0.8 + V.1–V.2,
+  solo). The posture flip lands; the anchor contract is deployed and pinned
+  to testnet; the charter is artifact-stable; the node maintains its signed
+  public export. No peering exists; everything is independently valuable
+  (§5.3).
 - **Phase F1 — shadow pair** (V.3–V.6, then V.8–V.9 in shadow; testnet
   anchoring per decision 23). The seed node and one second node peer in
   `shadow` mode: full protocol, zero member exposure. Exit criteria: a
   clean shadow interval — no unexplained refusals, budgets fitting,
-  checkpoints witnessed and anchored, storage growth as modeled.
+  checkpoints witnessed and anchored, storage growth as modeled **at each
+  tier the pair intends to run** (§16.6: a tier whose byte behaviour was
+  never observed in shadow is not a tier this pair has evidence for).
 - **Phase F2 — active mirroring on the seed pair** (V.7; the
   `capped_production` anchoring epoch adopted; §32 read-surface items
   walked). Mirrored content serves on both nodes.
@@ -3847,6 +4621,9 @@ slices land, with any unchecked residue honestly annotated
 - [ ] Epoch adoption fail-closes on chain walk, steward proof, and a depth-confirmed Knomosis anchor. (Adoption-flow tests + adversarial unanchored-epoch fixture; WS-V.3.2/3.4.)
 - [ ] The anchoring key can reach only the charter-declared anchor contract, and the pin file carries it at or above the environment floor. (`check:knomosis-pins` extension; WS-V.3.4.)
 - [ ] A configured-but-unreadable node key fails the boot; `node_id`/`compact_id` derivations are vector-pinned. (Env refinement test + conformance vectors; WS-V.1.1/1.2.)
+- [ ] The anchor contract is deployed, pinned with real (non-sentinel) values at or above the charter's environment floor, and its ABI/commit are pinned like the gateway's. (`check:knomosis-pins` charter↔pin leg; WS-V.0.8.)
+- [ ] An epoch omitting the steward-continuity windows or the mirror-tier floor fails validation, and lengthening either window without acknowledgment fails as a floor weakening. (`check:charter-integrity` items 6 and 10; WS-V.0.5/0.7.)
+- [ ] Dormancy is a pure function of anchored facts: two nodes with the same anchored history compute the same verdict, and a dormant lineage quarantines nobody. (Property tests + the no-tripwire assertion; WS-V.3.6.)
 
 ### Content plane and bootstrap
 
@@ -3855,7 +4632,16 @@ slices land, with any unchecked residue honestly annotated
 - [ ] A zero-frontier bootstrap converges to checkpoint head and is resumable at any interruption point. (Twin-node scenario + E2E; WS-V.5.6.)
 - [ ] A withheld leaf without a covering admin event surfaces as a finding. (§12.5 tests; WS-V.2.7.)
 - [ ] A proof minted in another compact fails verification structurally. (The AAD conformance vector; WS-V.1.2.)
+- [ ] No peer can reach `active` without a recorded introduction verification — enforced by the state machine AND a database CHECK, not by console flow. (Transition table + migration constraint; WS-V.4.6.)
+- [ ] A relaying man-in-the-middle that passes all three pins and both handshakes produces **different** verification codes on the two honest consoles. (Adversarial MITM fixture; WS-V.4.6.)
+- [ ] The verification code appears in no federation wire schema. (`check:federation-schema-egress`; WS-V.4.6.)
+- [ ] `pnpm federation:verification-code` reproduces the console's code from the pins alone. (Conformance vector; WS-V.4.6.)
+- [ ] A planned key rotation binds to the pinned `node_id` through its succession chain and needs no re-pin; a chain with a missing dual proof, a sequence regression, or the wrong root is refused. (Succession property tests; WS-V.4.7.)
 - [ ] A checkpoint regressing below the stored floor is refused. (Adversarial fixture; WS-V.6.7.)
+- [ ] Every tier fetches the control lane in full, and room status reports `complete@<tier>` with its un-fetched count. (Per-tier fixtures; WS-V.5.7.)
+- [ ] No read path fetches an un-mirrored object: every member-facing render of un-mirrored content runs against a peer client that fails on any request. (§16.6 rule 3 / §22.4 test; WS-V.5.7.)
+- [ ] An admin event targeting an un-fetched object receipts `target_never_mirrored` instead of queueing indefinitely. (Twin-node tiered fixture; WS-V.5.7/8.4.)
+- [ ] Every `federation_*` table declares `compact_id` and scopes its uniqueness by it. (`check:federation-core-isolation` compact leg; WS-V.6.9.)
 
 ### Re-enforcement and neutrality
 
@@ -3873,6 +4659,9 @@ slices land, with any unchecked residue honestly annotated
 - [ ] Mirror application meets the charter SLAs in the harness and mints its receipt in the same unit. (Twin-node + E2E; WS-V.8.4/8.5.)
 - [ ] Receipts round-trip and per-event coverage is visible at the origin. (Twin-node; WS-V.8.5.)
 - [ ] "Deleted everywhere" and equivalent framings cannot ship; the mandatory copy is i18n-keyed and copy-linted. (Copy-lint additions; WS-V.7.6.)
+- [ ] A notice about mirrored content can be filed by anyone, produces a local report, a relayed referral, and a tracked notice in one unit, and returns a statement of reasons about *this node's* action. (Route + transactor tests; WS-V.8.7.)
+- [ ] Notifier contact details exist in no record shape that can reach the wire. (`check:federation-schema-egress` fixture; WS-V.8.7.)
+- [ ] The public notice route is proven to carry its substitute controls, not skipped by the flag gate. (`check:federation-flag` named-exemption self-test; WS-V.8.7.)
 
 ### Remote participation
 
@@ -3884,6 +4673,7 @@ slices land, with any unchecked residue honestly annotated
 - [ ] The author-home tombstone anonymizes the author's hosted-remote content at every content home. (Twin-node both-directions authority test; WS-V.11.9.)
 - [ ] Per-`(peer, origin_author)` and per-peer participation budgets enforce, and the charter anti-bot floor validates. (Adversarial bot-farm fixture + `check:charter-integrity` item 9; WS-V.11.3/V.0.6.)
 - [ ] Two identical stories — one local, one hosted-remote — rank identically under identical local attention. (Neutrality twin group; WS-V.7.2.)
+- [ ] A remote submission into an `experts_and_stewards` room is refused regardless of any role claim or attestation it carries, and the composer states the refusal before composition rather than after. (Doctrine tests over the attestation shapes + composer pre-check; WS-V.11.3/11.10, §33.20.)
 
 ### Attestation and defederation
 
@@ -4032,14 +4822,24 @@ content to ActivityPub readers someday is conceivable behind the Gate-19
 review posture; adopting it as the inter-Licio protocol would surrender
 exactly what this spec exists to guarantee.
 
-### 33.13 Multi-compact membership at v1 — deferred
+### 33.13 Multi-compact membership at v1 — deferred, with the seam kept
 
 Nothing in the record model precludes a node joining two compacts (proofs
 are detached and per-namespace, §9.6), but the product semantics —
 per-compact mirror sets, per-compact descriptors, doubled attestation
 duties, member-facing provenance from two networks — are unsettled and
 uncalled-for at expected scale. One compact per node until a real second
-lineage exists (§34 Q3).
+lineage exists.
+
+What Q3's resolution changes (§34): the eventual shape is settled even
+though the feature is deferred — dual membership would be a **node-level**
+property, not "run a second node" — so v1 pays the two costs that are
+expensive to retrofit and none of the ones that are not. Every
+`federation_*` table is compact-scoped and the provenance copy reserves a
+compact key (§9.6); no per-compact mirror set, descriptor, or attestation
+duty is built. The distinction is the usual one: a column and an unused
+i18n key are cheap now and painful later; the semantics are the opposite,
+and stay unbuilt until something forces them.
 
 ### 33.14 Mirroring live debate-arena state — still rejected; participation is not
 
@@ -4084,50 +4884,114 @@ determination; electorate freezing assumes one membership registry; and a
 compromised or lazy peer would become a citizenship mint for real-money
 governance. Participation is content; citizenship is local (§7.3).
 
+### 33.18 A short (ZRTP-style) verification code — rejected
+
+The obvious ergonomic improvement to §10.6 is a four-character code of the
+kind ZRTP made familiar. It is unavailable here, and the reason generalizes:
+ZRTP's SAS commits to an **ephemeral** Diffie-Hellman exchange under a prior
+commitment, so nothing can be precomputed and the only grind available runs
+*inside the live call*. This code commits to **long-lived identities**, which
+both admits precomputation (a table of candidate identities indexed by their
+half, consulted the moment an honest `node_id` is intercepted) and stretches
+the live window from seconds to however long an asynchronous introduction can
+be delayed. A four-character code loses to either, and the ceremony would
+then confirm the attacker's substitution rather than detect it — worse than
+no ceremony, because it would be believed.
+
+The same reasoning rejects hashing both parties into one combined short
+string: separate, positionally-bound halves turn a birthday search (~2^(n/2))
+into a second-preimage search (~2^n), and that factor is not available to
+trade away for a shorter read. What is offered instead is the word rendering
+(§10.6.1) — the same bits, easier to say out loud — because the honest way to
+make a ceremony easier is better encoding, never fewer bits.
+
+### 33.19 A certificate authority or node directory for identity — rejected
+
+The standard fix for out-of-band introduction is a third party that vouches:
+a CA, a registry, a keyserver, a web of trust. Every variant reintroduces the
+gatekeeper this specification exists to remove — federation eligibility is
+keyed on policy equivalence and attested enforcement, never on operator
+identity, allowlists, or anyone's say-so (§0, §33.8). It would also solve the
+wrong problem: the compact does not need to know *who* an operator is, only
+that a key is the one the other operator meant. A CA answers the first
+question at the cost of a dependency; the §10.6 ceremony answers the second
+with none.
+
+### 33.20 Remote expertise recognition — rejected
+
+Letting a remote member satisfy an `experts_and_stewards` posting policy has
+two conceivable shapes, and both are refused permanently.
+
+**Author-home attestation** — B asserts "this member is an expert" in the
+submission and A honours it because the charter matches. This is standing
+crossing a node boundary, which §3.2 forbids and decision 28 forbids again in
+the participation channel: a peer would become a mint for posting rights in
+*other* communities' expert-gated rooms, and the mint's quality would be
+invisible to the room that bears the consequence. The charter guarantees
+common *rules*; it has never guaranteed that two nodes vet people the same
+way, and expert vetting is exactly where operators legitimately differ.
+
+**Content-home vetting** — A's stewards grant a specific remote author expert
+standing locally. This one is not a doctrine violation, it is a structural
+impossibility that would have to be built around. Expert standing here is the
+platform `expert` RBAC role plus room stewardship, resolved by
+`userMayPostTopLevel` (`apps/api/src/forum/rooms.ts`) **against a local user
+row** — and a remote author has no user row on the content home, because
+accounts never move between nodes (§7.3). Granting it would mean inventing a
+parallel grant space keyed on `(peer_node_id, origin_author_id)`: a second
+standing system shadowing RBAC, with its own revocation, its own audit
+surface, and its own answer to what happens when the author's home node
+defederates. That is a large amount of machinery whose entire purpose is to
+reproduce, badly, the thing a local account already is.
+
+The refusal is therefore doctrine, and it is cheap: `posting_policy_refused`
+is evaluated before composition (§17.3), so a remote member never writes
+something only to lose it. What remains fully available to them is every
+other write surface — comments, corrections, debate positions, and story
+submissions into rooms that admit all members (§18.1) — which is the great
+majority of the compact's rooms and all of its conversation.
+
+The honest limit (§3.12): a genuine subject-matter expert on node B cannot
+post top-level in node A's expert-gated room, however qualified they are.
+The remedy is the ordinary one — they hold an account on A, vetted by A, like
+any other expert A recognizes — and that is not a workaround, it is what
+"A's community vets its own experts" means.
+
 ---
 
 ## 34. Open questions
 
-1. **Q1 — Remote expertise.** Can a remote member ever satisfy an
-   `experts_and_stewards` posting policy, and if so, whose determination
-   counts — the content home's own vetting of the remote author, an
-   author-home attestation of expert status, or never? v1 refuses
-   (`posting_policy_refused`, §18), which is safe and visibly
-   asymmetric; the right long-term answer touches the same
-   standing-vs-content boundary as decision 28 and deserves its own
-   decision rather than an incidental default.
-2. **Q2 — Re-admission norms.** Should the reference lineage RECOMMEND a
-   cooling-off period or evidence-of-remediation convention for
-   re-admitting a defederated node (§21.5), or is that permanently operator
-   judgment?
-3. **Q3 — Multi-compact membership.** If a second legitimate lineage
-   emerges, is dual membership a node-level property (one node, two
-   compacts) or an operator-level one (run two nodes)? What does provenance
-   UI look like when two compacts' content coexists?
-4. **Q4 — Namespace unification.** Should a compact member eventually set
-   its device-facing `LCAP_NETWORK_ID` to the compact id, unifying the
-   offline plane and the federation plane into one record set (§9.6)?
-   Device-certificate reissuance on compact change is the cost to model.
-5. **Q5 — Charter localization.** Doctrine artifacts are English-canonical;
-   digests bind bytes. How do translated doctrine presentations relate to
-   the canonical block — presentation-only (recommended), or attested
-   translations listed in the charter?
-6. **Q6 — Steward continuity.** If the reference-lineage steward disappears
-   without having listed successor keys (§8.5), the lineage can no longer
-   author epochs. Members can found a successor lineage (§8.6) — should the
-   charter pre-declare a dead-steward convention (e.g., a time-based
-   succession statement) to make that fork orderly?
-7. **Q7 — Storage economics at scale.** Full mirroring is honest at
-   single-digit node counts (§23.3). If a compact grows, what selective
-   tier is acceptable before "mirrored" becomes misleading — per-room
-   opt-in, recency windows, text-always/media-partial? (The LCAP storage-
-   mode vocabulary is the natural starting point.)
-8. **Q8 — DSA notice-and-action formalities.** Does a mirror operating in
-   the EU need its own notice-and-action intake for mirrored content, or do
-   the mechanical relayed-report referral (§19.4, §18) plus local-hide
-   satisfy the mechanism? The relay channel makes referral a receipted
-   protocol act, which should help; still a counsel question — fail toward
-   both until answered.
+**No questions remain open.** This section is the resolution register: every
+question this specification raised is answered, each answer is recorded in
+the section that owns it, and the table below is the index. A question is
+listed here only so that a later reader finds the reasoning rather than
+re-deriving it — none of these is a pending decision, and none should be
+re-opened without a change in the facts that decided it.
+
+### Resolved in revision 5
+
+| # | Question | Resolution | Where it lives |
+|---|---|---|---|
+| Q1 | Remote expertise in `experts_and_stewards` rooms | **Never — expertise is node-local.** A remote member does not satisfy another node's expert-gated posting policy, permanently and by doctrine rather than by version. Author-home attestation would be standing crossing a node boundary (§3.2, decision 28), turning a peer into a mint for posting rights in other communities' rooms. Content-home vetting has nowhere to live: expert standing is the platform `expert` RBAC role plus room stewardship resolved against a **local user row**, and a remote author has none, because accounts never move between nodes (§7.3). Every other write surface stays open to them. | §7.3, §17.3, §18.1, §33.20 |
+
+### Resolved in revision 3
+
+| # | Question | Resolution | Where it lives |
+|---|---|---|---|
+| Q2 | Re-admission norms after defederation | **Permanently operator judgment.** No cooling-off period, advisory or enforced: the protocol records history and never rewrites it, and how long to wait before trusting someone again is exactly the kind of judgment §21.3 already places with operators. A charter-enforced minimum would bind a social decision mechanically at the one moment an operator may need to move fast (a defederation that turns out to have been a misdiagnosis). | §21.5 (unchanged — the silence is now deliberate) |
+| Q3 | Multi-compact membership | **Node-level if it ever ships; the seam is kept, the semantics are not built.** Every `federation_*` table is compact-scoped from the first migration and provenance copy reserves a compact key; per-compact mirror sets, descriptors, and attestation duties stay unbuilt. | §9.6, §16.2, §25, §33.13; convention (c) in §31 |
+| Q4 | Namespace unification | **Never unified.** The device-facing `LCAP_NETWORK_ID` and the federation `compact_id` are permanently separate namespaces: unification would make an operator's compact change reissue every device certificate, and buys only implementation convenience. | §9.6 |
+| Q5 | Charter localization | **Presentation-only.** English bytes are canonical and digest-bound; translations are node-local i18n resources under a standing label, never charter content. No translation map, no steward translation duty, no doctrine change blocked behind N languages. | §8.1, §8.4, §17.3 |
+| Q6 | Steward continuity | **A time-based dormancy declaration.** Every epoch declares a liveness interval and grace; the steward keeps the lineage live with an anchored epoch or liveness statement; expiry makes the lineage *dormant* — a computed, shared fact that transfers no authority, quarantines nobody, and gives §8.6 founding an uncontested basis. | §8.5, §8.6, §8.8 item 10, §20.5, §25; WS-V.3.6 |
+| Q7 | Storage economics at scale | **Per-room mirror tiers in v1**, not deferred to the pressure: `full`/`recent`/`text_only`/`none`, charter-floored, control lane never narrowed, un-mirrored content labelled rather than hidden, and **no on-demand backfill** (which would leak readership). | §16.6, §12.3, §13.2, §14.5, §17.3, §23.3, §9.3; WS-V.5.7, WS-V.7.8 |
+| Q8 | DSA notice-and-action formalities | **Fail toward both, and build both.** Every node ships a public notice intake for the content it serves *and* the receipted relayed referral. Counsel's eventual answer decides which one a node's terms point at — not what it has to go build. Notifier contact details stay node-local and never federate. | §19.4, §24.2, §25, §30; WS-V.8.7 |
+
+One question was raised while resolving these and answered in the plan
+rather than here: the genesis charter must declare an anchoring venue that
+does not yet exist (`pin.config.json` carries only the `local` sentinel
+deployment). That is a provisioning dependency, not a design question, and
+it is now **WS-V.0.8** — split out so the six venue-independent WS-V.0 cards
+are not blocked behind a contract deployment.
 
 ---
 
@@ -4140,12 +5004,17 @@ governance. Participation is content; citizenship is local (§7.3).
 | Node key compromise | Forged records/checkpoints as the victim node | Rotation with dual-proof promotion (§9.4); out-of-band re-pin recovery; anchored history; peers' anti-rollback floors bound rewriting; accepted residual: a window of forgeable *new* records until peers are notified |
 | Correlated moderation blind spots (same charter ⇒ same gaps everywhere) | A charter-level defect replicates compact-wide | The charter is versioned and fixable by epoch; nodes retain local tunables and local-hide; heterogeneous LLM lanes (§8.4) keep enforcement *implementations* diverse even under one rulebook |
 | Epoch-transition fracture (operators fail to adopt in time) | Unintended defederation | Grace windows with vocabulary compatibility (§8.5); console countdown surfaces; divergence recorded without accusation and reversible on re-alignment (§10.3) |
-| Seed compromise at N=1 (poisoned first bootstrap) | A new node mirrors a hostile corpus | Three-way pinning limits impersonation (§10.1); re-enforcement bounds content harm; checkpoints + anchored roots make later history rewriting provable; accepted residual: TOFU is TOFU — stated, not hidden (§7.3) |
+| Seed compromise at N=1 (poisoned first bootstrap) | A new node mirrors a hostile corpus | Three-way pinning limits impersonation (§10.1); re-enforcement bounds content harm; checkpoints + anchored roots make later history rewriting provable; the charter pin arrives with signed source (§8.6), which is a stronger channel than the identity pin gets |
+| Substituted `node_id` in the out-of-band introduction | An operator peers with an impersonator; every subsequent check passes against the wrong key | The §10.6 two-channel ceremony: 120-bit-per-half codes compared over a channel independent of the pin exchange, positionally bound so forgery is second-preimage rather than birthday work; `active` gated on a recorded confirmation at both the state-machine and database level; accepted residual — an operator who uses one channel twice, or confirms without comparing, defeats it, and no protocol can tell (§10.6.5) |
 | Transparency log outage | Adoption delays; attestation findings pile up | Log is evidence, not liveness (§8.7); sync unaffected; adoption waits; sustained absence is itself a surfaced signal |
 | Re-enforcement CPU cost (scan/derive on every mirrored object) | Ingest lag on modest hardware | Bounded worker budgets + protocol backpressure (§23.4); lanes put text before media (§13.2); shadow mode measures before members see anything (§27.2) |
 | Witness sparsity at N=2 (a pair cannot cross-witness meaningfully) | Equivocation detection weakened at launch scale | Consistency proofs + the anti-rollback floor + chain anchoring carry the property pairwise — the chain is the third witness a pair lacks (§12.4, §8.7); witnessing strengthens automatically as edges are added |
-| Storage growth with compact size | Operator cost | Accounting + alerts + mirror-set exclusion (§23.3); no silent eviction by design; Q7 tracks the selective tier before it is needed |
-| Jurisdictional divergence despite one charter (two operators, two legal regimes) | Same rules, different legal duties | Compliance policy *content* is charter-matched while enforcement and provenance stay per-node (§8.2 row 5); the region ladder remains node-local machinery; Q8 for the DSA formalities |
+| Storage growth with compact size | Operator cost | Per-room mirror tiers as the primary valve (§16.6), charter-floored so a cheaper posture is a stated one; accounting + alerts; no silent eviction by design — pressure stops fetching and says so |
+| A tiered mirror looks complete when it is not | Members trust an availability claim the node does not meet | Tier-relative completeness (`complete@<tier>` + un-fetched counts, §12.3); labelled absences with the origin link (§17.3); per-tier room counts in the descriptor (§9.3); the charter floor bounds what "mirrored" may mean compact-wide (§8.2 row 8) |
+| Readership leak through a tier backfill | The origin learns what a mirror's members read | Structural: no on-demand fetch exists (§16.6 rule 3), backfills are bulk and operator-triggered, and WS-V.5.7 ships a test that fails on any request made during a member-facing render of un-mirrored content |
+| Steward disappearance | The lineage can no longer author epochs; a succession fork becomes a contested race | Anchored liveness statements + a declared dormancy window computed identically by every node (§8.5); dormancy transfers no authority and quarantines nobody; §8.6 founding proceeds on arithmetic over anchored facts; accepted residual: nodes keep enforcing a frozen epoch indefinitely, which is safe but not adaptive |
+| Notice-and-action obligations unclear for mirrors | Regulatory exposure per EU operator | Both mechanisms shipped (§19.4): a public intake at every node AND the receipted referral; counsel's answer later selects which the terms point at; notifier contact details never federate |
+| Jurisdictional divergence despite one charter (two operators, two legal regimes) | Same rules, different legal duties | Compliance policy *content* is charter-matched while enforcement and provenance stay per-node (§8.2 row 5); the region ladder remains node-local machinery; the §19.4 notice intake is per-node and unconditional |
 | Anchoring key compromise | Garbage roots anchored as the victim; gas drained | The contract accepts anchors only — no value path exists (§9.7); garbage anchors contradict the node's own signed manifests (evidence, not corruption); descriptor-bound address rotation; accepted residual: gas loss |
 | Chain outage / sequencer censorship | Adoption delays; anchoring findings accumulate compact-wide | Evidence-not-liveness (decision 24): sync unaffected; adoption waits; sustained absence is itself a surfaced, escalated signal; accepted residual: finality freshness degrades, correctness does not (§7.1) |
 | Bot-farm peer floods participation | Review load + junk pressure on content homes | Charter anti-bot floor (decision 29); author-home pre-enforcement duty; per-author and per-peer budgets (§23.1); refusal-ratio findings → quarantine; no ranking influence exists to buy (§3.2) |
@@ -4206,7 +5075,11 @@ them equal). Fractional values are decimal strings (§8.1):
     "adoption_deadline_ms": null,          // genesis: nothing to migrate from
     "grace_window_days": 30,               // default for future transitions
     "change_summary": "Genesis epoch of the Licio reference lineage.",
-    "acknowledged_floor_changes": []
+    "acknowledged_floor_changes": [],
+    "steward_continuity": {                // §8.5 — the dead-steward convention
+      "liveness_interval_days": 180,       // anchored epoch or liveness statement within this window
+      "dormancy_grace_days": 30            // added before the lineage is called dormant
+    }
   },
   "steward": {
     "signing_keys": [ { "key_id": "licio-ref-steward/k1", "public_key_cose": "…" } ],
@@ -4261,6 +5134,12 @@ them equal). Fractional values are decimal strings (§8.1):
     "checkpoint_cadence_hours": { "min": 1, "max": 168, "default": 24 },
     "grace_window_days_default": 30,
     "max_mirror_share_pct_bounds": { "min": "0", "max": "50", "default": "30" },
+    "mirror_tier_floor": "text_only",    // §16.6 — the weakest tier a member may apply
+                                         //   to a room it mirrors at all
+    "steward_continuity_bounds": {       // §8.8 item 10 — bounds on the §8.5 windows
+      "liveness_interval_days": { "min": 30, "max": 365 },
+      "dormancy_grace_days":    { "min": 7,  "max": 90 }
+    },
     "anchoring": {                       // §8.7 — the compact's anchoring venue
       "chain_id": 424242,
       "anchor_contract_address": "0x…",
@@ -4285,27 +5164,38 @@ them equal). Fractional values are decimal strings (§8.1):
 ```text
 B.1  Peering (operators Ana on node A, Bo on node B)
 
-Ana ── out-of-band ──► Bo        exchange node_ids + base URLs + genesis CID
+Ana ── channel 1 ────► Bo        exchange node_ids + base URLs + genesis CID
 Ana: console "add peer"          pins {url_B, node_id_B, genesis_cid}
 Bo:  console "add peer"          pins {url_A, node_id_A, genesis_cid}
-A ── GET  /descriptor ─────► B   verify sig, node_id recomputes, pins match
+A ── GET  /descriptor ─────► B   verify sig, key binds to pinned node_id
+                                 (recompute, or succession chain §9.1)
 A ── GET  /charter/:cid* ──► B   walk epoch chain to pinned genesis (cached)
 A ── chain read (own pin) ─► ⛓   epoch anchor confirmed at depth (§8.7)
 A ── POST /handshake ──────► B   envelope; epoch equal; anchor verified;
                                  suites negotiate; B verifies symmetrically
-A ◄─────── handshake ok ─────    both record peer state = active (audited)
+A ◄─────── handshake ok ─────    both record state = pending_verification
+                                 (nothing flows; §10.3)
+both consoles: code = half(node_id_lo) ‖ half(node_id_hi)      (§10.6)
+Ana ── channel 2 ────► Bo        read the WHOLE code aloud; Bo compares
+                                 (channel 2 MUST NOT be channel 1)
+Ana, Bo: console "confirm"       match ⇒ active, audited with the code
+                                 digest + both channel values (audited)
+                                 mismatch ⇒ configured, pins CLEARED,
+                                 peer_verification_mismatch finding
 
 B.2  Bootstrap (B mirrors A)
 
 B ── sync node stream ─────► A   descriptor, enforcement checkpoints,
                                  node-scoped admin events → verified, applied
-B ── GET /rooms?cursor ────► A   signed pages → mirror set (default: all)
-per room, lanes C0→T1→M3:
+B ── GET /rooms?cursor ────► A   signed pages → mirror set + per-room tier
+                                 (default: all rooms at `full`, §16.6)
+per room, lanes C0→T1→M3 (C0 always; T1/M3 per tier):
 B ── GET checkpoint ───────► A   verify chain; store anti-rollback floor
 B ── POST /sync/exchange ──► A   wants → packs (budget-shaped, resumable)
 B: per record                    §15 stages 1–7 → admitted | held | refused
 B: admin events in log order     apply; pending-target queue for stragglers
-room done: frontier == head      console: room ✓, bytes, refusals
+room done: frontier == head      console: complete@<tier>, un-fetched count,
+                                 bytes, refusals
 all rooms + node stream done ⇒   bootstrap complete; steady-state cadence on
 
 B.3  Takedown propagation
