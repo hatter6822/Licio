@@ -139,6 +139,13 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       redis:
+        # No `--requirepass` here, unlike the compose Redis, and the difference
+        # is deliberate rather than drift. The password in docker-compose.yml
+        # guards a daemon on a DEVELOPER'S machine, which shares a LAN with
+        # other hosts; this one is a throwaway container on an isolated
+        # ephemeral runner with no such peers, and a GitHub Actions service
+        # container has no supported way to pass `command` args to the image.
+        # The code path is identical either way — REDIS_URL is just an env var.
         image: redis:7-alpine
         ports:
           - 6379:6379

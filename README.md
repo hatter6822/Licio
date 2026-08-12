@@ -278,10 +278,10 @@ Postgres/Redis integration legs to run locally:
 ```sh
 docker compose up -d
 DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
-REDIS_URL=redis://localhost:6379 \
+REDIS_URL=redis://:licio_dev@localhost:6379 \
   pnpm db:migrate
 DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
-REDIS_URL=redis://localhost:6379 \
+REDIS_URL=redis://:licio_dev@localhost:6379 \
   pnpm dev
 ```
 

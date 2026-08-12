@@ -9,7 +9,7 @@
 // Runs ONLY when REDIS_URL is set (the docker-compose dev Redis; CI's service
 // container).
 //
-//   REDIS_URL=redis://localhost:6379 pnpm test
+//   REDIS_URL=redis://:licio_dev@localhost:6379 pnpm test
 import { randomUUID } from 'node:crypto';
 import type { ContributionPublic, DebateArenaPublic } from '@licio/shared';
 import IORedis from 'ioredis';
