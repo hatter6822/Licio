@@ -462,7 +462,7 @@ defaults. `NODE_ENV` is always required (the `pnpm dev` script sets it to
 | Variable | Example | Notes |
 |----------|---------|-------|
 | `DATABASE_URL` | `postgresql://licio:licio_dev@localhost:5432/licio_dev` | Valid URL matching your Postgres (Docker default shown). Omit in dev → in-memory store |
-| `REDIS_URL` | `redis://:licio_dev@localhost:6379` | Valid URL. The compose Redis sets `--requirepass` (`REDIS_PASSWORD`, default `licio_dev`), so the URL carries that password — the empty user before the `:` is password-only auth. Omit in dev → in-memory store |
+| `REDIS_URL` | `redis://:licio_dev@localhost:6379` | Valid URL. The compose Redis sets `--requirepass` (`REDIS_PASSWORD`, default `licio_dev`), so the URL carries that password — the empty user before the `:` is password-only auth. The URL copy is userinfo and must be **percent-encoded** while `REDIS_PASSWORD` stays raw; a rotated password containing `@ / # ? :` otherwise re-splits the userinfo and the client dials a different host, surfacing as `ENOTFOUND` rather than a validation error (`.env.example` has the detail; `openssl rand -hex 32` avoids it). Omit in dev → in-memory store |
 | `NODE_ENV` | `development` | One of `development` \| `production` \| `test`; always required (no default) |
 | `CORS_ORIGIN` | `http://localhost:5173` | Browser origin allowed by CORS — must equal the web origin exactly. Dev default: `http://localhost:5173` |
 | `SESSION_SECRET` | *(32+ random chars)* | Session signing + identity master secret; **minimum 32 characters**. Generate a real one (7.5). A dev default applies when unset — never reachable in production |
