@@ -462,7 +462,7 @@ defaults. `NODE_ENV` is always required (the `pnpm dev` script sets it to
 | Variable | Example | Notes |
 |----------|---------|-------|
 | `DATABASE_URL` | `postgresql://licio:licio_dev@localhost:5432/licio_dev` | Valid URL matching your Postgres (Docker default shown). Omit in dev → in-memory store |
-| `REDIS_URL` | `redis://localhost:6379` | Valid URL. Omit in dev → in-memory store |
+| `REDIS_URL` | `redis://:licio_dev@localhost:6379` | Valid URL. The compose Redis sets `--requirepass` (`REDIS_PASSWORD`, default `licio_dev`), so the URL carries that password — the empty user before the `:` is password-only auth. Omit in dev → in-memory store |
 | `NODE_ENV` | `development` | One of `development` \| `production` \| `test`; always required (no default) |
 | `CORS_ORIGIN` | `http://localhost:5173` | Browser origin allowed by CORS — must equal the web origin exactly. Dev default: `http://localhost:5173` |
 | `SESSION_SECRET` | *(32+ random chars)* | Session signing + identity master secret; **minimum 32 characters**. Generate a real one (7.5). A dev default applies when unset — never reachable in production |
@@ -1391,7 +1391,7 @@ does (it provisions `pgvector/pgvector:pg16` + `redis:7` for that job):
 
 ```sh
 DATABASE_URL=postgresql://licio:licio_dev@localhost:5432/licio_dev \
-  REDIS_URL=redis://localhost:6379 pnpm test --coverage
+  REDIS_URL=redis://:licio_dev@localhost:6379 pnpm test --coverage
 ```
 
 Branches clear the bar by under a point, so treat a coverage drop in review as
@@ -1425,7 +1425,7 @@ pnpm test
 
 # Or pass them explicitly for one run:
 DATABASE_URL=postgresql://licio:licio_dev@localhost:5432/licio_dev \
-REDIS_URL=redis://localhost:6379 \
+REDIS_URL=redis://:licio_dev@localhost:6379 \
   pnpm test
 ```
 

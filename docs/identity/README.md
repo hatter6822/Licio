@@ -320,7 +320,7 @@ service URLs are set (skipped in CI, which has no DB/Redis):
 ```sh
 docker compose up -d postgres redis
 DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
-REDIS_URL=redis://localhost:6379 \
+REDIS_URL=redis://:licio_dev@localhost:6379 \
   pnpm test
 ```
 

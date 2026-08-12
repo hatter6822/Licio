@@ -28,7 +28,7 @@ connection URLs (see the README "Quick start"):
 ```bash
 docker compose up -d
 DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
-REDIS_URL=redis://localhost:6379 pnpm dev
+REDIS_URL=redis://:licio_dev@localhost:6379 pnpm dev
 ```
 
 ## Branch & PR Workflow

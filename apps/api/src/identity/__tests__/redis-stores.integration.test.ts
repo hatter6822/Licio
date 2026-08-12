@@ -5,7 +5,7 @@
 // there.  Validates the production Redis adapters against the same interfaces the
 // in-memory stores satisfy.
 //
-//   REDIS_URL=redis://localhost:6379 pnpm test
+//   REDIS_URL=redis://:licio_dev@localhost:6379 pnpm test
 //
 // Cleanup is scoped to THIS run's own key prefixes.  It used to be
 // `redis.flushdb()` in `beforeEach`, which wiped the WHOLE database — including
