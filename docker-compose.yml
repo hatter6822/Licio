@@ -42,7 +42,25 @@ services:
     # what keeps a future `docker run -p` or a compose override from silently
     # re-opening an UNAUTHENTICATED store. Anything reaching this port must now
     # present a credential.
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass "${REDIS_PASSWORD:-licio_dev}"
+    # LIST form rather than the string form, and the password gets its own
+    # element. The string form is shell-split after interpolation, which EATS A
+    # BACKSLASH: a `a\b` password reaches redis-server as `ab` while
+    # REDISCLI_AUTH below keeps `a\b` verbatim, so the server and its own
+    # healthcheck disagree about the credential and the container never turns
+    # healthy — a failure that points at Redis rather than at the password.
+    # A list element is one argv slot and is never re-split. (Spaces survive
+    # either form; a double quote breaks BOTH at YAML parse, which no command
+    # form can fix — .env.example's `openssl rand -hex 32` is the answer there.)
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - "${REDIS_PASSWORD:-licio_dev}"
     environment:
       # redis-cli reads REDISCLI_AUTH itself, so the healthcheck below stays
       # byte-identical to the unauthenticated one instead of growing an `-a`
