@@ -21,7 +21,7 @@
 // Run when DATABASE_URL / REDIS_URL are set (CI's service containers):
 //
 //   DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
-//   REDIS_URL=redis://localhost:6379 pnpm test
+//   REDIS_URL=redis://:licio_dev@localhost:6379 pnpm test
 import { randomUUID } from 'node:crypto';
 import {
   createDbClient,

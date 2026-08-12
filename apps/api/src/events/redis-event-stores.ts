@@ -73,7 +73,16 @@ export class RedisSlidingWindowStore implements SlidingWindowStore {
   async nthOldest(key: string, nowMs: number, windowMs: number, k: number): Promise<number | null> {
     const redisKey = `${this.#prefix}${key}`;
     await this.#redis.zremrangebyscore(redisKey, 0, nowMs - windowMs);
-    const entry = await this.#redis.zrange(redisKey, k, k, 'WITHSCORES');
+    // The indices are passed as STRINGS, which is not stylistic: ioredis 6.0.0
+    // types `zrange` as (start: string | Buffer | number, stop: string |
+    // Buffer) — `number` is accepted for the start of the range and not for
+    // its end. That asymmetry is an upstream codegen slip rather than an API
+    // change; the sibling `zremrangebyscore` two lines up still takes
+    // `number | string` on BOTH sides. Strings satisfy 5.x and 6.x alike and
+    // are runtime-identical either way, since RESP serialises every argument
+    // to a bulk string before it reaches Redis. Do not "tidy" these back to
+    // bare numbers — that is precisely what fails to compile under 6.x.
+    const entry = await this.#redis.zrange(redisKey, String(k), String(k), 'WITHSCORES');
     const score = entry[1];
     return score === undefined ? null : Number(score);
   }
