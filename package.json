@@ -64,8 +64,8 @@
     "dev:stop": "tsx scripts/free-dev-ports.ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.9",
-    "@types/node": "^26.2.0",
+    "@biomejs/biome": "^2.5.11",
+    "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "^4.1.11",
     "lefthook": "^2.1.10",
     "libpg-query": "^17.7.4",
