@@ -25,9 +25,9 @@
     "@noble/curves": "2.0.1",
     "@noble/hashes": "2.4.0",
     "ts-mls": "^1.6.4",
-    "zod": "^4.4.3"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/node": "^26.4.0"
+    "@types/node": "^26.6.2"
   }
 }
