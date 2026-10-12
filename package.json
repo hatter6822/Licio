@@ -64,15 +64,15 @@
     "dev:stop": "tsx scripts/free-dev-ports.ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.11",
-    "@types/node": "^26.4.0",
+    "@biomejs/biome": "^2.5.15",
+    "@types/node": "^26.6.4",
     "@vitest/coverage-v8": "^4.1.11",
-    "lefthook": "^2.1.10",
+    "lefthook": "^2.2.1",
     "libpg-query": "^17.7.4",
-    "node-html-parser": "^9.0.1",
+    "node-html-parser": "^9.0.4",
     "parse5": "^8.0.1",
     "tailwindcss": "4.3.3",
-    "tsx": "^4.23.12",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }
