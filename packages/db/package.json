@@ -17,11 +17,11 @@
   },
   "dependencies": {
     "@licio/shared": "workspace:*",
-    "drizzle-orm": "^0.45.2",
+    "drizzle-orm": "^0.45.4",
     "postgres": "^3.4.9"
   },
   "devDependencies": {
-    "@types/node": "^26.4.0",
-    "drizzle-kit": "^0.31.10"
+    "@types/node": "^26.6.5",
+    "drizzle-kit": "^0.31.11"
   }
 }
